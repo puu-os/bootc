@@ -1,0 +1,13 @@
+config BR2_PACKAGE_PLYMOUTH
+	bool "plymouth"
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_CAIRO
+	select BR2_PACKAGE_FREETYPE
+	select BR2_PACKAGE_LIBDRM
+	select BR2_PACKAGE_LIBPNG
+	select BR2_PACKAGE_PANGO
+	help
+	  Plymouth provides a graphical boot animation while
+	  the boot process happens in the background.
+
+	  https://gitlab.freedesktop.org/plymouth/plymouth

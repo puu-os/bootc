@@ -1,0 +1,14 @@
+config BR2_PACKAGE_GEOCODE_GLIB
+	bool "geocode-glib"
+	depends on BR2_PACKAGE_LIBSOUP3
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBGLIB2
+	help
+	  Convenience library for the geocoding (finding longitude
+	  and latitude from an address) and reverse geocoding
+	  (finding an address from coordinates) using the Nominatim
+	  service. Used by GNOME for the Map application and by
+	  components such as gnome-settings-daemon for night-light
+	  scheduling.
+
+	  https://gitlab.gnome.org/GNOME/geocode-glib

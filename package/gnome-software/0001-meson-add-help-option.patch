@@ -1,0 +1,25 @@
+--- a/help/meson.build
++++ b/help/meson.build
+@@ -28,8 +28,10 @@
+   'figures/scalable/symbolic/webpage-symbolic.svg',
+ ]
+ 
+-gnome.yelp (meson.project_name (),
+-            sources: help_files,
+-            media: help_media,
+-            symlink_media: true,
+-)
++if get_option('help')
++  gnome.yelp (meson.project_name (),
++              sources: help_files,
++              media: help_media,
++              symlink_media: true,
++  )
++endif
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -27,3 +27,4 @@
+ # FIXME Switch the systemd-sysupdate option to true by default once
+ # systemd-sysupdate and Software's matching plugin are deemed mature enough.
+ option('systemd-sysupdate', type : 'boolean', value : false, description : 'enable systemd-sysupdate support')
++option('help', type : 'boolean', value : true, description : 'build user help')

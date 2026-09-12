@@ -1,0 +1,11 @@
+--- a/gnome-session/leader-systemd.c
++++ b/gnome-session/leader-systemd.c
+@@ -308,7 +308,7 @@
+ 
+         if (systemd_unit_is_active (ctx.session_bus, "graphical-session.target", &error))
+                 g_error ("A graphical session is already running!");
+-        if (error != NULL)
++        if (error != NULL && !g_getenv ("RUNNING_UNDER_GDM"))
+                 g_warning ("Failed to check if a graphical session is running: %s",
+                            error->message);
+         g_clear_error (&error);

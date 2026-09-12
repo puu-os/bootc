@@ -1,0 +1,10 @@
+--- a/NEWS
++++ b/NEWS
+@@ -78,7 +78,6 @@
+    and lower peak memory use when processing YAML. It also allows for future
+    memory optimizations.
+    Parsing a more restricted set of YAML may also help security.
+-
+  * This release also seals some internal libappstream-compose API
+    that was public for a while for use by appstream-generator.
+    It has no users anymore and should not have been public. This is one

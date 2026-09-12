@@ -1,0 +1,28 @@
+config BR2_PACKAGE_GDM
+	bool "gdm"
+	depends on BR2_PACKAGE_ACCOUNTSSERVICE
+	depends on BR2_PACKAGE_GNOME_SHELL
+	depends on BR2_PACKAGE_GNOME_SESSION
+	depends on BR2_PACKAGE_LINUX_PAM
+	depends on BR2_INIT_SYSTEMD
+	depends on BR2_TOOLCHAIN_HAS_SYNC_4 # xwayland
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_DCONF
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_SYSTEMD_LOGIND
+	# gdm dynamically registers gdm-greeter via systemd-userdbd.
+	select BR2_PACKAGE_SYSTEMD_USERDB
+	help
+	  GDM is the GNOME Display Manager.  It runs the graphical
+	  login chain on Wayland or X11, hands off to gnome-session
+	  on success, and drives the lock screen.
+
+	  https://gitlab.gnome.org/GNOME/gdm
+
+comment "gdm needs systemd and a toolchain w/ 4-byte atomics"
+	depends on BR2_PACKAGE_ACCOUNTSSERVICE
+	depends on BR2_PACKAGE_GNOME_SHELL
+	depends on BR2_PACKAGE_GNOME_SESSION
+	depends on BR2_PACKAGE_LINUX_PAM
+	depends on !BR2_INIT_SYSTEMD || \
+		!BR2_TOOLCHAIN_HAS_SYNC_4

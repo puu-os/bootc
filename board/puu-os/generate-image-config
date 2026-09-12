@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import uuid
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
+    parser.add_argument("--epoch", type=int, required=True)
+    parser.add_argument("--template", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cmdline", required=True)
+    parser.add_argument("--cmdline-output", type=Path, required=True)
+    parser.add_argument("inputs", type=Path, nargs="+")
+    args = parser.parse_args()
+    if not 0 <= args.epoch <= 0xFFFFFFFF:
+        parser.error("epoch must fit an unsigned 32-bit filesystem timestamp")
+
+    template = args.template.read_text()
+    digest = hashlib.sha256(json.dumps(
+        [args.arch, args.epoch, template, args.cmdline], separators=(",", ":")
+    ).encode())
+    for path in args.inputs:
+        with path.open("rb") as source:
+            digest.update(hashlib.file_digest(source, "sha256").digest())
+    identity = uuid.uuid5(uuid.NAMESPACE_URL,
+                          f"https://gitlab.com/puu-os/bootc/live-image/{digest.hexdigest()}")
+    values = {name: str(uuid.uuid5(identity, name.lower())) for name in (
+        "DISK_UUID", "BOOT_PARTUUID", "LIVE_PARTUUID", "PAYLOAD_PARTUUID",
+        "LIVE_UUID", "PAYLOAD_UUID", "LIVE_HASH_SEED", "PAYLOAD_HASH_SEED",
+    )}
+    values["EFI_VOLUME_ID"] = uuid.uuid5(identity, "efi-volume-id").hex[:8]
+    values["OUTPUT_IMG"] = f"puu_{args.arch}.img"
+    for output, text in ((args.output, template), (args.cmdline_output, args.cmdline)):
+        for name, value in values.items():
+            text = text.replace(f"@{name}@", value)
+        if re.search(r"@[A-Z_]+@", text):
+            parser.error(f"unresolved image placeholder in {output}")
+        output.write_text(text)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,23 @@
+--- a/gnome-settings-daemon/gnome-settings-systemd.c
++++ b/gnome-settings-daemon/gnome-settings-systemd.c
+@@ -45,0 +46,10 @@
++static gboolean
++is_missing_unit_error (GError *error)
++{
++        g_autofree char *remote_error = NULL;
++
++        remote_error = g_dbus_error_get_remote_error (error);
++
++        return g_strcmp0 (remote_error, "org.freedesktop.systemd1.NoSuchUnit") == 0;
++}
++
+@@ -58,0 +69,5 @@
++        if (error && !data->running && is_missing_unit_error (error)) {
++                g_task_return_boolean (task, TRUE);
++                return;
++        }
++
+@@ -79,0 +95,3 @@
++
++        if (error && !data->running && is_missing_unit_error (error))
++                return;

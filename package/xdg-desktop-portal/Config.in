@@ -1,0 +1,17 @@
+config BR2_PACKAGE_XDG_DESKTOP_PORTAL
+	bool "xdg-desktop-portal"
+	depends on BR2_PACKAGE_FLATPAK
+	depends on BR2_PACKAGE_PIPEWIRE
+	depends on BR2_PACKAGE_GST1_PLUGINS_BASE
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_GDK_PIXBUF
+	select BR2_PACKAGE_LIBFUSE3
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBGUDEV
+	select BR2_PACKAGE_JSON_GLIB
+	help
+	  A portal frontend service providing file chooser, screen
+	  cast, remote desktop, and other desktop integration portals
+	  for Flatpak and non-Flatpak applications.
+
+	  https://github.com/flatpak/xdg-desktop-portal

@@ -1,0 +1,18 @@
+config BR2_PACKAGE_GNOME_SESSION
+	bool "gnome-session"
+	depends on BR2_INIT_SYSTEMD
+	depends on BR2_PACKAGE_LIBGTK3
+	depends on BR2_PACKAGE_PYTHON3 # gobject-introspection
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_GNOME_DESKTOP
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_XKEYBOARD_CONFIG
+	help
+	  gnome-session is the GNOME session manager.  It is responsible
+	  for orchestrating the user's desktop session: starting
+	  gnome-shell, gnome-settings-daemon, the xdg autostart entries,
+	  and arbitrating session-end (logout, shutdown, suspend).
+
+	  https://gitlab.gnome.org/GNOME/gnome-session

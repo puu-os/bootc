@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Reconcile system Flatpaks against the Puu manifest
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/puu-os/flatpak-sync
+Restart=on-failure
+RestartSec=5min

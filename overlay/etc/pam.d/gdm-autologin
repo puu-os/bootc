@@ -1,0 +1,11 @@
+#%PAM-1.0
+
+auth     requisite                 pam_nologin.so
+auth     required                  pam_succeed_if.so user = puu quiet
+auth     optional                  pam_gdm.so
+auth     required                  pam_permit.so
+
+account  include                   system-auth
+password required                  pam_deny.so
+session  include                   system-auth
+session  required                  pam_systemd.so

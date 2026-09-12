@@ -1,0 +1,19 @@
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -3597,11 +3597,11 @@ ibus.gresources.xml: ibus.gresources.xml.in
+ 	$< > $@.tmp && \
+ 	mv $@.tmp $@
+ 
+-compose/sequences-$(ENDIAN)-endian: gen-internal-compose-table
+-	$(AM_V_GEN) $(MKDIR_P) $(builddir)/compose && \
+-	$(builddir)/gen-internal-compose-table && \
+-	mv $(builddir)/sequences-big-endian $(builddir)/compose && \
+-	mv $(builddir)/sequences-little-endian $(builddir)/compose
++compose/sequences-$(ENDIAN)-endian:
++	$(AM_V_GEN) if test ! -f "$@"; then \
++		$(MKDIR_P) "$(@D)" && \
++		cp "$(srcdir)/$@" "$@"; \
++	fi
+ 
+ ibusresources.h: ibus.gresources.xml compose/sequences-$(ENDIAN)-endian
+ 	$(AM_V_GEN) $(GLIB_COMPILE_RESOURCES) --generate-header --internal \

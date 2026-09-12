@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Stage a bootc upgrade and surface a reboot prompt
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/puu-os/bootc-upgrade
+Restart=on-failure
+RestartSec=5min

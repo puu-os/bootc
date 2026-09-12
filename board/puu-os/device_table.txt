@@ -1,0 +1,11 @@
+/usr/bin/gnome-keyring-daemon f 755 0 0 - - - - -
+|xattr cap_ipc_lock+eip
+/etc/usbguard/rules.d d 700 0 0 - - - - -
+/var/empty d 755 0 0 - - - - -
+/var/www r -1 www-data www-data - - - - -
+/var/spool/lpd r -1 lp lp - - - - -
+/run/dbus r -1 dbus dbus - - - - -
+/var/lib/gdm d 755 gdm gdm - - - - -
+/var/lib/gdm r -1 gdm gdm - - - - -
+/var/lib/gdm/.config d 700 gdm gdm - - - - -
+/var/lib/gdm/.config/pulse d 700 gdm gdm - - - - -

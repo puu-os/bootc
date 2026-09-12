@@ -1,0 +1,12 @@
+config BR2_PACKAGE_LIBREST
+	bool "librest"
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBSOUP3
+	select BR2_PACKAGE_LIBXML2
+	help
+	  GLib-based library for accessing RESTful web services,
+	  providing the rest-1.0 API consumed by the goa-backend
+	  helpers in gnome-online-accounts.
+
+	  https://gitlab.gnome.org/GNOME/librest

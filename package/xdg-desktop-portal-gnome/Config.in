@@ -1,0 +1,15 @@
+config BR2_PACKAGE_XDG_DESKTOP_PORTAL_GNOME
+	bool "xdg-desktop-portal-gnome"
+	depends on BR2_PACKAGE_XDG_DESKTOP_PORTAL
+	depends on BR2_PACKAGE_GNOME_DESKTOP
+	depends on BR2_PACKAGE_LIBADWAITA
+	depends on BR2_PACKAGE_LIBGTK4
+	depends on BR2_PACKAGE_MUTTER
+	select BR2_PACKAGE_FONTCONFIG
+	select BR2_PACKAGE_GSETTINGS_DESKTOP_SCHEMAS
+	help
+	  GNOME back-end implementation for xdg-desktop-portal
+	  providing screen cast, remote desktop, background apps,
+	  and screenshot portals.
+
+	  https://gitlab.gnome.org/GNOME/xdg-desktop-portal-gnome

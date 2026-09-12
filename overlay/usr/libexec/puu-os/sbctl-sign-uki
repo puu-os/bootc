@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+from pathlib import Path
+import subprocess
+import sys
+
+ALLOWLIST_PATTERNS = [
+    "EFI/Linux/*.efi",
+    "EFI/PUU/*.efi",
+    "EFI/systemd/systemd-bootx64.efi",
+    "EFI/systemd/systemd-bootaa64.efi",
+    "EFI/BOOT/BOOTX64.EFI",
+    "EFI/BOOT/BOOTAA64.EFI",
+]
+
+
+def main() -> None:
+    efi_dir = Path("/efi")
+    sbctl_bin = "sbctl"
+
+    files = sorted(
+        {path for pattern in ALLOWLIST_PATTERNS for path in efi_dir.glob(pattern) if path.is_file()}
+    )
+    if not files:
+        sys.exit("sbctl-sign-uki: no files matched any allowlist pattern under /efi")
+
+    for path in files:
+        subprocess.run([sbctl_bin, "sign", "-s", str(path)], check=True)
+
+
+if __name__ == "__main__":
+    main()

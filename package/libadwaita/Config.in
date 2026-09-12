@@ -1,0 +1,20 @@
+config BR2_PACKAGE_LIBADWAITA
+	bool "libadwaita"
+	depends on BR2_PACKAGE_LIBGTK4
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_PYTHON3 # gobject-introspection
+	select BR2_PACKAGE_APPSTREAM
+	select BR2_PACKAGE_LIBFRIBIDI
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_GOBJECT_INTROSPECTION
+	help
+	  Building blocks for modern GNOME applications following
+	  the GNOME HIG.  Provides AdwApplication, responsive widgets,
+	  and adaptive UI primitives.
+
+	  https://gitlab.gnome.org/GNOME/libadwaita
+
+comment "libadwaita needs python3"
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LIBGTK4
+	depends on !BR2_PACKAGE_PYTHON3

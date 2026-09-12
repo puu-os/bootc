@@ -1,0 +1,13 @@
+[Unit]
+Description=Configure puu live session (live-mode only)
+ConditionKernelCommandLine=puu.live
+After=systemd-tmpfiles-setup.service local-fs.target
+Before=display-manager.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/puu-os/live-setup.sh
+
+[Install]
+WantedBy=multi-user.target

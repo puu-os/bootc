@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Watch for pending bootc upgrades
+
+[Path]
+PathChanged=/run/puu-os/upgrade-pending
+
+[Install]
+WantedBy=default.target
