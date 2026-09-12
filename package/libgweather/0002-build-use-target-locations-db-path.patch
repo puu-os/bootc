@@ -1,0 +1,13 @@
+--- a/meson.build
++++ b/meson.build
+@@ -52,10 +52,7 @@ build_gir = get_option('introspection') and g_ir_scanner.found()
+ build_docs = get_option('gtk_doc') and build_gir
+ 
+-locations_bin = dependency('gweather-locations').get_variable(
+-  pkgconfig: 'locations_db',
+-  default_value: get_option('prefix') / get_option('libdir') / 'gweather-locations/Locations.bin',
+-)
++locations_bin = get_option('prefix') / get_option('libdir') / 'gweather-locations/Locations.bin'
+ 
+ schemas_srcdir = meson.project_source_root() / 'schemas'
+ schemas_builddir = meson.project_build_root() / 'schemas'

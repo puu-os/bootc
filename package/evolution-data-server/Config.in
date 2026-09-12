@@ -1,0 +1,19 @@
+config BR2_PACKAGE_EVOLUTION_DATA_SERVER
+	bool "evolution-data-server"
+	depends on BR2_PACKAGE_LIBSOUP3
+	depends on BR2_PACKAGE_LIBNSS
+	depends on BR2_PACKAGE_LIBSECRET
+	select BR2_PACKAGE_ICU
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBICAL
+	select BR2_PACKAGE_LIBNSPR
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_LIBXSLT
+	select BR2_PACKAGE_SQLITE
+	help
+	  Address book and calendar back-ends used by GNOME (gnome-shell
+	  consumes libecal-2.0 / libedataserver-1.2 for the calendar
+	  widget).
+
+	  https://gitlab.gnome.org/GNOME/evolution-data-server

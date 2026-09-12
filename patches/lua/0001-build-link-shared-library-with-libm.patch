@@ -1,0 +1,5 @@
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -72 +72 @@
+-	$(CC) -o $@.$(PKG_VERSION) -shared -Wl,-soname="$@.$(PKG_VERSION)" $?
++	$(CC) -o $@.$(PKG_VERSION) -shared -Wl,-soname="$@.$(PKG_VERSION)" $? -lm

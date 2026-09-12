@@ -1,0 +1,27 @@
+--- a/src/DBus/gdbus-server.cpp
++++ b/src/DBus/gdbus-server.cpp
+@@ -145,0 +146,13 @@
++
++  try {
++    dbus_bridge = new usbguard::DBusBridge(connection, handle_usbguard_ipc_state);
++    dbus_bridge->connect();
++  }
++  catch (...) {
++    dbus_bridge = nullptr;
++    std::cerr << "Unable to connect the USBGuard DBus Bridge." << std::endl;
++    g_main_loop_quit(main_loop);
++    global_ret = EXIT_FAILURE;
++    return;
++  }
++
+@@ -185,10 +197,0 @@
+-  try {
+-    dbus_bridge = new usbguard::DBusBridge(connection);
+-    handle_usbguard_ipc_state(/*state=*/false);
+-  }
+-  catch (...) {
+-    dbus_bridge = nullptr;
+-    std::cerr << "Unable to create the USBGuard DBus Bridge." << std::endl;
+-    g_main_loop_quit(main_loop);
+-    global_ret = EXIT_FAILURE;
+-  }

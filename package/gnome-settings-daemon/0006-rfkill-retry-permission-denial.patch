@@ -1,0 +1,50 @@
+--- a/plugins/rfkill/rfkill-glib.c
++++ b/plugins/rfkill/rfkill-glib.c
+@@ -62,0 +63,2 @@
++	guint open_retry_id;
++	guint open_retry_count;
+@@ -77,0 +80 @@
++#define OPEN_RETRY_MAX 30
+@@ -426,0 +430,23 @@
++
++static gboolean
++retry_open (gpointer user_data)
++{
++	CcRfkillGlib *rfkill = CC_RFKILL_GLIB (user_data);
++	g_autoptr(GError) error = NULL;
++
++	if (_cc_rfkill_glib_open (rfkill, &error)) {
++		cc_rfkill_glib_set_rfkill_input_inhibited (rfkill, rfkill->noinput);
++		rfkill->open_retry_id = 0;
++		return G_SOURCE_REMOVE;
++	}
++
++	if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED) &&
++	    ++rfkill->open_retry_count < OPEN_RETRY_MAX)
++		return G_SOURCE_CONTINUE;
++
++	rfkill->open_retry_id = 0;
++
++	g_warning ("Could not open rfkill device: %s", error->message);
++
++	return G_SOURCE_REMOVE;
++}
+@@ -451,4 +477,12 @@
+-		if (!_cc_rfkill_glib_open (rfkill, &error))
+-			g_warning ("Could not open rfkill device: %s", error->message);
+-		else
+-			g_debug ("Opened rfkill device after uevent");
++		if (rfkill->open_retry_id == 0) {
++			if (!_cc_rfkill_glib_open (rfkill, &error)) {
++				if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED)) {
++					rfkill->open_retry_count = 0;
++					rfkill->open_retry_id = g_timeout_add_seconds (1, retry_open, rfkill);
++				} else {
++					g_warning ("Could not open rfkill device: %s", error->message);
++				}
++			} else {
++				g_debug ("Opened rfkill device after uevent");
++			}
++		}
+@@ -587,0 +622 @@
++	g_clear_handle_id (&rfkill->open_retry_id, g_source_remove);

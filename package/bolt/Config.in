@@ -1,0 +1,19 @@
+config BR2_PACKAGE_BOLT
+	bool "bolt"
+	depends on BR2_PACKAGE_SYSTEMD
+	depends on BR2_USE_MMU # libglib2, polkit
+	depends on BR2_USE_WCHAR # libglib2, libgudev
+	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2, libgudev
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBGUDEV
+	select BR2_PACKAGE_POLKIT
+	help
+	  Thunderbolt 3 and USB4 device manager daemon used by GNOME
+	  Shell for device enrollment and authorization.
+
+	  https://gitlab.freedesktop.org/bolt/bolt
+
+comment "bolt needs systemd and a toolchain w/ wchar, threads"
+	depends on BR2_USE_MMU
+	depends on !BR2_PACKAGE_SYSTEMD || !BR2_USE_WCHAR || \
+		!BR2_TOOLCHAIN_HAS_THREADS

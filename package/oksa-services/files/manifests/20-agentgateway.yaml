@@ -1,0 +1,22 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: agentgateway
+  namespace: kube-system
+spec:
+  chart: oci://cr.agentgateway.dev/charts/agentgateway@sha256:76b68d7e83dde4ca5ff614e7dd073b32d9f834b83c0ecd59d1c7d7b732cb1111
+  version: v1.2.0
+  targetNamespace: agentgateway-system
+  createNamespace: true
+  valuesContent: |-
+    controller:
+      image:
+        tag: v1.2.0@sha256:3a1b71f13ee17987ae02bba5c5fec5ea0cdf6c6bbf8d2b6a216583dae47675d1
+        pullPolicy: IfNotPresent
+      extraEnv:
+        KGW_ENABLE_GATEWAY_API_EXPERIMENTAL_FEATURES: "true"
+    proxy:
+      image:
+        tag: v1.2.0@sha256:77097173123fb72f568f7efeea109962837465c956a54a25d538611399de1d4f
+    inferenceExtension:
+      enabled: true

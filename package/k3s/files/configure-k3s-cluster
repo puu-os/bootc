@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Configure Puu k3s cluster node")
+    parser.add_argument("--role", choices=["server", "agent"], default="server")
+    parser.add_argument("--server-url", default="")
+    parser.add_argument("--token-file", type=Path, default=None)
+    parser.add_argument("--node-name", default="")
+
+    args = parser.parse_args(argv)
+    if args.role == "agent":
+        if not args.server_url or not args.token_file:
+            parser.error("agent role requires --server-url and --token-file")
+    return args
+
+
+def read_token(token_file: Path) -> str:
+    if not token_file.is_file():
+        sys.exit(f"error: token file not found: {token_file}")
+    for line in token_file.read_text(encoding="utf-8").splitlines():
+        token = line.strip()
+        if token:
+            return token
+    sys.exit(f"error: token file is empty: {token_file}")
+
+
+def generate_env(role: str, server_url: str, token: str, node_name: str) -> str:
+    default_env = Path("/usr/lib/systemd/system/k3s.service.env")
+    default_lines = default_env.read_text(encoding="utf-8").splitlines()
+    if role == "server":
+        lines = [line for line in default_lines if line.strip()]
+    else:
+        lines = [
+            "K3S_EXEC=agent",
+            f"K3S_URL={server_url}",
+            f"K3S_TOKEN={token}",
+            *(line for line in default_lines if line.startswith("PATH=")),
+        ]
+    if node_name:
+        lines.append(f"K3S_NODE_NAME={node_name}")
+    return "\n".join(lines) + "\n"
+
+
+def write_atomic(path: Path, content: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, encoding="utf-8") as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    tmp_path.chmod(mode)
+    tmp_path.replace(path)
+
+
+
+def atomic_symlink(target: Path, link_path: Path) -> None:
+    tmp_link = link_path.with_name(f"{link_path.name}.tmp.{os.getpid()}")
+    tmp_link.unlink(missing_ok=True)
+    try:
+        tmp_link.symlink_to(target)
+        tmp_link.replace(link_path)
+    except OSError:
+        if link_path.is_symlink() or link_path.exists():
+            link_path.unlink()
+        link_path.symlink_to(target)
+    finally:
+        tmp_link.unlink(missing_ok=True)
+
+
+def main() -> None:
+    args = parse_args(sys.argv[1:])
+
+    token = ""
+    if args.role == "agent":
+        token = read_token(args.token_file)
+
+    env_content = generate_env(args.role, args.server_url, token, args.node_name)
+
+    env_dir = Path("/etc/rancher/k3s")
+    env_path = env_dir / "puu-cluster.env"
+    write_atomic(env_path, env_content, mode=0o600)
+
+    systemd_dir = Path("/etc/systemd/system")
+    systemd_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    atomic_symlink(env_path, systemd_dir / "k3s.service.env")
+
+    systemctl = Path("/usr/bin/systemctl")
+    if systemctl.is_file() and os.access(systemctl, os.X_OK):
+        subprocess.run([str(systemctl), "daemon-reload"], check=False)
+
+
+if __name__ == "__main__":
+    main()

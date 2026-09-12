@@ -1,0 +1,30 @@
+config BR2_PACKAGE_GNOME_KEYRING
+	bool "gnome-keyring"
+	depends on BR2_INIT_SYSTEMD
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS # libgcrypt -> libgpg-error
+	depends on BR2_PACKAGE_LINUX_PAM
+	depends on BR2_USE_WCHAR # libglib2
+	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2
+	depends on BR2_USE_MMU # libglib2
+	depends on !BR2_STATIC_LIBS # p11-kit, linux-pam
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_GCR3
+	select BR2_PACKAGE_LIBCAP_NG
+	select BR2_PACKAGE_LIBGCRYPT
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_P11_KIT
+	help
+	  GNOME Keyring stores passwords and other secrets and
+	  implements the freedesktop.org Secret Service D-Bus API
+	  (org.freedesktop.secrets), together with a PAM module that
+	  unlocks the login keyring at login.
+
+	  https://gitlab.gnome.org/GNOME/gnome-keyring
+
+comment "gnome-keyring needs systemd and a toolchain w/ wchar, threads, dynamic library"
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LINUX_PAM
+	depends on BR2_USE_MMU
+	depends on !BR2_INIT_SYSTEMD || \
+		!BR2_USE_WCHAR || !BR2_TOOLCHAIN_HAS_THREADS || \
+		BR2_STATIC_LIBS

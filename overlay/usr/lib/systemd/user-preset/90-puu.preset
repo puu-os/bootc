@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+disable localsearch-3.service
+disable localsearch-control-3.service
+disable localsearch-writeback-3.service
+enable puu-bootc-notify.path
+enable puu-bootc-notify.service
+enable dbus.socket
+enable pipewire.socket
+enable pipewire-pulse.socket
+enable wireplumber.service

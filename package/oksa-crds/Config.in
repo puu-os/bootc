@@ -1,0 +1,4 @@
+config BR2_PACKAGE_OKSA_CRDS
+	bool
+	help
+	  Kubernetes CRDs used by oksa services.

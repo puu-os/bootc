@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+root = true
+
+[*]
+end_of_line = lf
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.sh]
+indent_style = space
+indent_size = 2
+tab_width = 2
+
+# Extensionless shell scripts (shebang only).
+[{overlay/usr/libexec/puu-os/*,overlay/usr/lib/puu-os/*,package/*/files/bin/*,package/*/files/configure-k3s-cluster,package/*/files/wait-default-route}]
+indent_style = space
+indent_size = 2
+tab_width = 2
+
+[*.py]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+[*.tcss]
+indent_style = space
+indent_size = 4
+
+[*.toml]
+indent_style = space
+indent_size = 4
+
+[*.{plymouth,script}]
+indent_style = space
+indent_size = 4
+
+[*.{mk,Makefile}]
+indent_style = tab
+indent_size = 8

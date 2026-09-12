@@ -1,0 +1,14 @@
+config BR2_PACKAGE_GNOME_BLUETOOTH
+	bool "gnome-bluetooth"
+	depends on BR2_PACKAGE_LIBADWAITA
+	depends on BR2_PACKAGE_LIBGTK4
+	select BR2_PACKAGE_GSOUND
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBNOTIFY
+	select BR2_PACKAGE_UPOWER
+	help
+	  GNOME Bluetooth pairing/management library and panel widgets
+	  (gnome-bluetooth-3.0 / gnome-bluetooth-ui-3.0) used by
+	  gnome-control-center.
+
+	  https://gitlab.gnome.org/GNOME/gnome-bluetooth

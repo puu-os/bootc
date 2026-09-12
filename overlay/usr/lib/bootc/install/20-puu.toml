@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+# Configure default filesystem and disable discoverable partitions.
+
+[install]
+root-fs-type = "xfs"
+discoverable-partitions = false

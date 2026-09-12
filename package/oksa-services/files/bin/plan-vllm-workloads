@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import dataclasses
+import json
+import os
+from pathlib import Path
+import sys
+import textwrap
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_serving as ms
+
+
+@dataclasses.dataclass
+class PlannedWorkload:
+    spec: ms.ModelSpec
+    serving_mode: str
+    gpu_memory_utilization: str
+    resource_gpus: int
+    replicas: int
+    assigned_gpu_devices: str
+    interconnect_selector: str
+    shared_reserved_mib: int
+    app_name: str
+    model_label: str
+    model_node_label: str
+
+
+
+class PlanError(Exception):
+    pass
+
+
+def _match_expr(key: str, val: str, indent: str = "                  ") -> list[str]:
+    return [
+        f"{indent}- key: {key}",
+        f"{indent}  operator: In",
+        f"{indent}  values:",
+        f'{indent}    - "{val}"',
+    ]
+
+
+def warn(msg: str) -> None:
+    sys.stderr.write(f"plan-vllm-workloads: {msg}\n")
+
+
+def serving_mode_for_model(requested_mode: str, sharing_policy: str) -> str:
+    if requested_mode == "shared-gpu":
+        return "shared-gpu" if sharing_policy == "allow" else "exclusive-gpu"
+    if requested_mode in ("exclusive-gpu", "replicated", "topology-parallel"):
+        return requested_mode
+    return "shared-gpu"
+
+
+def utilization_from_budget(budget_mib: int, gpu_memory_mib: int) -> str:
+    if gpu_memory_mib <= 0:
+        return "0.70"
+    permille = (budget_mib * 1000) // gpu_memory_mib
+    if permille < 50:
+        permille = 50
+    elif permille > 950:
+        permille = 950
+    return f"0.{permille:03d}"
+
+
+def write_node_affinity(
+    mode: str,
+    model_node_label: str,
+    interconnect_selector: str,
+    allow_fast_nic_fallback: bool,
+    app_name: str,
+) -> str:
+    lines = [
+        "      affinity:",
+        "        nodeAffinity:",
+        "          requiredDuringSchedulingIgnoredDuringExecution:",
+        "            nodeSelectorTerms:",
+        "              - matchExpressions:",
+    ]
+    req_keys = [
+        "puu.ai/model-serving-ready",
+        "puu.ai/cuda-ready",
+        "puu.ai/cdi-ready",
+        model_node_label,
+    ]
+    if interconnect_selector == "topology":
+        req_keys.append("puu.ai/topology-parallel-capable")
+    elif interconnect_selector == "fast-nic":
+        req_keys.append("puu.ai/fast-nic-present")
+    for k in req_keys:
+        lines.extend(_match_expr(k, "true"))
+
+    lines.append("          preferredDuringSchedulingIgnoredDuringExecution:")
+    prefs = [(100, "puu.ai/nvlink-present"), (75, "puu.ai/fast-gpu-interconnect")]
+    if allow_fast_nic_fallback:
+        prefs.append((25, "puu.ai/fast-nic-present"))
+    for weight, key in prefs:
+        lines.extend([
+            f"            - weight: {weight}",
+            "              preference:",
+            "                matchExpressions:",
+            *_match_expr(key, "true"),
+        ])
+
+    if mode == "replicated":
+        lines.extend([
+            "        podAntiAffinity:",
+            "          requiredDuringSchedulingIgnoredDuringExecution:",
+            "            - labelSelector:",
+            "                matchExpressions:",
+            "                  - key: app.kubernetes.io/name",
+            "                    operator: In",
+            "                    values:",
+            f"                      - {app_name}",
+            "              topologyKey: kubernetes.io/hostname",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+ADMISSION_PROXY_CODE = textwrap.dedent("""\
+import http.client
+import os
+import socketserver
+import threading
+from http.server import BaseHTTPRequestHandler
+
+backend_host = "127.0.0.1"
+backend_port = int(os.environ.get("PUU_VLLM_BACKEND_PORT", "8001"))
+listen_port = int(os.environ.get("PUU_VLLM_PROXY_PORT", "8000"))
+active_limit = max(1, int(os.environ.get("PUU_VLLM_MAX_CONCURRENT_SEQUENCES", "8")))
+queue_limit = max(0, int(os.environ.get("PUU_VLLM_MAX_QUEUED_REQUESTS", "32")))
+overload_status = int(os.environ.get("PUU_VLLM_OVERLOAD_STATUS_CODE", "429"))
+active = threading.BoundedSemaphore(active_limit)
+capacity = threading.BoundedSemaphore(active_limit + queue_limit)
+hop_by_hop = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):
+        self._handle()
+
+    def do_POST(self):
+        self._handle()
+
+    def do_OPTIONS(self):
+        self._handle()
+
+    def do_HEAD(self):
+        self._handle()
+
+    def _handle(self):
+        if self.path == "/health":
+            self._proxy()
+            return
+        if not capacity.acquire(blocking=False):
+            self.send_response(overload_status)
+            self.send_header("content-type", "application/json")
+            self.send_header("connection", "close")
+            body = b'{"error":"local vLLM queue full"}\\n'
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+            return
+        try:
+            active.acquire()
+            try:
+                self._proxy()
+            finally:
+                active.release()
+        finally:
+            capacity.release()
+
+    def _proxy(self):
+        body_length = int(self.headers.get("content-length", "0") or "0")
+        body = self.rfile.read(body_length) if body_length else None
+        headers = {key: value for key, value in self.headers.items() if key.lower() not in hop_by_hop}
+        headers["host"] = f"{backend_host}:{backend_port}"
+        conn = http.client.HTTPConnection(backend_host, backend_port, timeout=3600)
+        headers_sent = False
+        try:
+            conn.request(self.command, self.path, body=body, headers=headers)
+            response = conn.getresponse()
+            self.send_response(response.status, response.reason)
+            for key, value in response.getheaders():
+                if key.lower() not in hop_by_hop:
+                    self.send_header(key, value)
+            self.send_header("connection", "close")
+            self.end_headers()
+            headers_sent = True
+            if self.command != "HEAD":
+                while True:
+                    chunk = response.read1(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except Exception as exc:
+            if headers_sent:
+                return
+            message = ("backend unavailable: %s\\n" % exc).encode()
+            self.send_response(503)
+            self.send_header("content-type", "text/plain")
+            self.send_header("content-length", str(len(message)))
+            self.send_header("connection", "close")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(message)
+        finally:
+            conn.close()
+            self.close_connection = True
+
+    def log_message(self, fmt, *args):
+        return
+
+class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+with Server(("0.0.0.0", listen_port), Handler) as server:
+    server.serve_forever()
+""").strip()
+
+
+def plan_workload(
+    spec: ms.ModelSpec,
+    node: ms.NodeCapacity,
+    models_dir: Path,
+    shared_reserved_mib: int,
+    manual_selection: bool = False,
+) -> PlannedWorkload:
+    if not manual_selection and not spec.autostart:
+        raise PlanError("autostart is disabled")
+
+    serving_mode = serving_mode_for_model(spec.serving_mode, spec.sharing_policy)
+    model_label = ms.model_id(spec.name)
+    app_name = f"puu-vllm-{model_label}"
+    model_node_label = ms.model_node_label(spec.name)
+    gpu_memory_utilization = f"{spec.gpu_memory_utilization:.2f}"
+    resource_gpus = 0
+    replicas = 1
+    assigned_gpu_devices = ""
+    interconnect_selector = "none"
+
+    if not spec.path.startswith(f"{models_dir}/"):
+        raise PlanError(f"model path {spec.path} is not under {models_dir}")
+    if not Path(spec.path).is_dir():
+        raise PlanError(f"model path {spec.path} is missing")
+    if spec.same_path_required and spec.path != str(models_dir / spec.name):
+        raise PlanError("model path must be identical on participants")
+    if node.gpu_count <= 0 or not node.cuda_ready or not node.cdi_ready:
+        raise PlanError("CUDA/CDI GPU capacity is not ready")
+    if spec.requires_unified_memory and not node.unified_memory:
+        raise PlanError("unified memory is required but not available")
+    if spec.min_gpu_memory_mib > 0 and node.gpu_memory_max_mib < spec.min_gpu_memory_mib:
+        raise PlanError(f"max GPU memory {node.gpu_memory_max_mib} MiB is below required {spec.min_gpu_memory_mib} MiB")
+    if spec.gpu_memory_budget_mib <= 0:
+        raise PlanError("no positive GPU memory budget was discovered")
+    if spec.estimated_memory_mib > 0 and spec.gpu_memory_budget_mib < spec.estimated_memory_mib:
+        raise PlanError(f"GPU memory budget {spec.gpu_memory_budget_mib} MiB is below estimated model size {spec.estimated_memory_mib} MiB")
+
+    if serving_mode == "shared-gpu":
+        if node.single_gpu_capacity_mib <= 0:
+            raise PlanError("shared GPU capacity is unknown")
+        if spec.gpu_memory_budget_mib > node.single_gpu_capacity_mib:
+            raise PlanError(f"shared GPU budget {spec.gpu_memory_budget_mib} MiB exceeds single-GPU limit {node.single_gpu_capacity_mib} MiB")
+        reserved_after = shared_reserved_mib + spec.gpu_memory_budget_mib
+        if reserved_after > node.single_gpu_capacity_mib:
+            raise PlanError(f"shared GPU budget would reserve {reserved_after} MiB above {node.single_gpu_capacity_mib} MiB")
+        shared_reserved_mib = reserved_after
+        assigned_gpu_devices = "0"
+        gpu_memory_utilization = utilization_from_budget(spec.gpu_memory_budget_mib, node.gpu_memory_max_mib)
+    elif serving_mode in ("exclusive-gpu", "replicated"):
+        resource_gpus = 1
+        if serving_mode == "replicated":
+            replicas = spec.max_replicas
+        if spec.gpu_memory_budget_mib > node.single_gpu_capacity_mib and not node.unified_memory:
+            mode_prefix = "exclusive" if serving_mode == "exclusive-gpu" else "replicated"
+            raise PlanError(f"budget {spec.gpu_memory_budget_mib} MiB exceeds {mode_prefix} GPU guardrail {node.single_gpu_capacity_mib} MiB")
+    elif serving_mode == "topology-parallel":
+        parallel_gpus = spec.tensor_parallel_size * spec.pipeline_parallel_size
+        if parallel_gpus <= 1:
+            raise PlanError("topology-parallel requires more than one vLLM parallel GPU")
+        if parallel_gpus < spec.topology_min_gpus:
+            raise PlanError(f"vLLM parallel size {parallel_gpus} is below required {spec.topology_min_gpus} GPUs")
+        if parallel_gpus > node.gpu_count:
+            raise PlanError(f"vLLM parallel size {parallel_gpus} exceeds discovered GPU count {node.gpu_count}")
+        parallel_capacity_mib = (node.gpu_memory_max_mib * parallel_gpus * 95) // 100
+        if spec.gpu_memory_budget_mib > parallel_capacity_mib and not node.unified_memory:
+            raise PlanError(f"budget {spec.gpu_memory_budget_mib} MiB exceeds topology guardrail {parallel_capacity_mib} MiB")
+        if spec.requires_nvlink:
+            if not node.topology_parallel_capable:
+                raise PlanError("NVLink topology is required but not available")
+            interconnect_selector = "topology"
+        elif node.topology_parallel_capable:
+            interconnect_selector = "topology"
+        elif (spec.requires_fast_nic or spec.allow_fast_nic_fallback) and node.fast_nic_present:
+            interconnect_selector = "fast-nic"
+        else:
+            raise PlanError("neither topology NVLink nor fast NIC is available for topology-parallel serving")
+        resource_gpus = parallel_gpus
+
+    return PlannedWorkload(
+        spec=spec,
+        serving_mode=serving_mode,
+        gpu_memory_utilization=gpu_memory_utilization,
+        resource_gpus=resource_gpus,
+        replicas=replicas,
+        assigned_gpu_devices=assigned_gpu_devices,
+        interconnect_selector=interconnect_selector,
+        shared_reserved_mib=shared_reserved_mib,
+        app_name=app_name,
+        model_label=model_label,
+        model_node_label=model_node_label,
+    )
+
+
+def render_manifest(plan: PlannedWorkload, image: str, models_dir: Path) -> str:
+    spec = plan.spec
+    affinity_yaml = write_node_affinity(
+        plan.serving_mode,
+        plan.model_node_label,
+        plan.interconnect_selector,
+        spec.allow_fast_nic_fallback,
+        plan.app_name,
+    )
+
+    assigned_gpu_yaml = ""
+    if plan.serving_mode == "shared-gpu":
+        assigned_gpu_yaml = f"""            - name: NVIDIA_VISIBLE_DEVICES
+              value: {json.dumps(plan.assigned_gpu_devices)}
+            - name: CUDA_VISIBLE_DEVICES
+              value: {json.dumps(plan.assigned_gpu_devices)}\n"""
+
+    gpu_limits_yaml = ""
+    if plan.resource_gpus > 0:
+        gpu_limits_yaml = f"""              nvidia.com/gpu: "{plan.resource_gpus}"
+            limits:
+              nvidia.com/gpu: "{plan.resource_gpus}"\n"""
+
+    manifest_text = f"""---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {plan.app_name}
+  namespace: puu-ai
+  labels:
+    app.kubernetes.io/name: {plan.app_name}
+    puu.ai/model-name: {plan.model_label}
+    puu.ai/serving-mode: {plan.serving_mode}
+spec:
+  selector:
+    app.kubernetes.io/name: {plan.app_name}
+    puu.ai/inference: "enabled"
+    puu.ai/model-server: vllm
+    puu.ai/model-name: {plan.model_label}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {plan.app_name}
+  namespace: puu-ai
+  labels:
+    app.kubernetes.io/name: {plan.app_name}
+    puu.ai/model-name: {plan.model_label}
+    puu.ai/serving-mode: {plan.serving_mode}
+spec:
+  replicas: {plan.replicas}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {plan.app_name}
+      puu.ai/model-name: {plan.model_label}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {plan.app_name}
+        puu.ai/inference: "enabled"
+        puu.ai/model-server: vllm
+        puu.ai/model-capacity: gpu
+        puu.ai/model-source: local-discovery
+        puu.ai/cluster-routing: "enabled"
+        puu.ai/model-name: {plan.model_label}
+        puu.ai/serving-mode: {plan.serving_mode}
+        puu.ai/sharing-policy: {spec.sharing_policy}
+      annotations:
+        puu.ai/model-path: {json.dumps(spec.path)}
+        puu.ai/gpu-memory-budget-mib: "{spec.gpu_memory_budget_mib}"
+        puu.ai/max-queued-requests: "{spec.max_queued_requests}"
+        puu.ai/max-concurrent-sequences: "{spec.max_concurrent_sequences}"
+        puu.ai/max-model-length: "{spec.max_context}"
+        puu.ai/gpu-memory-utilization: "{plan.gpu_memory_utilization}"
+        puu.ai/tensor-parallel-size: "{spec.tensor_parallel_size}"
+        puu.ai/pipeline-parallel-size: "{spec.pipeline_parallel_size}"
+        puu.ai/assigned-gpu-devices: {json.dumps(plan.assigned_gpu_devices)}
+    spec:
+{affinity_yaml}      runtimeClassName: nvidia-cdi
+      initContainers:
+        - name: wait-for-nvidia-cdi
+          image: busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until [ -s /var/run/cdi/nvidia.yaml ]; do
+                echo "waiting for /var/run/cdi/nvidia.yaml"
+                sleep 10
+              done
+          volumeMounts:
+            - name: nvidia-cdi
+              mountPath: /var/run/cdi
+              readOnly: true
+      containers:
+        - name: vllm
+          image: {json.dumps(image)}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              extra_args=
+              if [ -n "$PUU_VLLM_QUANTIZATION" ]; then
+                extra_args="$extra_args --quantization $PUU_VLLM_QUANTIZATION"
+              fi
+              if [ "$PUU_VLLM_TRUST_REMOTE_CODE" = true ]; then
+                extra_args="$extra_args --trust-remote-code"
+              fi
+              if [ -n "$PUU_VLLM_EXTRA_ARGS" ]; then
+                extra_args="$extra_args $PUU_VLLM_EXTRA_ARGS"
+              fi
+              # shellcheck disable=SC2086
+              exec python3 -m vllm.entrypoints.openai.api_server \
+                --host 127.0.0.1 \
+                --port "$PUU_VLLM_BACKEND_PORT" \
+                --model "$PUU_VLLM_MODEL_PATH" \
+                --served-model-name "$PUU_VLLM_MODEL_NAME" \
+                --max-model-len "$PUU_VLLM_MAX_CONTEXT" \
+                --max-num-seqs "$PUU_VLLM_MAX_CONCURRENT_SEQUENCES" \
+                --gpu-memory-utilization "$PUU_VLLM_GPU_MEMORY_UTILIZATION" \
+                --tensor-parallel-size "$PUU_VLLM_TENSOR_PARALLEL_SIZE" \
+                --pipeline-parallel-size "$PUU_VLLM_PIPELINE_PARALLEL_SIZE" \
+                $extra_args
+          env:
+            - name: PUU_VLLM_MODEL_NAME
+              value: {json.dumps(spec.name)}
+            - name: PUU_VLLM_MODEL_PATH
+              value: {json.dumps(spec.path)}
+            - name: PUU_VLLM_BACKEND_PORT
+              value: "8001"
+            - name: PUU_VLLM_MAX_CONTEXT
+              value: "{spec.max_context}"
+            - name: PUU_VLLM_MAX_CONCURRENT_SEQUENCES
+              value: "{spec.max_concurrent_sequences}"
+            - name: PUU_VLLM_GPU_MEMORY_UTILIZATION
+              value: "{plan.gpu_memory_utilization}"
+            - name: PUU_VLLM_TENSOR_PARALLEL_SIZE
+              value: "{spec.tensor_parallel_size}"
+            - name: PUU_VLLM_PIPELINE_PARALLEL_SIZE
+              value: "{spec.pipeline_parallel_size}"
+            - name: PUU_VLLM_QUANTIZATION
+              value: {json.dumps(spec.quantization)}
+            - name: PUU_VLLM_TRUST_REMOTE_CODE
+              value: \"{ms.bool_str(spec.trust_remote_code)}\"
+            - name: PUU_VLLM_EXTRA_ARGS
+              value: {json.dumps(spec.extra_args)}
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+{assigned_gpu_yaml}          ports:
+            - name: backend
+              containerPort: 8001
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+{gpu_limits_yaml}          volumeMounts:
+            - name: models
+              mountPath: {json.dumps(str(models_dir))}
+              readOnly: true
+            - name: nvidia-cdi
+              mountPath: /var/run/cdi
+              readOnly: true
+        - name: admission-proxy
+          image: {json.dumps(image)}
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+            - |
+{textwrap.indent(ADMISSION_PROXY_CODE, "              ")}
+          env:
+            - name: PUU_VLLM_BACKEND_PORT
+              value: "8001"
+            - name: PUU_VLLM_PROXY_PORT
+              value: "8000"
+            - name: PUU_VLLM_MAX_CONCURRENT_SEQUENCES
+              value: "{spec.max_concurrent_sequences}"
+            - name: PUU_VLLM_MAX_QUEUED_REQUESTS
+              value: "{spec.max_queued_requests}"
+            - name: PUU_VLLM_OVERLOAD_STATUS_CODE
+              value: "{spec.overload_status_code}"
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: models
+          hostPath:
+            path: {json.dumps(str(models_dir))}
+            type: Directory
+        - name: nvidia-cdi
+          hostPath:
+            path: /var/run/cdi
+            type: DirectoryOrCreate
+"""
+    return manifest_text
+
+
+def main() -> None:
+    state_dir = ms.STATE_DIR
+    models_dir = ms.MODELS_DIR
+    manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
+    manifest = manifest_dir / "32-vllm-generated.yaml"
+    image = os.environ.get(
+        "PUU_VLLM_IMAGE",
+        "vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967",
+    )
+    node_capacity_env = state_dir / "node-capacity.env"
+    topology_env = state_dir / "topology.env"
+    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+    selected_model_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
+    serving_disabled_file = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
+    selected_model = os.environ.get("PUU_VLLM_SELECTED_MODEL", "")
+    require_selected_model = ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False)
+    ignore_serving_disabled = ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+
+    node = ms.NodeCapacity.from_env(
+        ms.parse_env_file(node_capacity_env),
+        ms.parse_env_file(topology_env),
+    )
+
+    if not selected_model:
+        selected_model = ms.read_first_line(selected_model_file)
+
+    specs = [
+        ms.ModelSpec.from_env(ms.parse_env_file(env_path), name=name, path=path)
+        for name, path, env_path in ms.read_models_list(state_dir / "models.list")
+    ]
+
+    empty_manifest = "apiVersion: v1\nkind: List\nitems: []\n"
+    shared_reserved_mib = 0
+    planned: PlannedWorkload | None = None
+
+    if not ignore_serving_disabled and serving_disabled_file.is_file() and not selected_model:
+        pass
+    elif selected_model:
+        matching = [s for s in specs if s.name == selected_model]
+        if not matching:
+            warn(f"selected model {selected_model} was not discovered")
+        else:
+            try:
+                planned = plan_workload(
+                    matching[0], node, models_dir, shared_reserved_mib, manual_selection=True
+                )
+            except PlanError as err:
+                warn(f"skipping {matching[0].name}: {err}")
+    elif specs:
+        candidates = sorted(
+            (pair for pair in enumerate(specs) if pair[1].autostart),
+            key=lambda pair: (-pair[1].autostart_priority, pair[0]),
+        )
+        for _, spec in candidates:
+            try:
+                planned = plan_workload(
+                    spec, node, models_dir, shared_reserved_mib, manual_selection=False
+                )
+                break
+            except PlanError as err:
+                warn(f"skipping {spec.name}: {err}")
+
+    if planned:
+        manifest_content = render_manifest(planned, image, models_dir)
+        ms.atomic_write_text(active_model_file, f"{planned.spec.name}\n")
+    else:
+        manifest_content = empty_manifest
+        active_model_file.unlink(missing_ok=True)
+
+    ms.atomic_write_text(manifest, manifest_content)
+
+    if require_selected_model and selected_model and not planned:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
