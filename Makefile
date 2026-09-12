@@ -42,8 +42,8 @@ ifdef BOARD
 ifeq ($(wildcard configs/$(BOARD)_defconfig),)
 $(error unknown BOARD=$(BOARD); see `make list`)
 endif
-SDK_ARCH := $(strip $(if $(filter BR2_x86_64=y,$(file < configs/$(BOARD)_defconfig)),x86_64,\
-	$(if $(filter BR2_aarch64=y,$(file < configs/$(BOARD)_defconfig)),aarch64)))
+SDK_ARCH := $(shell awk -F= '/^BR2_(x86_64|aarch64)=y$$/ { sub(/^BR2_/, "", $$1); print $$1; exit }' \
+	configs/$(BOARD)_defconfig)
 ifeq ($(SDK_ARCH),)
 $(error configs/$(BOARD)_defconfig must select BR2_x86_64 or BR2_aarch64)
 endif
