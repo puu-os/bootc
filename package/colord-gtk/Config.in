@@ -1,0 +1,10 @@
+config BR2_PACKAGE_COLORD_GTK
+	bool "colord-gtk"
+	depends on BR2_PACKAGE_LIBGTK4
+	select BR2_PACKAGE_COLORD
+	select BR2_PACKAGE_LIBGLIB2
+	help
+	  Gtk4 widgets for colord, providing the colord-gtk4 library
+	  used by the GNOME Settings color panel.
+
+	  https://www.freedesktop.org/software/colord/releases/

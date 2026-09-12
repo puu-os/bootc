@@ -1,0 +1,27 @@
+--- a/meson.build
++++ b/meson.build
+@@ -764,6 +764,8 @@ if have_devkit
+ endif
+ subdir('po')
+-subdir('doc/man')
++if get_option('man')
++  subdir('doc/man')
++endif
+ if have_documentation
+   subdir('doc/reference')
+ endif
+--- a/meson.options
++++ b/meson.options
+@@ -225,6 +225,12 @@ option('bash_completion',
+   description: 'Integrate bash completion for gdctl'
+ )
+ 
++option('man',
++  type: 'boolean',
++  value: true,
++  description: 'Build manual pages'
++)
++
+ option('devkit',
+   type: 'feature',
+   value: 'auto',

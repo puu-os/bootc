@@ -1,0 +1,9 @@
+config BR2_PACKAGE_LIBFYAML
+	bool "libfyaml"
+	help
+	  A fully YAML 1.1/1.2/1.3 conformant parser/emitter library.
+
+	  Required by appstream >= 1.1.0 (replaces libyaml in that
+	  branch).
+
+	  https://github.com/pantoniou/libfyaml

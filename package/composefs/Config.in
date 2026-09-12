@@ -1,0 +1,10 @@
+config BR2_PACKAGE_COMPOSEFS
+	bool "composefs"
+	select BR2_PACKAGE_LIBFUSE3
+	select BR2_PACKAGE_OPENSSL
+	help
+	  composefs creates and mounts read-only filesystem images using
+	  a content-addressed backing store.  The library is required by
+	  ostree when the composefs integration is enabled.
+
+	  https://github.com/containers/composefs

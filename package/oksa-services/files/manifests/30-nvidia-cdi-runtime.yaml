@@ -1,0 +1,13 @@
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia-cdi
+handler: nvidia
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: puu-nvidia-cdi
+  namespace: puu-ai
+data:
+  specPath: /var/run/cdi/nvidia.yaml

@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_serving as ms
+
+NVLINK_RE = re.compile(r"^NV(\d+)$")
+
+
+def main() -> None:
+    node_name = ms.resolve_k3s_node_name()
+    state_dir = ms.STATE_DIR
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    gpu_count = 0
+    nvlink_present = False
+    nvlink_link_count = 0
+    nvlink_max_width = 0
+    topology_available = False
+    topology_summary = ""
+
+    smi_bin = Path("/usr/bin/nvidia-smi")
+    if ms.has_nvidia_hardware():
+        if not smi_bin.is_file() or not os.access(smi_bin, os.X_OK):
+            sys.exit("collect-nvlink-topology: NVIDIA hardware found but /usr/bin/nvidia-smi is missing")
+        res = subprocess.run([str(smi_bin), "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
+        if res.returncode == 0:
+            gpu_count = len([line for line in res.stdout.splitlines() if line.strip()])
+
+    if gpu_count > 1:
+        res = subprocess.run([str(smi_bin), "topo", "-m"], capture_output=True, text=True)
+        if res.returncode == 0:
+            topology_available = True
+            topo_out = res.stdout
+            links = []
+            for token in topo_out.split():
+                m = NVLINK_RE.match(token)
+                if m:
+                    links.append(int(m.group(1)))
+            nvlink_link_count = len(links) // 2
+            if nvlink_link_count > 0:
+                nvlink_present = True
+                nvlink_max_width = max(links)
+            topology_summary = ";".join(topo_out.splitlines())[:4096]
+
+    ms.wait_for_node(node_name)
+
+    ms.run_kubectl(
+        "label", "node", node_name, "--overwrite",
+        f"puu.ai/nvlink-present={ms.bool_str(nvlink_present)}",
+        f"puu.ai/nvlink-link-count={nvlink_link_count}",
+        f"puu.ai/nvlink-max-width={nvlink_max_width}",
+        f"puu.ai/fast-gpu-interconnect={ms.bool_str(nvlink_present)}",
+        f"puu.ai/topology-parallel-capable={ms.bool_str(nvlink_present)}",
+        check=False,
+    )
+
+    ms.run_kubectl(
+        "annotate", "node", node_name, "--overwrite",
+        f"puu.ai/nvlink-topology-available={ms.bool_str(topology_available)}",
+        f"puu.ai/nvlink-gpu-count={gpu_count}",
+        f"puu.ai/nvlink-topology={topology_summary}",
+        check=False,
+    )
+
+    env_lines = [
+        f"PUU_NODE_NVLINK_PRESENT={ms.bool_str(nvlink_present)}",
+        f"PUU_NODE_NVLINK_LINK_COUNT={nvlink_link_count}",
+        f"PUU_NODE_NVLINK_MAX_WIDTH={nvlink_max_width}",
+        f"PUU_NODE_FAST_GPU_INTERCONNECT={ms.bool_str(nvlink_present)}",
+        f"PUU_NODE_TOPOLOGY_PARALLEL_CAPABLE={ms.bool_str(nvlink_present)}",
+        f"PUU_NODE_TOPOLOGY_AVAILABLE={ms.bool_str(topology_available)}",
+    ]
+    ms.atomic_write_text(state_dir / "topology.env", "\n".join(env_lines) + "\n")
+
+
+if __name__ == "__main__":
+    main()

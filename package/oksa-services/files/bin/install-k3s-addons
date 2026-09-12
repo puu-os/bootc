@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+from pathlib import Path
+import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_serving as ms
+
+
+NVIDIA_MANIFESTS = ("30-nvidia-cdi-runtime.yaml", "32-nvidia-device-plugin.yaml")
+
+
+def apply_crds(crd_src: Path) -> None:
+    if not crd_src.is_dir():
+        return
+    ms.run_kubectl("apply", "--server-side", "--force-conflicts", "-f", str(crd_src))
+    ms.run_kubectl("wait", "--for=condition=Established", "--timeout=120s", "customresourcedefinition", "--all")
+
+
+def copy_manifests(manifest_src: Path, manifest_dst: Path) -> None:
+    manifest_dst.mkdir(parents=True, exist_ok=True, mode=0o700)
+    has_nvidia = ms.has_nvidia_hardware()
+    if not has_nvidia:
+        for name in NVIDIA_MANIFESTS:
+            (manifest_dst / name).unlink(missing_ok=True)
+
+    if not manifest_src.is_dir():
+        return
+
+    for manifest in sorted(manifest_src.glob("*.yaml")):
+        if manifest.name in NVIDIA_MANIFESTS and not has_nvidia:
+            continue
+        ms.atomic_write_text(manifest_dst / manifest.name, manifest.read_text(), 0o644)
+
+
+def main() -> None:
+    manifest_src = Path("/usr/share/puu-os/k3s/manifests")
+    manifest_dst = Path("/var/lib/rancher/k3s/server/manifests")
+    crd_src = Path("/usr/share/puu-os/k3s/crds")
+
+    if not ms.wait_for_kubectl("get", "--raw=/readyz"):
+        sys.exit("kubernetes API did not become ready")
+    try:
+        apply_crds(crd_src)
+    except subprocess.CalledProcessError as exc:
+        sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")
+    copy_manifests(manifest_src, manifest_dst)
+
+
+if __name__ == "__main__":
+    main()

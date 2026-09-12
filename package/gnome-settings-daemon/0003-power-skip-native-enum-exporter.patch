@@ -1,0 +1,51 @@
+--- a/plugins/power/meson.build
++++ b/plugins/power/meson.build
+@@ -39,31 +39,6 @@
+   install_dir: gsd_libexecdir
+ )
+ 
+-sources = files('gsd-power-enums-update.c')
+-
+-enums_headers = files(
+-  'gsm-inhibitor-flag.h',
+-  'gsm-presence-flag.h'
+-)
+-
+-enums = 'gsd-power-enums'
+-
+-sources += gnome.mkenums(
+-  enums,
+-  sources: enums_headers,
+-  c_template: enums + '.c.in',
+-  h_template: enums + '.h.in'
+-)
+-
+-gsd_power_enums_update = executable(
+-  'gsd-power-enums-update',
+-  sources,
+-  include_directories: top_inc,
+-  dependencies: native_deps,
+-  c_args: cflags,
+-  native: true
+-)
+-
+ output = 'gsdpowerconstants.py'
+ 
+ gsdpowerconstants_py = custom_target(
+@@ -74,16 +49,6 @@
+   command: [join_paths(meson.current_source_dir(), 'gsd-power-constants-update.pl'), '@INPUT@', '@OUTPUT@']
+ )
+ 
+-output = 'gsdpowerenums.py'
+-
+-gsdpowerenums_py = custom_target(
+-  output,
+-  output: output,
+-  capture: true,
+-  build_by_default: true,
+-  command: [gsd_power_enums_update]
+-)
+-
+ test_py = find_program('test.py')
+ fs.copyfile('dbusmock-templates/mutter.py')
+ 

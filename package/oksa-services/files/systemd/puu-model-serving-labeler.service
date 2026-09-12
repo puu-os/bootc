@@ -1,0 +1,10 @@
+[Unit]
+Description=Publish local model-serving node metadata
+Requires=k3s.service
+After=k3s.service puu-vllm-discovery.service
+ConditionKernelCommandLine=!puu.live
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/libexec/puu-os/discover-vllm-models
+ExecStart=/usr/libexec/puu-os/label-model-serving-node

@@ -1,0 +1,10 @@
+config BR2_PACKAGE_LIBNMA
+	bool "libnma"
+	depends on BR2_PACKAGE_NETWORK_MANAGER
+	depends on BR2_PACKAGE_LIBGTK3
+	depends on BR2_PACKAGE_LIBGTK4
+	help
+	  NetworkManager GUI library providing GTK widgets for
+	  connection editing and wireless security dialogs.
+
+	  https://gitlab.gnome.org/GNOME/libnma

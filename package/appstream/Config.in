@@ -1,0 +1,23 @@
+config BR2_PACKAGE_APPSTREAM
+	bool "appstream"
+	depends on !BR2_STATIC_LIBS # glib2
+	depends on BR2_TOOLCHAIN_HAS_THREADS # glib2
+	depends on BR2_USE_MMU # glib2
+	depends on BR2_USE_WCHAR # glib2
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBFYAML
+	select BR2_PACKAGE_LIBXMLB
+	select BR2_PACKAGE_BASH_COMPLETION
+	select BR2_PACKAGE_ZSTD
+	help
+	  AppStream is a cross-distro XML format for providing metadata
+	  about software components, and a library providing functions
+	  to access and manipulate that data.
+
+	  https://www.freedesktop.org/software/appstream/
+
+comment "appstream needs a toolchain w/ wchar, threads, dynamic library"
+	depends on BR2_USE_MMU
+	depends on !BR2_USE_WCHAR || !BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS

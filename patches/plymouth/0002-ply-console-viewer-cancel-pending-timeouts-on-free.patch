@@ -1,0 +1,13 @@
+--- a/src/libply-splash-graphics/ply-console-viewer.c
++++ b/src/libply-splash-graphics/ply-console-viewer.c
+@@ -150,6 +150,10 @@ ply_console_viewer_free (ply_console_viewer_t *console_viewer)
+         if (console_viewer == NULL)
+                 return;
+ 
++        ply_event_loop_stop_watching_for_timeout (ply_event_loop_get_default (),
++                                                  (ply_event_loop_timeout_handler_t)
++                                                  update_console_messages, console_viewer);
++
+         ply_list_foreach (console_viewer->message_labels, node) {
+                 console_message_label = ply_list_node_get_data (node);
+                 ply_label_free (console_message_label);

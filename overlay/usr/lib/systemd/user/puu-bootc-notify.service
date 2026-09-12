@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Notify the operator about a pending bootc reboot
+ConditionPathExists=/run/puu-os/upgrade-pending
+After=gnome-session-initialized.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/notify-send --urgency=normal --expire-time=0 "System update ready" "A new Puu image is staged. Reboot to apply it."
+
+[Install]
+WantedBy=graphical-session.target

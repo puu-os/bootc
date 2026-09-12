@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+# Default puu-installer configuration.
+
+identity:
+  keymap: us
+  locale: en_US.UTF-8
+  timezone: UTC
+  hostname: puu
+
+flatpak:
+  manifestPath: /usr/share/puu-os/flatpaks.list
+  syncHelper: /usr/libexec/puu-os/flatpak-sync
+  liveStore: /var/lib/flatpak
+
+k3s:
+  helper: /usr/libexec/puu-os/configure-k3s-cluster
+
+serialConsole:
+  x86_64: console=ttyS0,115200
+  aarch64: console=ttyAMA0,115200

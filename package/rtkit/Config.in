@@ -1,0 +1,12 @@
+config BR2_PACKAGE_RTKIT
+	bool "rtkit"
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_LIBCAP
+	select BR2_PACKAGE_POLKIT
+	help
+	  RealtimeKit is a D-Bus system service that safely grants
+	  realtime scheduling and high-priority requests to desktop
+	  clients such as GNOME Shell and PulseAudio.
+
+	  https://github.com/heftig/rtkit

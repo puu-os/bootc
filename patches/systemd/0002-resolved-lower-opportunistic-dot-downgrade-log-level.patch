@@ -1,0 +1,12 @@
+--- a/src/resolve/resolved-dns-server.c
++++ b/src/resolve/resolved-dns-server.c
+@@ -518,6 +518,9 @@
+                         log_debug("Server doesn't support DNS-over-TLS, downgrading protocol...");
+                         s->possible_feature_level--;
+ 
++                        /* DNS-over-TLS in opportunistic mode is allowed to fall back. */
++                        log_level = LOG_NOTICE;
++
+                 } else if (s->packet_invalid &&
+                            s->possible_feature_level > DNS_SERVER_FEATURE_LEVEL_UDP &&
+                            s->possible_feature_level != DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN) {

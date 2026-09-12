@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+config BR2_PACKAGE_TOOLBX
+	bool "toolbx"
+	depends on BR2_x86_64 || BR2_aarch64
+	depends on BR2_INIT_SYSTEMD
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
+	depends on BR2_PACKAGE_PODMAN
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_TOOLCHAIN_USES_UCLIBC
+	depends on BR2_USE_MMU
+	depends on !BR2_STATIC_LIBS
+	select BR2_PACKAGE_HOST_GO
+	select BR2_PACKAGE_SHADOW
+	select BR2_PACKAGE_SHADOW_SUBORDINATE_IDS
+	help
+	  Toolbx is a tool for Linux, which allows the use of
+	  interactive command line environments for software development
+	  and troubleshooting the host operating system, without having
+	  to install software on the host. It is built on top of Podman
+	  and other standard container technologies from OCI.
+
+	  https://containertoolbx.org/
+
+comment "toolbx needs systemd and a glibc/musl toolchain w/ threads, dynamic library"
+	depends on BR2_x86_64 || BR2_aarch64
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
+	depends on BR2_PACKAGE_PODMAN
+	depends on BR2_USE_MMU
+	depends on !BR2_INIT_SYSTEMD || \
+		!BR2_TOOLCHAIN_HAS_THREADS || BR2_TOOLCHAIN_USES_UCLIBC || \
+		BR2_STATIC_LIBS

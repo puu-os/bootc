@@ -1,0 +1,39 @@
+config BR2_PACKAGE_GNOME_SHELL
+	bool "gnome-shell"
+	depends on BR2_PACKAGE_GJS
+	depends on BR2_PACKAGE_LIBADWAITA
+	depends on BR2_PACKAGE_LIBGTK4
+	depends on BR2_PACKAGE_NETWORK_MANAGER
+	depends on BR2_PACKAGE_GNOME_SETTINGS_DAEMON
+	depends on BR2_PACKAGE_MUTTER
+	depends on BR2_PACKAGE_PIPEWIRE
+	depends on BR2_INIT_SYSTEMD
+	depends on BR2_PACKAGE_LLVM_ARCH_SUPPORTS # mozjs140
+	depends on BR2_HOST_GCC_AT_LEAST_7 # mozjs140
+	depends on BR2_PACKAGE_IBUS
+	depends on BR2_PACKAGE_PYTHON3 # gobject-introspection
+	select BR2_PACKAGE_GNOME_SESSION
+	select BR2_PACKAGE_GNOME_DESKTOP
+	select BR2_PACKAGE_EVOLUTION_DATA_SERVER
+	select BR2_PACKAGE_GCR
+	select BR2_PACKAGE_GDK_PIXBUF
+	select BR2_PACKAGE_GSETTINGS_DESKTOP_SCHEMAS
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_PANGO
+	select BR2_PACKAGE_POLKIT
+	select BR2_PACKAGE_RTKIT
+	select BR2_PACKAGE_ADWAITA_ICON_THEME
+	select BR2_PACKAGE_HICOLOR_ICON_THEME
+	select BR2_PACKAGE_ADWAITA_FONTS
+	select BR2_PACKAGE_GNOME_BACKGROUNDS
+	select BR2_PACKAGE_CANTARELL
+	select BR2_PACKAGE_SOUND_THEME_FREEDESKTOP
+	select BR2_PACKAGE_SHARED_MIME_INFO
+	help
+	  GNOME Shell is the user-visible shell of the GNOME 3+
+	  desktop environment.  It provides the panel, activities
+	  overview, application launcher, and system status menu.
+	  Authored in JavaScript on top of mutter and gjs.
+
+	  https://gitlab.gnome.org/GNOME/gnome-shell

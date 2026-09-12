@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import json
+from pathlib import Path
+import re
+import shlex
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_serving as ms
+
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def estimate_model_memory_mib(model_dir: Path) -> int:
+    try:
+        total_bytes = sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+        return max(0, (total_bytes + 1048575) // 1048576)
+    except OSError:
+        return 0
+
+
+def discover(models_dir: Path) -> list[Path]:
+    if not models_dir.is_dir():
+        return []
+    return [
+        entry
+        for entry in sorted(models_dir.iterdir())
+        if entry.is_dir() and NAME_RE.match(entry.name) and (entry / "config.json").is_file()
+    ]
+
+
+def main() -> None:
+    models_dir = ms.MODELS_DIR
+    state_dir = ms.STATE_DIR
+    model_state_dir = state_dir / "models.d"
+
+    model_state_dir.mkdir(parents=True, exist_ok=True)
+
+    models_list_lines = []
+    models_json_items = []
+    created_envs: set[Path] = set()
+    default_env_text = ""
+
+    for model_dir in discover(models_dir):
+        spec = ms.ModelSpec.from_env(
+            ms.parse_env_file(model_dir / "puu-serving.env"),
+            name=model_dir.name,
+            path=str(model_dir),
+            estimated_default=estimate_model_memory_mib(model_dir),
+        )
+
+        model_env = model_state_dir / f"{spec.name}.env"
+        created_envs.add(model_env)
+        ms.atomic_write_text(model_env, spec.to_env_text())
+
+        if not default_env_text:
+            default_env_text = "\n".join([
+                f"PUU_VLLM_MODEL_NAME={shlex.quote(spec.name)}",
+                f"PUU_VLLM_MODEL_PATH={shlex.quote(spec.path)}",
+                f"PUU_VLLM_MODEL_ENV={shlex.quote(str(model_env))}",
+            ]) + "\n"
+
+        models_list_lines.append(f"{spec.name}\t{spec.path}\t{model_env}")
+        models_json_items.append(spec.to_json_dict(model_env))
+
+    for existing in model_state_dir.glob("*.env"):
+        if existing not in created_envs:
+            existing.unlink(missing_ok=True)
+
+    ms.atomic_write_text(
+        state_dir / "models.list",
+        "\n".join(models_list_lines) + ("\n" if models_list_lines else ""),
+    )
+    ms.atomic_write_text(state_dir / "models.json", json.dumps(models_json_items, indent=2) + "\n")
+
+    default_model_file = state_dir / "default-model.env"
+    if default_env_text:
+        ms.atomic_write_text(default_model_file, default_env_text)
+    else:
+        default_model_file.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    main()

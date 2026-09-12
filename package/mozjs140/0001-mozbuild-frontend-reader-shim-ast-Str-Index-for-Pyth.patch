@@ -1,0 +1,20 @@
+--- a/python/mozbuild/mozbuild/frontend/reader.py
++++ b/python/mozbuild/mozbuild/frontend/reader.py
+@@ -17,6 +17,17 @@
+ """
+
+ import ast
++# Shim for Python 3.12+, which removed ast.Str (deprecated in 3.8) and
++# ast.Index (deprecated in 3.9). mozjs140's mozbuild predates these
++# removals.
++if not hasattr(ast, 'Str'):
++    class _AstStr(ast.Constant):
++        def __init__(self, s=None):
++            super().__init__(value=s)
++    ast.Str = _AstStr
++if not hasattr(ast, 'Index'):
++    ast.Index = lambda value: value
++
+ import functools
+ import inspect
+ import logging

@@ -1,0 +1,11 @@
+config BR2_PACKAGE_LIBEI
+	bool "libei"
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_LIBEVDEV
+	select BR2_PACKAGE_LIBXKBCOMMON
+	help
+	  Library for emulated input. Provides libei (client) and
+	  libeis (server) consumed by Wayland compositors such as
+	  Mutter for synthetic input handling.
+
+	  https://gitlab.freedesktop.org/libinput/libei

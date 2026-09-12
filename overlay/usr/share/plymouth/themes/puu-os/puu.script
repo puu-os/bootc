@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) Opinsys Oy 2026
+
+splash.source = Image("splash.png");
+splash.image = splash.source;
+splash.window_width = -1;
+splash.window_height = -1;
+splash.sprite = Sprite(splash.image);
+splash.sprite.SetZ(-100);
+
+prompt_sprite = Sprite();
+prompt_sprite.SetZ(10);
+
+bullets_sprite = Sprite();
+bullets_sprite.SetZ(10);
+
+message_sprite = Sprite();
+message_sprite.SetZ(10);
+
+fun hide_sprite(sprite) {
+  sprite.SetOpacity(0);
+}
+
+fun center_sprite(sprite, image, y) {
+  sw = Window.GetWidth();
+  sprite.SetImage(image);
+  sprite.SetX(Math.Int((sw - image.GetWidth()) / 2));
+  sprite.SetY(Math.Int(y));
+  sprite.SetOpacity(1);
+}
+
+fun show_message(text) {
+  sh = Window.GetHeight();
+
+  if (text == "") {
+    hide_sprite(message_sprite);
+    return;
+  }
+
+  msg_image = Image.Text(text, 0.8, 0.8, 0.8, 1.0, "Fixed 16");
+  center_sprite(message_sprite, msg_image, sh * 0.75);
+}
+
+fun display_password_callback(prompt_text, bullets) {
+  sh = Window.GetHeight();
+  prompt_image = Image.Text(prompt_text, 1.0, 1.0, 1.0, 1.0, "Fixed 16");
+  center_sprite(prompt_sprite, prompt_image, sh * 0.62);
+
+  if (bullets > 0) {
+    bullet_string = "";
+
+    for (i = 0; i < bullets; i++)
+      bullet_string += "*";
+
+    bullets_image = Image.Text(bullet_string, 0.25, 0.88, 0.82, 1.0, "Fixed 16");
+    center_sprite(bullets_sprite, bullets_image, sh * 0.62 + prompt_image.GetHeight() + 12);
+  } else {
+    hide_sprite(bullets_sprite);
+  }
+}
+
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+
+fun display_normal_callback() {
+  hide_sprite(prompt_sprite);
+  hide_sprite(bullets_sprite);
+}
+
+Plymouth.SetDisplayNormalFunction(display_normal_callback);
+
+fun display_message_callback(text) {
+  show_message(text);
+}
+
+Plymouth.SetDisplayMessageFunction(display_message_callback);
+
+fun hide_message_callback(text) {
+  hide_sprite(message_sprite);
+}
+
+Plymouth.SetHideMessageFunction(hide_message_callback);
+
+fun update_splash(sw, sh) {
+  if (sw == splash.window_width && sh == splash.window_height)
+    return;
+
+  scale = Math.Min(sw / splash.source.GetWidth(), sh / splash.source.GetHeight());
+
+  if (scale > 1)
+    scale = 1;
+
+  splash.image = splash.source.Scale(
+    Math.Int(splash.source.GetWidth() * scale),
+    Math.Int(splash.source.GetHeight() * scale)
+  );
+  splash.sprite.SetImage(splash.image);
+  splash.window_width = sw;
+  splash.window_height = sh;
+}
+
+fun refresh_callback() {
+  sw = Window.GetWidth();
+  sh = Window.GetHeight();
+
+  if (sw <= 0 || sh <= 0)
+    return;
+
+  Window.SetBackgroundTopColor(0.180, 0.204, 0.251);     // nord0 #2E3440
+  Window.SetBackgroundBottomColor(0.180, 0.204, 0.251);  // nord0 #2E3440
+
+  update_splash(sw, sh);
+  splash.sprite.SetX(Math.Int((sw - splash.image.GetWidth()) / 2));
+  splash.sprite.SetY(Math.Int((sh - splash.image.GetHeight()) / 2));
+  splash.sprite.SetOpacity(1);
+}
+
+Plymouth.SetRefreshFunction(refresh_callback);
+
+hide_sprite(prompt_sprite);
+hide_sprite(bullets_sprite);
+hide_sprite(message_sprite);

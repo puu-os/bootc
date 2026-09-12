@@ -1,0 +1,11 @@
+--- a/src/plugins/splash/script/script-lib-sprite.c
++++ b/src/plugins/splash/script/script-lib-sprite.c
+@@ -905,6 +905,8 @@
+                      node;
+                      node = ply_list_get_next_node (data->displays, node)) {
+                         script_lib_display_t *display = ply_list_node_get_data (node);
++                        if (display->console_viewer == NULL)
++                                continue;
+                         if (data->should_show_console_messages == true) {
+                                 ply_console_viewer_show (display->console_viewer, display->pixel_display);
+                         } else {

@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import dataclasses
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_serving as ms
+
+IGNORE_IFACE_PREFIXES = ("lo", "docker", "veth", "cni", "flannel")
+SMI_BIN = Path("/usr/bin/nvidia-smi")
+FAST_NIC_MIN_MBPS = 25000
+
+
+
+def file_has_content(path: Path) -> bool:
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def get_meminfo_total_kib() -> int:
+    try:
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8", errors="replace")
+        for line in meminfo.splitlines():
+            if line.startswith("MemTotal:"):
+                m = re.search(r"(\d+)", line)
+                if m:
+                    return int(m.group(1))
+    except OSError:
+        pass
+    return 0
+
+
+@dataclasses.dataclass
+class GpuProbe:
+    available: bool = False
+    count: int = 0
+    memory_mib: int = 0
+    memory_max_mib: int = 0
+    memory_per_gpu: str = ""
+    memory_source: str = "unknown"
+    unified_memory: bool = False
+    accelerator: str = "unknown"
+
+    @property
+    def cuda_ready(self) -> bool:
+        return self.count > 0 and self.available
+
+
+def smi(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([str(SMI_BIN), *args], capture_output=True, text=True)
+
+
+def probe_gpu_memory(probe: GpuProbe) -> None:
+    res = smi("--query-gpu=memory.total", "--format=csv,noheader,nounits")
+    if res.returncode != 0:
+        return
+    per_gpu = []
+    for line in res.stdout.splitlines():
+        val = line.strip()
+        if val.isdigit():
+            mem = int(val)
+            probe.count += 1
+            probe.memory_mib += mem
+            probe.memory_max_mib = max(probe.memory_max_mib, mem)
+            per_gpu.append(str(mem))
+    probe.memory_per_gpu = ",".join(per_gpu)
+    if probe.memory_max_mib > 0:
+        probe.memory_source = "nvidia-smi"
+
+
+def probe_accelerator(probe: GpuProbe) -> None:
+    res = smi("--query-gpu=name", "--format=csv,noheader")
+    if res.returncode != 0:
+        return
+    names = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+    if probe.count <= 0:
+        probe.count = len(names)
+    joined = " ".join(names).lower()
+    if "gb10" in joined or "grace blackwell" in joined:
+        probe.accelerator = "gb10"
+
+
+def apply_uma_memory(probe: GpuProbe) -> None:
+    mem_total_kib = get_meminfo_total_kib()
+    if mem_total_kib <= 0:
+        return
+    reserve_mib = ms.parse_int(os.environ.get("PUU_UMA_SYSTEM_RESERVE_MIB"), 8192)
+    uma_memory_mib = max(0, (mem_total_kib // 1024) - reserve_mib)
+    if uma_memory_mib > 0:
+        probe.memory_mib = uma_memory_mib
+        probe.memory_max_mib = uma_memory_mib
+        probe.memory_per_gpu = str(uma_memory_mib)
+        probe.memory_source = "uma-memtotal"
+
+
+def probe_gpus() -> GpuProbe:
+    probe = GpuProbe()
+
+    if ms.has_nvidia_hardware():
+        if not SMI_BIN.is_file() or not os.access(SMI_BIN, os.X_OK):
+            sys.exit(f"label-model-serving-node: NVIDIA hardware found but {SMI_BIN} is missing")
+        probe.available = True
+
+    if probe.available:
+        probe_gpu_memory(probe)
+        res_q = smi("-q")
+        if res_q.returncode == 0 and re.search(r"Addressing Mode\s*:\s*(HMM|ATS)", res_q.stdout):
+            probe.unified_memory = True
+
+    if probe.available:
+        probe_accelerator(probe)
+
+    if probe.accelerator == "gb10":
+        probe.unified_memory = True
+        apply_uma_memory(probe)
+
+    return probe
+
+
+def detect_fast_nics() -> list[str]:
+    fast_nics = []
+    for speed_file in Path("/sys/class/net").glob("*/speed"):
+        iface = speed_file.parent.name
+        if any(iface.startswith(prefix) for prefix in IGNORE_IFACE_PREFIXES):
+            continue
+        try:
+            speed_val = speed_file.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if speed_val.isdigit() and int(speed_val) >= FAST_NIC_MIN_MBPS:
+            fast_nics.append(f"{iface}:{int(speed_val)}Mbps")
+    return fast_nics
+
+
+def main() -> None:
+    models_dir = ms.MODELS_DIR
+    state_dir = ms.STATE_DIR
+    k3s_env = Path("/etc/rancher/k3s/puu-cluster.env")
+    node_name = ms.resolve_k3s_node_name()
+
+    gpu = probe_gpus()
+    cuda_ready = gpu.cuda_ready
+
+    cdi_file = Path("/var/run/cdi/nvidia.yaml")
+    cdi_ready = file_has_content(cdi_file)
+
+    fast_nics = detect_fast_nics()
+    fast_nic_present = bool(fast_nics)
+    fast_nics_str = ",".join(fast_nics)
+
+    cluster_joined = file_has_content(k3s_env) or file_has_content(Path("/var/lib/rancher/k3s/server/token"))
+
+    models_ready = models_dir.is_dir() and os.access(models_dir, os.R_OK)
+    models_mounted = models_dir.is_mount() if hasattr(models_dir, "is_mount") else False
+    if not models_mounted:
+        models_mounted = subprocess.run(["/usr/bin/mountpoint", "-q", str(models_dir)]).returncode == 0
+
+    model_names = [name for name, _, _ in ms.read_models_list(state_dir / "models.list")]
+    model_labels = sorted({ms.model_node_label(name) for name in model_names})
+    model_count = len(model_names)
+    serving_ready = (cuda_ready and cdi_ready and model_count > 0 and models_ready)
+
+    if not ms.wait_for_node(node_name):
+        sys.exit(f"node {node_name} did not become reachable")
+
+    node = json.loads(ms.run_kubectl("get", "node", node_name, "-o", "json").stdout)
+    labels = node["metadata"].get("labels") or {}
+    if not isinstance(labels, dict) or not all(isinstance(value, str) for value in labels.values()):
+        sys.exit(f"node {node_name} returned invalid labels")
+    old_labels = {label for label in labels if label.startswith("puu.ai/vllm-model-")}
+    stale_labels = old_labels.difference(model_labels)
+    label_args = [
+        f"puu.ai/model-serving-ready={ms.bool_str(serving_ready)}",
+        f"puu.ai/vllm-models-ready={ms.bool_str(models_ready)}",
+        f"puu.ai/gpu-count={gpu.count}",
+        f"puu.ai/gpu-memory-mib={gpu.memory_mib}",
+        f"puu.ai/gpu-memory-max-mib={gpu.memory_max_mib}",
+        f"puu.ai/unified-memory={ms.bool_str(gpu.unified_memory)}",
+        f"puu.ai/cuda-ready={ms.bool_str(cuda_ready)}",
+        f"puu.ai/cdi-ready={ms.bool_str(cdi_ready)}",
+        f"puu.ai/fast-nic-present={ms.bool_str(fast_nic_present)}",
+        f"puu.ai/cluster-joined={ms.bool_str(cluster_joined)}",
+        f"puu.ai/accelerator={gpu.accelerator}",
+        *(f"{label}=true" for label in model_labels),
+        *(f"{label}-" for label in sorted(stale_labels)),
+    ]
+    ms.run_kubectl("label", "node", node_name, "--overwrite", *label_args)
+
+    ms.run_kubectl(
+        "annotate", "node", node_name, "--overwrite",
+        f"puu.ai/local-models={','.join(model_names)}",
+        f"puu.ai/local-model-count={model_count}",
+        f"puu.ai/vllm-models-path={models_dir}",
+        f"puu.ai/vllm-models-mounted={ms.bool_str(models_mounted)}",
+        f"puu.ai/gpu-memory-per-gpu-mib={gpu.memory_per_gpu}",
+        f"puu.ai/gpu-memory-source={gpu.memory_source}",
+        f"puu.ai/fast-nics={fast_nics_str}",
+        check=False,
+    )
+
+    cap_lines = [
+        f"PUU_NODE_GPU_COUNT={gpu.count}",
+        f"PUU_NODE_GPU_MEMORY_MIB={gpu.memory_mib}",
+        f"PUU_NODE_GPU_MEMORY_MAX_MIB={gpu.memory_max_mib}",
+        f"PUU_NODE_GPU_MEMORY_PER_GPU_MIB={gpu.memory_per_gpu}",
+        f"PUU_NODE_GPU_MEMORY_SOURCE={gpu.memory_source}",
+        f"PUU_NODE_UNIFIED_MEMORY={ms.bool_str(gpu.unified_memory)}",
+        f"PUU_NODE_CUDA_READY={ms.bool_str(cuda_ready)}",
+        f"PUU_NODE_CDI_READY={ms.bool_str(cdi_ready)}",
+        f"PUU_NODE_FAST_NIC_PRESENT={ms.bool_str(fast_nic_present)}",
+        f"PUU_NODE_CLUSTER_JOINED={ms.bool_str(cluster_joined)}",
+        f"PUU_NODE_ACCELERATOR={gpu.accelerator}",
+        f"PUU_NODE_MODELS_READY={ms.bool_str(models_ready)}",
+        f"PUU_NODE_MODELS_MOUNTED={ms.bool_str(models_mounted)}",
+        f"PUU_NODE_LOCAL_MODEL_COUNT={model_count}",
+        f"PUU_NODE_LOCAL_MODELS={','.join(model_names)}",
+    ]
+    ms.atomic_write_text(state_dir / "node-capacity.env", "\n".join(cap_lines) + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as exc:
+        sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")

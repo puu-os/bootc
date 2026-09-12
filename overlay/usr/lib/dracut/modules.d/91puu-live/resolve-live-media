@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+set -euo pipefail
+
+fail() {
+  echo "puu-live-media: $*" >&2
+  exit 1
+}
+
+declare -A ids=() devices=() parents=()
+read -r -a cmdline < /proc/cmdline
+for arg in "${cmdline[@]}"; do
+  case "${arg}" in
+    root=*) role=live; id=${arg#root=live:PARTUUID=} ;;
+    puu.boot-partuuid=*) role=boot; id=${arg#*=} ;;
+    puu.payload-partuuid=*) role=payload; id=${arg#*=} ;;
+    *) continue ;;
+  esac
+  [[ ! -v ids[${role}] ]] || fail "duplicate ${role} identifier on command line"
+  [[ ${id} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || fail "invalid ${role} PARTUUID"
+  ids[${role}]=${id}
+done
+for role in boot live payload; do
+  [[ -v ids[${role}] ]] || fail "missing ${role} PARTUUID"
+done
+[[ ${ids[boot]} != "${ids[live]}" && ${ids[boot]} != "${ids[payload]}" && ${ids[live]} != "${ids[payload]}" ]] || fail "partition roles have identical identifiers"
+
+efivars=/sys/firmware/efi/efivars
+[[ -d ${efivars} ]] || fail "UEFI boot provenance is unavailable"
+mounted_efivars=0
+if ! mountpoint -q "${efivars}"; then
+  mount -t efivarfs -o ro,nosuid,nodev,noexec efivarfs "${efivars}"
+  mounted_efivars=1
+fi
+efi_bytes=$(od -An -v -tx1 "${efivars}/StubDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f")
+read -r -a bytes <<< "${efi_bytes//$'\n'/ }"
+((${#bytes[@]} == 78)) || fail "invalid boot partition EFI variable length"
+[[ ${bytes[76]} == 00 && ${bytes[77]} == 00 ]] || fail "unterminated boot partition EFI variable"
+boot_uuid=""
+for ((i = 4; i < 76; i += 2)); do
+  [[ ${bytes[i + 1]} == 00 ]] || fail "invalid boot partition EFI variable encoding"
+  printf -v char '%b' "\\x${bytes[i]}"
+  boot_uuid+=${char}
+done
+if ((mounted_efivars)); then
+  umount "${efivars}"
+fi
+[[ ${boot_uuid,,} == "${ids[boot]}" ]] || fail "UKI was not loaded from its expected boot partition"
+
+udevadm settle
+partitions=$(lsblk --all --list --noheadings --paths --output NAME,PKNAME,PARTUUID,TYPE)
+while read -r device parent id type; do
+  for role in boot live payload; do
+    [[ ${id,,} == "${ids[${role}]}" ]] || continue
+    [[ ! -v devices[${role}] ]] || fail "ambiguous ${role} PARTUUID; remove duplicate installer media"
+    [[ ${type} == part && -b ${device} && -b ${parent} ]] || fail "${role} is not a disk partition"
+    devices[${role}]=${device}
+    parents[${role}]=${parent}
+  done
+done <<< "${partitions}"
+for role in boot live payload; do
+  [[ -v devices[${role}] ]] || fail "missing ${role} partition"
+done
+[[ ${parents[boot]} == "${parents[live]}" && ${parents[boot]} == "${parents[payload]}" ]] || fail "live root and payload are not on the boot disk"
+[[ $(readlink -f /run/initramfs/livedev) == "${devices[live]}" ]] || fail "dracut selected a different live root"
+
+payload=/run/puu-installer/payload
+mkdir -p "${payload}"
+mount -t ext4 -o ro,nosuid,nodev,noexec "${devices[payload]}" "${payload}"
+[[ -f ${payload}/image.tar && -f ${payload}/image.manifest ]] || fail "boot medium has no installer payload"
+echo "puu-live-media: boot=${devices[boot]} root=${devices[live]} payload=${devices[payload]}"

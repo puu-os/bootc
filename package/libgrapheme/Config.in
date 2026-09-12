@@ -1,0 +1,8 @@
+config BR2_PACKAGE_LIBGRAPHEME
+	bool "libgrapheme"
+	help
+	  Free and open-source C99 library providing utilities for
+	  Unicode (text segmentation, character properties, etc.).
+	  Used by Mutter starting with the GNOME 47 release line.
+
+	  https://libs.suckless.org/libgrapheme

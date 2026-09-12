@@ -1,0 +1,30 @@
+config BR2_PACKAGE_GNOME_DESKTOP
+	bool "gnome-desktop"
+	depends on BR2_PACKAGE_LIBGTK3
+	depends on BR2_PACKAGE_LIBGTK4
+	depends on BR2_PACKAGE_XKEYBOARD_CONFIG
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_PYTHON3 # gobject-introspection
+	select BR2_PACKAGE_FONTCONFIG
+	select BR2_PACKAGE_GDK_PIXBUF
+	select BR2_PACKAGE_GSETTINGS_DESKTOP_SCHEMAS
+	select BR2_PACKAGE_ISO_CODES
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBSECCOMP
+	select BR2_PACKAGE_LIBXKBCOMMON
+	select BR2_PACKAGE_GOBJECT_INTROSPECTION
+	help
+	  Library used by GNOME applications for desktop-wide
+	  integration: monitor configuration, idle detection,
+	  thumbnailing, language utilities, and the GNOME
+	  version metadata.  Provides libgnome-desktop-4 used
+	  by xdg-desktop-portal-gnome.
+
+	  https://gitlab.gnome.org/GNOME/gnome-desktop
+
+comment "gnome-desktop needs python3"
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LIBGTK3
+	depends on BR2_PACKAGE_LIBGTK4
+	depends on BR2_PACKAGE_XKEYBOARD_CONFIG
+	depends on !BR2_PACKAGE_PYTHON3

@@ -1,0 +1,19 @@
+config BR2_PACKAGE_IBUS
+	bool "ibus"
+	depends on BR2_USE_WCHAR # libglib2
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_PYTHON3 # gobject-introspection
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_GOBJECT_INTROSPECTION
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBXKBCOMMON
+	select BR2_PACKAGE_WAYLAND
+	select BR2_PACKAGE_XKEYBOARD_CONFIG
+	help
+	  Intelligent Input Bus for Linux/Unix.
+
+	  https://github.com/ibus/ibus
+
+comment "ibus needs python3 and a toolchain w/ wchar"
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on !BR2_USE_WCHAR || !BR2_PACKAGE_PYTHON3

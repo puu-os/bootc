@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Re-sign UKIs with sbctl
+ConditionPathExists=/var/lib/sbctl/keys/db/db.key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/puu-os/sbctl-sign-uki

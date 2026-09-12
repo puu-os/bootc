@@ -1,0 +1,9 @@
+config BR2_PACKAGE_DCONF
+	bool "dconf"
+	select BR2_PACKAGE_LIBGLIB2
+	help
+	  Low-level configuration system used by GNOME for application
+	  preferences. Provides the dconf D-Bus service plus a `dconf`
+	  CLI for compiling/reading the binary settings database.
+
+	  https://gitlab.gnome.org/GNOME/dconf

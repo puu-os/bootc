@@ -1,0 +1,10 @@
+config BR2_PACKAGE_LIBGUSB
+	bool "libgusb"
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBUSB
+	help
+	  GObject wrapper for libusb1 used by colord and other
+	  hardware-management projects.
+
+	  https://github.com/hughsie/libgusb

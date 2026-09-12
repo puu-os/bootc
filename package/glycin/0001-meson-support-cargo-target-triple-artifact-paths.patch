@@ -1,0 +1,28 @@
+--- a/meson.build
++++ b/meson.build
+@@ -61,6 +61,12 @@
+   cargo_profile = 'dev'
+ endif
+ 
++# When cross compiling, cargo places artifacts under an additional
++# target-triple directory.
++if get_option('rust-target') != ''
++  rust_target = get_option('rust-target') / rust_target
++endif
++
+ introspection = (get_option('introspection') or get_option('vapi') or get_option('capi_docs'))
+ 
+ if get_option('introspection') != introspection
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -122,3 +122,10 @@
+   type: 'boolean',
+   description: 'Build thumbnailer',
+ )
++
++option(
++  'rust-target',
++  type: 'string',
++  value: '',
++  description: 'Rust target triple when cross compiling; prefixes the cargo artifact directory',
++)

@@ -1,0 +1,18 @@
+config BR2_PACKAGE_COLORD
+	bool "colord"
+	depends on BR2_PACKAGE_HAS_UDEV
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_HWDATA
+	select BR2_PACKAGE_LCMS2
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBGUDEV
+	select BR2_PACKAGE_LIBGUSB
+	select BR2_PACKAGE_POLKIT
+	select BR2_PACKAGE_SQLITE
+	help
+	  System service for color management. Provides device color
+	  profiles to GNOME (mutter, gnome-settings-daemon) and other
+	  display stacks.
+
+	  https://www.freedesktop.org/software/colord/

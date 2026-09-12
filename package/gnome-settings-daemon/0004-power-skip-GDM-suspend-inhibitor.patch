@@ -1,0 +1,11 @@
+--- a/plugins/power/gsd-power-manager.c
++++ b/plugins/power/gsd-power-manager.c
+@@ -2738,6 +2738,8 @@
+                 g_debug ("already inhibited lid-switch");
+                 return;
+         }
++        if (g_getenv ("RUNNING_UNDER_GDM"))
++                return;
+         g_debug ("Adding suspend delay inhibitor");
+         manager->inhibit_suspend_taken = TRUE;
+         g_dbus_proxy_call_with_unix_fd_list (manager->logind_proxy,

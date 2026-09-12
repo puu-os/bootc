@@ -1,0 +1,11 @@
+config BR2_PACKAGE_LIBWACOM
+	bool "libwacom"
+	select BR2_PACKAGE_LIBEVDEV
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBGUDEV
+	help
+	  Library identifying Wacom (and Wacom-like) tablets, used by
+	  the GNOME Settings Wacom panel and libinput to map device
+	  capabilities and per-button quirks.
+
+	  https://github.com/linuxwacom/libwacom

@@ -1,0 +1,12 @@
+--- a/js/ui/components/polkitAgent.js
++++ b/js/ui/components/polkitAgent.js
+@@ -425,7 +425,8 @@ class AuthenticationAgent extends Shell.PolkitAuthenticationAgent {
+         try {
+             this.register();
+         } catch {
+-            log('Failed to register AuthenticationAgent');
++            if (!GLib.getenv('RUNNING_UNDER_GDM'))
++                log('Failed to register AuthenticationAgent');
+         }
+     }
+ 

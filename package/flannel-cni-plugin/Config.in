@@ -1,0 +1,17 @@
+config BR2_PACKAGE_FLANNEL_CNI_PLUGIN
+	bool "flannel-cni-plugin"
+	depends on BR2_x86_64 || BR2_aarch64
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_TOOLCHAIN_USES_UCLIBC
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_HOST_GO
+	help
+	  Flannel CNI plugin wrapper used by k3s CNI configuration.
+
+	  https://github.com/flannel-io/cni-plugin
+
+comment "flannel-cni-plugin needs a glibc/musl toolchain w/ threads, and x86_64/aarch64"
+	depends on !(BR2_x86_64 || BR2_aarch64) || \
+		!BR2_TOOLCHAIN_HAS_THREADS || BR2_TOOLCHAIN_USES_UCLIBC

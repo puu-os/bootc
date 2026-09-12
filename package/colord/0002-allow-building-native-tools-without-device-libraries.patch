@@ -1,0 +1,71 @@
+--- a/meson.build
++++ b/meson.build
+@@ -116,11 +116,12 @@
+ gmodule = dependency('gmodule-2.0')
+ giounix = dependency('gio-unix-2.0', version : '>= 2.45.8')
+ lcms = dependency('lcms2', version : '>= 2.6')
+-sqlite = dependency('sqlite3')
+-gusb = dependency('gusb', version : '>= 0.2.7')
+-gudev = dependency('gudev-1.0')
++sqlite = dependency('sqlite3', required : get_option('daemon'))
++gusb = dependency('gusb', version : '>= 0.2.7', required : get_option('daemon'))
++gudev = dependency('gudev-1.0', required : get_option('daemon') or get_option('sane') or get_option('libcolordcompat'))
+ libm = cc.find_library('m', required: false)
+-libudev = dependency('libudev')
++libudev = dependency('libudev', required : get_option('daemon'))
++conf.set('HAVE_LIBUDEV', libudev.found())
+ 
+ if get_option('udev_rules')
+   udev = dependency('udev')
+--- a/lib/meson.build
++++ b/lib/meson.build
+@@ -1,7 +1,9 @@
+ lib_incdir = include_directories('.')
+ 
+ subdir('colord')
+-subdir('colorhug')
++if gusb.found() and libudev.found()
++  subdir('colorhug')
++endif
+ 
+ if get_option('libcolordcompat')
+   subdir('compat')
+--- a/lib/colord/cd-edid.c
++++ b/lib/colord/cd-edid.c
+@@ -25,7 +25,9 @@
+ #include <string.h>
+ #include <glib-object.h>
+ #include <math.h>
++#ifdef HAVE_LIBUDEV
+ #include <libudev.h>
++#endif
+ 
+ #include "cd-edid.h"
+ #include "cd-quirk.h"
+@@ -106,7 +108,7 @@
+ static gchar *
+ cd_edid_convert_pnp_id_to_string (const gchar *pnp_id)
+ {
+-#ifndef PNP_IDS
++#if defined(HAVE_LIBUDEV) && !defined(PNP_IDS)
+ 	gchar *vendor = NULL;
+ 	struct udev_hwdb *hwdb = NULL;
+ 	struct udev_list_entry *e;
+@@ -142,7 +144,7 @@
+ 	if (udev != NULL)
+ 		udev_unref (udev);
+ 	return vendor;
+-#else
++#elif defined(PNP_IDS)
+ 	g_autofree gchar *data = NULL;
+ 
+ 	/* load pnp.ids */
+@@ -165,6 +167,8 @@
+ 			idx++;
+ 	}
+ 	return NULL;
++#else
++	return NULL;
+ #endif
+ }
+ 

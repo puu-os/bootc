@@ -1,0 +1,16 @@
+[Unit]
+Description=Validate live boot medium and mount its installer payload
+DefaultDependencies=no
+ConditionKernelCommandLine=puu.live
+Requires=dracut-initqueue.service
+After=dracut-initqueue.service
+Before=sysroot.mount initrd-switch-root.target
+OnFailure=emergency.target
+OnFailureJobMode=isolate
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/puu-live-media
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console

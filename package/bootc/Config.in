@@ -1,0 +1,21 @@
+config BR2_PACKAGE_BOOTC
+	bool "bootc"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LIBOSTREE
+	depends on BR2_PACKAGE_COMPOSEFS
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_HOST_RUSTC
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_ZSTD
+	help
+	  bootc transactionally fetches OCI containers as a bootable
+	  host system. This package provides the bootc binary, its
+	  systemd units and dracut module.
+
+	  https://github.com/bootc-dev/bootc
+
+comment "bootc needs a systemd init"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LIBOSTREE
+	depends on BR2_PACKAGE_COMPOSEFS
+	depends on !BR2_INIT_SYSTEMD

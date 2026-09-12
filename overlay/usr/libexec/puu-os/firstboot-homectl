@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+IDENTITY = Path("/var/lib/puu/identity.json")
+
+
+def run(argv, *, input_data=None, check=True, redacted=False):
+    result = subprocess.run(
+        argv,
+        input=input_data,
+        capture_output=True,
+        text=True,
+    )
+    if check and result.returncode != 0:
+        print("$ " + ("<redacted>" if redacted else " ".join(argv)), file=sys.stderr)
+        if result.stdout:
+            print(result.stdout, file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        raise SystemExit(result.returncode)
+    return result
+
+
+def local_passwd_user_exists(name: str) -> bool:
+    with open("/etc/passwd", encoding="utf-8", errors="replace") as f:
+        return any(line.split(":", 1)[0] == name for line in f)
+
+
+def main():
+    if not IDENTITY.exists():
+        return
+
+    identity = json.loads(IDENTITY.read_text(encoding="utf-8"))
+
+    username = identity["userName"]
+    real_name = identity.get("realName")
+    if not real_name or real_name == "Puu live user":
+        identity["realName"] = username
+    record = json.dumps(identity)
+
+    if local_passwd_user_exists(username):
+        sys.exit(f"refusing to shadow homed user {username}: /etc/passwd entry exists")
+
+    known = run(["/usr/bin/homectl", "inspect", username], check=False)
+    if known.returncode != 0:
+        run(
+            ["/usr/bin/homectl", "create", "--identity=-"],
+            input_data=record,
+            redacted=True,
+        )
+
+    run([
+        "/usr/bin/busctl", "--timeout=30", "call",
+        "org.freedesktop.home1", "/org/freedesktop/home1",
+        "org.freedesktop.home1.Manager", "GetHomeByName",
+        "s", username,
+    ])
+
+    accounts_dir = Path("/var/lib/AccountsService/users")
+    accounts_dir.mkdir(parents=True, exist_ok=True)
+    session = identity.get("preferredSessionLauncher", "gnome")
+    (accounts_dir / username).write_text(
+        f"[User]\nSession={session}\nSystemAccount=false\n",
+        encoding="utf-8",
+    )
+
+    IDENTITY.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    main()

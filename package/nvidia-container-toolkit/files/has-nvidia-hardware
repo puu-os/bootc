@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+from pathlib import Path
+import re
+import stat
+import sys
+
+
+def is_char_device(path: Path) -> bool:
+    try:
+        return stat.S_ISCHR(path.stat().st_mode)
+    except OSError:
+        return False
+
+
+def check_nvidia_dev(dev_root: Path) -> bool:
+    return is_char_device(dev_root / "nvidiactl") or is_char_device(dev_root / "nvidia0")
+
+
+def check_pci_devices(sysfs_root: Path) -> bool:
+    devices_dir = sysfs_root / "bus" / "pci" / "devices"
+    if not devices_dir.is_dir():
+        return False
+
+    for vendor_file in devices_dir.glob("*/vendor"):
+        try:
+            vendor = vendor_file.read_text(encoding="utf-8").strip()
+            if vendor != "0x10de":
+                continue
+            class_file = vendor_file.parent / "class"
+            dev_class = class_file.read_text(encoding="utf-8").strip()
+            if dev_class in ("0x030000", "0x030200"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def check_devicetree(sysfs_root: Path, procfs_root: Path) -> bool:
+    dt_regex = re.compile(r"^(nvidia,(tegra|gb10)|.*grace[._ -]blackwell)", re.IGNORECASE)
+    candidate_paths = [
+        procfs_root / "device-tree" / "compatible",
+        sysfs_root / "firmware" / "devicetree" / "base" / "compatible",
+    ]
+    for path in candidate_paths:
+        try:
+            data = path.read_bytes()
+            for entry in data.split(b"\x00"):
+                decoded = entry.decode("utf-8", errors="replace").strip()
+                if decoded and dt_regex.search(decoded):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def main() -> None:
+    sysfs_root = Path("/sys")
+    procfs_root = Path("/proc")
+    dev_root = Path("/dev")
+
+    has_hw = (
+        check_nvidia_dev(dev_root)
+        or check_pci_devices(sysfs_root)
+        or check_devicetree(sysfs_root, procfs_root)
+    )
+    sys.exit(0 if has_hw else 1)
+
+
+if __name__ == "__main__":
+    main()

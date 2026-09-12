@@ -1,0 +1,26 @@
+config BR2_PACKAGE_FLATPAK
+	bool "flatpak"
+	depends on BR2_PACKAGE_APPSTREAM
+	depends on BR2_PACKAGE_BUBBLEWRAP
+	depends on BR2_PACKAGE_FUSE_OVERLAYFS
+	depends on BR2_PACKAGE_LIBOSTREE
+	depends on BR2_PACKAGE_LIBXMLB
+	depends on BR2_PACKAGE_XDG_DBUS_PROXY
+	select BR2_PACKAGE_DCONF
+	select BR2_PACKAGE_GDK_PIXBUF
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBARCHIVE
+	select BR2_PACKAGE_LIBCAP
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBGPGME
+	select BR2_PACKAGE_LIBSECCOMP
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_POLKIT
+	select BR2_PACKAGE_XLIB_LIBXAU
+	select BR2_PACKAGE_ZSTD
+	help
+	  Flatpak is a system for building, distributing, and running
+	  sandboxed desktop applications on Linux.
+
+	  https://github.com/flatpak/flatpak

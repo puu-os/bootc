@@ -1,0 +1,10 @@
+config BR2_PACKAGE_GSOUND
+	bool "gsound"
+	select BR2_PACKAGE_LIBCANBERRA
+	select BR2_PACKAGE_LIBGLIB2
+	help
+	  Small GObject wrapper around libcanberra exposing the
+	  gsound-1.0 D-Bus / GIO API consumed by gnome-bluetooth and
+	  other GNOME components.
+
+	  https://gitlab.gnome.org/GNOME/gsound

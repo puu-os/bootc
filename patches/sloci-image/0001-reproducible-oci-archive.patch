@@ -1,0 +1,36 @@
+--- a/sloci-image
++++ b/sloci-image
+@@ -96 +96,2 @@
+-# Prints the current date and UTC time in ISO 8601.
++# Prints the image created timestamp in ISO 8601.
++# Honours SOURCE_DATE_EPOCH when set.
+@@ -98 +99 @@
+-	date -u +%Y-%m-%dT%H:%M:%SZ
++	date -u -d "@${SOURCE_DATE_EPOCH:-0}" +%Y-%m-%dT%H:%M:%SZ
+@@ -273,5 +274,5 @@
+-	    "ExposedPorts": $(json_pseudoarray "$CFG_PORTS"),
+-	    "Env": $(json_string_array "$CFG_ENV"),
+-	    "Entrypoint": $(json_string_array "$CFG_ENTRYPOINT"),
+-	    "Cmd": $(json_string_array "$CFG_CMD"),
+-	    "Volumes": $(json_pseudoarray "$CFG_VOLUMES"),
++	    ${CFG_PORTS:+"$(echo \"ExposedPorts\"): $(json_pseudoarray "$CFG_PORTS"),"}
++	    ${CFG_ENV:+"$(echo \"Env\"): $(json_string_array "$CFG_ENV"),"}
++	    ${CFG_ENTRYPOINT:+"$(echo \"Entrypoint\"): $(json_string_array "$CFG_ENTRYPOINT"),"}
++	    ${CFG_CMD:+"$(echo \"Cmd\"): $(json_string_array "$CFG_CMD"),"}
++	    ${CFG_VOLUMES:+"$(echo \"Volumes\"): $(json_pseudoarray "$CFG_VOLUMES"),"}
+@@ -381 +382,5 @@
+-	tar -C "$ROOTFS" ${DEBUG:+-v} --acls --xattrs -cf "${rootfs_tgz%.gz}" .
++	tar -C "$ROOTFS" ${DEBUG:+-v} --sort=name \
++		--mtime="@${SOURCE_DATE_EPOCH:-0}" \
++		--numeric-owner --acls --xattrs \
++		--pax-option='exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime' \
++		-cf "${rootfs_tgz%.gz}" .
+@@ -384 +388 @@
+-	gzip ${DEBUG:+-v} "${rootfs_tgz%.gz}"
++	gzip -n ${DEBUG:+-v} "${rootfs_tgz%.gz}"
+@@ -428 +432,4 @@
+-	tar ${DEBUG:+-v} -cf "$file_name.tar" -C "$IMAGE_NAME" .
++	tar ${DEBUG:+-v} --sort=name \
++		--mtime="@${SOURCE_DATE_EPOCH:-0}" \
++		--owner=0 --group=0 --numeric-owner \
++		-cf "$file_name.tar" -C "$IMAGE_NAME" oci-layout index.json blobs

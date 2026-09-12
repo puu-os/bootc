@@ -1,0 +1,12 @@
+--- a/panels/printers/meson.build
++++ b/panels/printers/meson.build
+@@ -42,8 +42,7 @@ sources += gnome.compile_resources(
+ deps = common_deps + [
+   cups_dep,
+   m_dep,
+-  polkit_gobject_dep,
+-  dependency('smbclient')
++  polkit_gobject_dep
+ ]
+ 
+ printers_panel_lib = static_library(

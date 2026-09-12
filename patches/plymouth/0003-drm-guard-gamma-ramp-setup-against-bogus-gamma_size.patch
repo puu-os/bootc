@@ -1,0 +1,27 @@
+--- a/src/plugins/renderers/drm/plugin.c
++++ b/src/plugins/renderers/drm/plugin.c
+@@ -64,6 +64,11 @@
+ 
+ #define BYTES_PER_PIXEL (4)
+ 
++/* Sanity bound on the gamma ramp size reported by the GPU driver. Real
++ * hardware uses small values (typically 256 or 1024); this cap keeps the
++ * allocation size computation from overflowing on bogus input. */
++#define PLY_MAX_GAMMA_SIZE (65536)
++
+ /* For builds with libdrm < 2.4.89 */
+ #ifndef DRM_MODE_ROTATE_0
+ #define DRM_MODE_ROTATE_0 (1 << 0)
+@@ -614,9 +619,10 @@ ply_renderer_head_new (ply_renderer_backend_t *backend,
+         head->area.width = output->mode.hdisplay;
+         head->area.height = output->mode.vdisplay;
+ 
+-        if (gamma_size) {
++        /* Reject gamma_size < 2 (divide by zero) or > max (overflow). */
++        if (gamma_size > 1 && gamma_size <= PLY_MAX_GAMMA_SIZE) {
+                 head->gamma_size = gamma_size;
+-                head->gamma = malloc (gamma_size * 3 * sizeof(uint16_t));
++                head->gamma = malloc ((size_t) gamma_size * 3 * sizeof(uint16_t));
+ 
+                 step = UINT16_MAX / (gamma_size - 1);
+                 for (i = 0; i < gamma_size; i++) {

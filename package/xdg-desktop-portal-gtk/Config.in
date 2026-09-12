@@ -1,0 +1,8 @@
+config BR2_PACKAGE_XDG_DESKTOP_PORTAL_GTK
+	bool "xdg-desktop-portal-gtk"
+	depends on BR2_PACKAGE_XDG_DESKTOP_PORTAL
+	depends on BR2_PACKAGE_LIBGTK3
+	help
+	  GTK back-end implementation for xdg-desktop-portal.
+
+	  https://github.com/flatpak/xdg-desktop-portal-gtk

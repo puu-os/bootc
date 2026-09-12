@@ -1,0 +1,11 @@
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") !== 0) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    if (subject.active || subject.isInGroup("netdev") || subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});

@@ -1,0 +1,19 @@
+config BR2_PACKAGE_GNOME_SOFTWARE
+	bool "gnome-software"
+	depends on BR2_PACKAGE_APPSTREAM
+	depends on BR2_PACKAGE_FWUPD
+	depends on BR2_PACKAGE_FLATPAK
+	depends on BR2_PACKAGE_JSON_GLIB
+	depends on BR2_PACKAGE_LIBADWAITA
+	depends on BR2_PACKAGE_LIBGTK4
+	depends on BR2_PACKAGE_LIBSOUP3
+	depends on BR2_PACKAGE_LIBXMLB
+	select BR2_PACKAGE_GDK_PIXBUF
+	select BR2_PACKAGE_GSETTINGS_DESKTOP_SCHEMAS
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_POLKIT
+	help
+	  GNOME Software is the GNOME application for managing apps,
+	  Flatpaks, and device firmware updates through fwupd.
+
+	  https://gitlab.gnome.org/GNOME/gnome-software

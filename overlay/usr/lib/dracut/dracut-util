@@ -1,0 +1,124 @@
+#!/bin/sh
+
+set -f
+
+mode=${0##*/}
+case "$mode" in
+  dracut-getarg | dracut-getargs)
+    ;;
+  *)
+    echo "ERROR: 'dracut-util' has to be called via a symlink to the tool name." >&2
+    exit 1
+    ;;
+esac
+
+if [ "${CMDLINE+x}" != x ]; then
+  echo "ERROR: CMDLINE env not set" >&2
+  exit 1
+fi
+
+if [ "$#" -ne 1 ]; then
+  echo "ERROR: Number of arguments invalid" >&2
+  exit 1
+fi
+
+query=$1
+key=${query%%=*}
+expected_value=
+match_expected=0
+case "$query" in
+  *=?*)
+    expected_value=${query#*=}
+    match_expected=1
+    ;;
+esac
+
+if [ -z "$key" ]; then
+  echo "ERROR: search key undefined" >&2
+  exit 1
+fi
+
+strip_quotes() {
+  stripped=$1
+  case "$stripped" in
+    \"*)
+      stripped=${stripped#\"}
+      stripped=${stripped%\"}
+      ;;
+  esac
+  printf '%s\n' "$stripped"
+}
+
+split_arg() {
+  parsed_arg=$(strip_quotes "$1")
+  parsed_key=${parsed_arg%%=*}
+  parsed_has_value=0
+  parsed_value=
+
+  case "$parsed_arg" in
+    *=*)
+      parsed_has_value=1
+      parsed_value=$(strip_quotes "${parsed_arg#*=}")
+      ;;
+  esac
+}
+
+# shellcheck disable=SC2086
+set -- $CMDLINE
+
+case "$mode" in
+  dracut-getarg)
+    found_without_value=0
+    found_value=0
+    value=
+
+    for arg do
+      split_arg "$arg"
+      [ "$parsed_key" = "$key" ] || continue
+
+      if [ "$parsed_has_value" -eq 1 ]; then
+        found_without_value=0
+        found_value=1
+        value=$parsed_value
+      else
+        found_without_value=1
+        found_value=0
+        value=
+      fi
+    done
+
+    if [ "$match_expected" -eq 1 ]; then
+      [ "$found_value" -eq 1 ] && [ "$value" = "$expected_value" ]
+      exit $?
+    fi
+
+    if [ "$found_value" -eq 1 ]; then
+      printf '%s\n' "$value"
+      exit 0
+    fi
+
+    [ "$found_without_value" -eq 1 ]
+    ;;
+
+  dracut-getargs)
+    found=0
+
+    for arg do
+      split_arg "$arg"
+      [ "$parsed_key" = "$key" ] || continue
+
+      if [ "$parsed_has_value" -eq 1 ]; then
+        if [ "$match_expected" -eq 1 ] && [ "$parsed_value" != "$expected_value" ]; then
+          continue
+        fi
+        printf '%s\n' "$parsed_value"
+        found=1
+      elif [ "$match_expected" -eq 0 ]; then
+        printf '%s\n' "$parsed_key"
+        found=1
+      fi
+    done
+
+    [ "$found" -eq 1 ]
+    ;;
+esac
