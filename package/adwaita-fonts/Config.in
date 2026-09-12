@@ -1,0 +1,7 @@
+config BR2_PACKAGE_ADWAITA_FONTS
+	bool "adwaita-fonts"
+	help
+	  Adwaita Sans and Adwaita Mono are GNOME's interface and
+	  monospace fonts starting with GNOME 48.
+
+	  https://gitlab.gnome.org/GNOME/adwaita-fonts

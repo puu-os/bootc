@@ -1,0 +1,8 @@
+config BR2_PACKAGE_GWEATHER_LOCATIONS
+	bool "gweather-locations"
+	help
+	  Database of weather-data locations (cities, observation
+	  stations) used by libgweather. Split out from libgweather
+	  starting with the GNOME 47 release line.
+
+	  https://gitlab.gnome.org/GNOME/gweather-locations

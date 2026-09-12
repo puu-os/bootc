@@ -1,0 +1,32 @@
+config BR2_PACKAGE_NVIDIA_CONTAINER_TOOLKIT
+	bool "nvidia-container-toolkit"
+	depends on BR2_x86_64 || BR2_aarch64
+	depends on BR2_PACKAGE_NVIDIA_DRIVER
+	depends on BR2_INIT_SYSTEMD
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_TOOLCHAIN_USES_UCLIBC
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_HOST_GO
+	help
+	  NVIDIA Container Toolkit ships the OCI runtime wrapper
+	  (nvidia-container-runtime), CDI lifecycle hook
+	  (nvidia-cdi-hook) and CLI (nvidia-ctk) used by container
+	  runtimes (containerd, cri-o, runc) to expose NVIDIA GPUs to
+	  containers via the Container Device Interface.
+
+	  Includes the nvidia-cdi-refresh.service and .path units that
+	  regenerate /var/run/cdi/nvidia.yaml whenever the driver or
+	  toolkit changes.
+
+	  https://github.com/NVIDIA/nvidia-container-toolkit
+
+comment "nvidia-container-toolkit needs systemd and a glibc toolchain w/ threads"
+	depends on BR2_x86_64 || BR2_aarch64
+	depends on BR2_PACKAGE_NVIDIA_DRIVER
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
+	depends on BR2_USE_MMU
+	depends on !BR2_INIT_SYSTEMD || \
+		!BR2_TOOLCHAIN_HAS_THREADS || BR2_TOOLCHAIN_USES_UCLIBC

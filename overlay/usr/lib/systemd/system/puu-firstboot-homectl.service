@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Create and activate initial systemd-homed user
+ConditionPathExists=/var/lib/puu/identity.json
+Requires=systemd-homed.service
+RequiresMountsFor=/var/lib/puu /var/home
+After=systemd-homed.service
+Before=display-manager.service gdm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/puu-os/firstboot-homectl
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# username uid group gid password home shell groups comment
+# Pin stable service accounts and groups for bootc images.
+- - uucp 14 * - - - Unix-to-Unix Copy
+- - sudo 27 * - - - sudo
+- - dip 30 * - - - dialup IP
+- - clock 39 * - - - PTP/clock
+- - kvm 44 * - - - kvm
+- - input 104 * - - - input devices
+- - sgx 106 * - - - sgx
+- - render 107 * - - - DRI rendering nodes
+- - lpadmin 108 * - - - Printers admin group
+- - realtime 135 * - - - realtime
+www-data 33 www-data 33 * /var/www /bin/false - www-data
+lp 7 lp 7 * /var/spool/lpd /bin/false - lp
+gdm 42 gdm 42 * /var/lib/gdm /sbin/nologin video,input,render GNOME Display Manager
+sshd 74 sshd 74 * /var/empty /sbin/nologin - SSH drop priv user
+dbus 81 dbus 81 * /run/dbus - dbus DBus messagebus user
+polkitd 114 polkitd 114 * - - - Polkit Daemon

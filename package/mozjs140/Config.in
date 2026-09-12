@@ -1,0 +1,23 @@
+config BR2_PACKAGE_MOZJS140
+	bool "mozjs140"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_PACKAGE_PYTHON3
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LLVM_ARCH_SUPPORTS # host-llvm
+	depends on BR2_HOST_GCC_AT_LEAST_7 # host-llvm
+	select BR2_PACKAGE_HOST_RUSTC
+	select BR2_HOST_CMAKE_AT_LEAST_3_20 # host-llvm
+	select BR2_PACKAGE_ICU
+	select BR2_PACKAGE_ZLIB
+	help
+	  SpiderMonkey 140 is Mozilla's JavaScript engine, used by
+	  GJS to provide the GNOME Shell's JavaScript runtime.
+
+	  https://spidermonkey.dev/
+
+comment "mozjs140 needs a toolchain w/ C++, python3, host gcc >= 7"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LLVM_ARCH_SUPPORTS
+	depends on !BR2_INSTALL_LIBSTDCPP || \
+		!BR2_PACKAGE_PYTHON3 || \
+		!BR2_HOST_GCC_AT_LEAST_7

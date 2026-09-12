@@ -1,0 +1,11 @@
+--- a/meson.build
++++ b/meson.build
+@@ -49,7 +49,7 @@ pylint_flags = [
+ ]
+ 
+ g_ir_scanner = find_program('g-ir-scanner', required: get_option('introspection'))
+-build_gir = get_option('introspection') and g_ir_scanner.found() and not meson.is_cross_build()
++build_gir = get_option('introspection') and g_ir_scanner.found()
+ build_docs = get_option('gtk_doc') and build_gir
+ 
+ locations_bin = dependency('gweather-locations').get_variable(

@@ -1,0 +1,11 @@
+--- a/src/bluetooth.service.in
++++ b/src/bluetooth.service.in
+@@ -21,7 +21,7 @@ ProtectControlGroups=true
+ StateDirectory=bluetooth
+ StateDirectoryMode=0700
+ ConfigurationDirectory=bluetooth
+-ConfigurationDirectoryMode=0555
++ConfigurationDirectoryMode=0755
+ 
+ # Execute Mappings
+ MemoryDenyWriteExecute=true

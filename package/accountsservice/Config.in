@@ -1,0 +1,19 @@
+config BR2_PACKAGE_ACCOUNTSSERVICE
+	bool "accountsservice"
+	depends on BR2_USE_WCHAR # glib2
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_PYTHON3 # gobject-introspection
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_JSON_C
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_POLKIT
+	select BR2_PACKAGE_GOBJECT_INTROSPECTION
+	help
+	  D-Bus service for querying and manipulating user account
+	  information via the org.freedesktop.Accounts API.
+
+	  https://www.freedesktop.org/software/accountsservice/
+
+comment "accountsservice needs a toolchain w/ wchar"
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on !BR2_USE_WCHAR

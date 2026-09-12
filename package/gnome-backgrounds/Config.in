@@ -1,0 +1,8 @@
+config BR2_PACKAGE_GNOME_BACKGROUNDS
+	bool "gnome-backgrounds"
+	select BR2_PACKAGE_GSETTINGS_DESKTOP_SCHEMAS
+	help
+	  Default GNOME wallpapers and background-chooser
+	  metadata used by gnome-shell and Settings.
+
+	  https://gitlab.gnome.org/GNOME/gnome-backgrounds

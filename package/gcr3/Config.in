@@ -1,0 +1,22 @@
+config BR2_PACKAGE_GCR3
+	bool "gcr3"
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS # libgcrypt -> libgpg-error
+	depends on BR2_USE_WCHAR # libglib2
+	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2
+	depends on BR2_USE_MMU # libglib2
+	depends on !BR2_STATIC_LIBS # p11-kit
+	select BR2_PACKAGE_LIBGCRYPT
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_P11_KIT
+	help
+	  Legacy GNOME crypto library (gcr-3 / gck-1 ABI), built UI-less
+	  to provide gcr-base-3 and gck-1 for gnome-keyring. Coexists
+	  with the modern gcr (gcr-4) package.
+
+	  https://gitlab.gnome.org/GNOME/gcr
+
+comment "gcr3 needs a toolchain w/ wchar, threads, dynamic library"
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS
+	depends on BR2_USE_MMU
+	depends on !BR2_USE_WCHAR || !BR2_TOOLCHAIN_HAS_THREADS || \
+		BR2_STATIC_LIBS

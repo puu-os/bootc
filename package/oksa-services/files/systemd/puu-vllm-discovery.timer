@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh local vLLM model inventory
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

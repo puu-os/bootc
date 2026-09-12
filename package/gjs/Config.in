@@ -1,0 +1,27 @@
+config BR2_PACKAGE_GJS
+	bool "gjs"
+	depends on BR2_INSTALL_LIBSTDCPP # mozjs140
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS # mozjs140
+	depends on BR2_PACKAGE_PYTHON3 # mozjs140
+	depends on BR2_PACKAGE_LLVM_ARCH_SUPPORTS # mozjs140
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_MOZJS140
+	depends on BR2_HOST_GCC_AT_LEAST_7 # mozjs140
+	select BR2_PACKAGE_GOBJECT_INTROSPECTION
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_CAIRO
+	help
+	  GJS is JavaScript bindings for the GNOME platform APIs
+	  (GObject introspection).  GNOME Shell's UI is written in
+	  GJS.
+
+	  https://gitlab.gnome.org/GNOME/gjs
+
+comment "gjs needs a toolchain w/ C++, python3, host gcc >= 7"
+	depends on BR2_PACKAGE_GOBJECT_INTROSPECTION_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_MOZJS140
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_LLVM_ARCH_SUPPORTS
+	depends on !BR2_INSTALL_LIBSTDCPP || \
+		!BR2_PACKAGE_PYTHON3 || \
+		!BR2_HOST_GCC_AT_LEAST_7

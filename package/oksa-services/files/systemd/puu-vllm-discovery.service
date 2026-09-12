@@ -1,0 +1,8 @@
+[Unit]
+Description=Discover local vLLM models
+After=local-fs.target
+ConditionKernelCommandLine=!puu.live
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/puu-os/discover-vllm-models

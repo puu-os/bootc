@@ -1,0 +1,18 @@
+XDG_DESKTOP_PORTAL_GNOME_VERSION_MAJOR = 50
+XDG_DESKTOP_PORTAL_GNOME_VERSION = $(XDG_DESKTOP_PORTAL_GNOME_VERSION_MAJOR).0
+XDG_DESKTOP_PORTAL_GNOME_SOURCE = xdg-desktop-portal-gnome-$(XDG_DESKTOP_PORTAL_GNOME_VERSION).tar.xz
+XDG_DESKTOP_PORTAL_GNOME_SITE = https://download.gnome.org/sources/xdg-desktop-portal-gnome/$(XDG_DESKTOP_PORTAL_GNOME_VERSION_MAJOR)
+XDG_DESKTOP_PORTAL_GNOME_LICENSE = LGPL-2.1+
+XDG_DESKTOP_PORTAL_GNOME_LICENSE_FILES = COPYING
+XDG_DESKTOP_PORTAL_GNOME_INSTALL_STAGING = YES
+XDG_DESKTOP_PORTAL_GNOME_DEPENDENCIES = \
+	host-pkgconf \
+	fontconfig \
+	gnome-desktop \
+	gsettings-desktop-schemas \
+	libadwaita \
+	libgtk4 \
+	mutter \
+	xdg-desktop-portal
+
+$(eval $(meson-package))

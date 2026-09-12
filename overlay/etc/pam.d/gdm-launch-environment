@@ -1,0 +1,13 @@
+#%PAM-1.0
+
+auth     required                  pam_succeed_if.so quiet user ingroup gdm
+auth     required                  pam_permit.so
+
+account  required                  pam_succeed_if.so quiet user ingroup gdm
+account  required                  pam_permit.so
+
+password required                  pam_deny.so
+
+session  optional                  pam_keyinit.so force revoke
+session  optional                  pam_systemd.so class=greeter
+session  required                  pam_permit.so

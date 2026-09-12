@@ -1,0 +1,5 @@
+--- a/meson.build
++++ b/meson.build
+@@ -51 +51 @@
+-desktop_portal_interfaces_dir = xdp_dep.get_variable(pkgconfig: 'interfaces_dir')
++desktop_portal_interfaces_dir = meson.get_external_property('sys_root', '/') + xdp_dep.get_variable(pkgconfig: 'interfaces_dir')

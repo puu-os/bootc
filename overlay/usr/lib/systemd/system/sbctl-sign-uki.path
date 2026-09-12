@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Watch ESP for new UKIs to re-sign
+ConditionPathExists=/var/lib/sbctl/keys/db/db.key
+
+[Path]
+PathChanged=/efi/EFI/Linux
+PathChanged=/efi/EFI/PUU
+PathChanged=/efi/EFI/systemd
+PathChanged=/efi/EFI/BOOT
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+def main() -> None:
+    run_dir = Path("/run/puu-os")
+    bootc_bin = Path("/usr/bin/bootc")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pending_file = run_dir / "upgrade-pending"
+    pending_file.unlink(missing_ok=True)
+
+    upgrade_rc = subprocess.run([str(bootc_bin), "upgrade", "--quiet"]).returncode
+
+    proc = subprocess.run(
+        [str(bootc_bin), "status", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        sys.exit(f"bootc status failed: {proc.stderr.strip()}")
+    try:
+        status = json.loads(proc.stdout).get("status")
+    except (json.JSONDecodeError, AttributeError) as exc:
+        sys.exit(f"bootc status returned invalid JSON: {exc}")
+    if isinstance(status, dict) and status.get("staged") is not None:
+        pending_file.touch()
+    sys.exit(upgrade_rc)
+
+
+if __name__ == "__main__":
+    main()

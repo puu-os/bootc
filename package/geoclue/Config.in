@@ -1,0 +1,16 @@
+config BR2_PACKAGE_GEOCLUE
+	bool "geoclue"
+	depends on BR2_PACKAGE_LIBSOUP3
+	select BR2_PACKAGE_AVAHI
+	select BR2_PACKAGE_AVAHI_LIBAVAHI_CLIENT
+	select BR2_PACKAGE_AVAHI_DAEMON
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_MODEM_MANAGER
+	help
+	  Geoclue is a D-Bus geoinformation service. The goal of the
+	  Geoclue project is to make creating location-aware
+	  applications as simple as possible.
+
+	  https://gitlab.freedesktop.org/geoclue/geoclue

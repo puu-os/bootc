@@ -1,0 +1,20 @@
+--- a/data/CMakeLists.txt
++++ b/data/CMakeLists.txt
+@@ -29,7 +29,7 @@
+ # ********************************
+ 
+ set(OAUTH2_SCHEMES "x-scheme-handler/eds-oauth2;")
+-if(NOT WITH_GOOGLE_CLIENT_ID STREQUAL "")
++if(NOT WITH_GOOGLE_CLIENT_ID STREQUAL "" AND NOT CMAKE_CROSSCOMPILING)
+ 	set(CMAKE_REQUIRED_DEFINITIONS ${DATA_SERVER_CFLAGS})
+ 	set(CMAKE_REQUIRED_INCLUDES ${CMAKE_BINARY_DIR} ${DATA_SERVER_INCLUDE_DIRS})
+ 	set(CMAKE_REQUIRED_LIBRARIES ${DATA_SERVER_LDFLAGS})
+@@ -50,7 +50,7 @@
+ 		set(OAUTH2_SCHEMES "x-scheme-handler/${_google_oauth2_scheme};${OAUTH2_SCHEMES}")
+ 	endif(NOT _google_oauth2_scheme STREQUAL "")
+ 	unset(_google_oauth2_scheme)
+-endif(NOT WITH_GOOGLE_CLIENT_ID STREQUAL "")
++endif()
+ 
+ configure_file(org.gnome.evolution-data-server.OAuth2-handler.desktop.in
+ 	org.gnome.evolution-data-server.OAuth2-handler.desktop.in

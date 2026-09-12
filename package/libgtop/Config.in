@@ -1,0 +1,9 @@
+config BR2_PACKAGE_LIBGTOP
+	bool "libgtop"
+	select BR2_PACKAGE_LIBGLIB2
+	help
+	  Library for getting system information (CPU, memory,
+	  processes, etc.). Used by gnome-control-center and other
+	  GNOME utilities.
+
+	  https://gitlab.gnome.org/GNOME/libgtop

@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+# Bypass udev coldplug gate for Plymouth on arm64 virtio_gpu DRM.
+kargs = ["plymouth.ignore-udev"]
+match-architectures = ["aarch64"]

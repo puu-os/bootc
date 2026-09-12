@@ -1,0 +1,11 @@
+config BR2_PACKAGE_LIBNOTIFY
+	bool "libnotify"
+	select BR2_PACKAGE_GDK_PIXBUF
+	select BR2_PACKAGE_LIBGLIB2
+	help
+	  Library for sending desktop notifications to a notification
+	  daemon, as defined by the freedesktop.org notification
+	  specification. Used by GNOME components to surface user-facing
+	  alerts.
+
+	  https://gitlab.gnome.org/GNOME/libnotify

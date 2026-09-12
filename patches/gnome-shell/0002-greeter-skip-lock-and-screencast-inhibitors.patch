@@ -1,0 +1,144 @@
+--- a/js/ui/main.js
++++ b/js/ui/main.js
+@@ -255,30 +255,31 @@
+ 
+     introspectService = new Introspect.IntrospectService();
+ 
+-    // Set up the global default break reminder manager and its D-Bus interface
+-    breakManager = new BreakManager.BreakManager();
+-    timeLimitsManager = new TimeLimitsManager.TimeLimitsManager();
+-    screenTimeDBus = new ShellDBus.ScreenTimeDBus(breakManager);
+-    breakManagerDispatcher = new BreakManager.BreakDispatcher(breakManager);
+-    timeLimitsDispatcher = new TimeLimitsManager.TimeLimitsDispatcher(timeLimitsManager);
++    if (!sessionMode.isGreeter) {
++        breakManager = new BreakManager.BreakManager();
++        timeLimitsManager = new TimeLimitsManager.TimeLimitsManager();
++        screenTimeDBus = new ShellDBus.ScreenTimeDBus(breakManager);
++        breakManagerDispatcher = new BreakManager.BreakDispatcher(breakManager);
++        timeLimitsDispatcher = new TimeLimitsManager.TimeLimitsDispatcher(timeLimitsManager);
++
++        global.connect('shutdown', () => {
++            // Block shutdown until the session history file has been written
++            const loop = new GLib.MainLoop(null, false);
++            const source = GLib.idle_source_new();
++            source.set_callback(() => {
++                timeLimitsManager.shutdown()
++                    .catch(e => console.warn(`Failed to stop time limits manager: ${e.message}`))
++                    .finally(() => loop.quit());
++                return GLib.SOURCE_REMOVE;
++            });
++            source.attach(loop.get_context());
++            loop.run();
++        });
++    }
+ 
+     brightnessManager = new BrightnessManager.BrightnessManager();
+     brightnessDBus = new ShellDBus.BrightnessDBus(brightnessManager);
+ 
+-    global.connect('shutdown', () => {
+-        // Block shutdown until the session history file has been written
+-        const loop = new GLib.MainLoop(null, false);
+-        const source = GLib.idle_source_new();
+-        source.set_callback(() => {
+-            timeLimitsManager.shutdown()
+-                .catch(e => console.warn(`Failed to stop time limits manager: ${e.message}`))
+-                .finally(() => loop.quit());
+-            return GLib.SOURCE_REMOVE;
+-        });
+-        source.attach(loop.get_context());
+-        loop.run();
+-    });
+-
+     layoutManager.init();
+     overview.init();
+ 
+--- a/js/ui/screenShield.js
++++ b/js/ui/screenShield.js
+@@ -209,7 +209,8 @@
+     async _syncInhibitor() {
+         const lockEnabled = this._settings.get_boolean(LOCK_ENABLED_KEY);
+         const lockLocked = this._lockSettings.get_boolean(DISABLE_LOCK_KEY);
+-        const inhibit = !!this._loginSession && this._loginSession.Active &&
++        const inhibit = !Main.sessionMode.isGreeter &&
++                         !!this._loginSession && this._loginSession.Active &&
+                          !this._isActive && lockEnabled && !lockLocked &&
+                          !!Main.sessionMode.unlockDialog;
+ 
+--- a/js/ui/screenshot.js
++++ b/js/ui/screenshot.js
+@@ -1143,40 +1143,44 @@
+         this._screencastSupported = false;
+         this._currentMode = UIMode.SCREENSHOT;
+ 
+-        this._screencastProxy = new ScreencastProxy(
+-            Gio.DBus.session,
+-            'org.gnome.Shell.Screencast',
+-            '/org/gnome/Shell/Screencast',
+-            (object, error) => {
+-                if (error !== null) {
+-                    log('Error connecting to the screencast service');
++        this._screencastProxy = null;
++
++        if (Main.sessionMode.allowScreencast) {
++            this._screencastProxy = new ScreencastProxy(
++                Gio.DBus.session,
++                'org.gnome.Shell.Screencast',
++                '/org/gnome/Shell/Screencast',
++                (object, error) => {
++                    if (error !== null) {
++                        log('Error connecting to the screencast service');
++                        return;
++                    }
++
++                    this._screencastSupported = this._screencastProxy.ScreencastSupported;
++                    this._syncCastButton();
++                });
++
++            this._screencastProxy.connectSignal('Error', (proxy, sender, [errorName, message]) =>
++                this._screencastFailed(ScreencastPhase.RECORDING,
++                    Gio.DBusError.new_for_dbus_error(errorName, message)));
++
++            this._screencastProxy.connect('notify::g-name-owner', () => {
++                if (this._screencastProxy.g_name_owner)
+                     return;
+-                }
+ 
+-                this._screencastSupported = this._screencastProxy.ScreencastSupported;
+-                this._syncCastButton();
+-            });
++                if (!this._screencastInProgress)
++                    return;
+ 
+-        this._screencastProxy.connectSignal('Error', (proxy, sender, [errorName, message]) =>
+-            this._screencastFailed(ScreencastPhase.RECORDING,
+-                Gio.DBusError.new_for_dbus_error(errorName, message)));
+-
+-        this._screencastProxy.connect('notify::g-name-owner', () => {
+-            if (this._screencastProxy.g_name_owner)
+-                return;
+-
+-            if (!this._screencastInProgress)
+-                return;
+-
+-            // If the recorder crashed while we're starting it in _startScreencast(),
+-            // let the catch-block there handle the error.
+-            if (this._screencastStarting)
+-                return;
+-
+-            this._screencastFailed(ScreencastPhase.RECORDING,
+-                new GLib.Error(ScreencastErrors, ScreencastError.SERVICE_CRASH,
+-                    'Service crashed'));
+-        });
++                // If the recorder crashed while we're starting it in _startScreencast(),
++                // let the catch-block there handle the error.
++                if (this._screencastStarting)
++                    return;
++
++                this._screencastFailed(ScreencastPhase.RECORDING,
++                    new GLib.Error(ScreencastErrors, ScreencastError.SERVICE_CRASH,
++                        'Service crashed'));
++            });
++        }
+ 
+         this._lockdownSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.lockdown'});
+ 

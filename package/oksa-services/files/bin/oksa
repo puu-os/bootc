@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+libexec_dir = Path("/usr/libexec/puu-os")
+for directory in (Path(__file__).resolve().parent, libexec_dir):
+    if directory.is_dir() and str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+import model_serving as ms
+
+
+def die(msg: str) -> None:
+    sys.exit(f"error: {msg}")
+
+
+def control_files(state_dir: Path) -> tuple[Path, Path]:
+    selected = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
+    disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
+    return selected, disabled
+
+
+def run_discover(discover_bin: Path) -> None:
+    if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
+        subprocess.run([str(discover_bin)], check=False)
+
+
+def check_capabilities(planner_bin: Path, model_name: str) -> bool:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        check_dir = Path(tmp_dir)
+        manifests_dir = check_dir / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(
+            os.environ,
+            PUU_K3S_MANIFEST_DIR=str(manifests_dir),
+            PUU_VLLM_SELECTED_MODEL=model_name,
+            PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
+            PUU_VLLM_IGNORE_SERVING_DISABLED="true",
+            PUU_VLLM_ACTIVE_MODEL_FILE=str(check_dir / "active-model"),
+        )
+        res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
+        return res.returncode == 0
+
+
+def get_available_models(state_dir: Path) -> list[str]:
+    return [name for name, _, _ in ms.read_models_list(state_dir / "models.list")]
+
+
+def cmd_list(state_dir: Path, discover_bin: Path, planner_bin: Path) -> None:
+    run_discover(discover_bin)
+    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+    active_model = ms.read_first_line(active_model_file)
+
+    print(f"{'NAME':<40} {'CAPABILITIES':<12} ACTIVE")
+    for model_name in get_available_models(state_dir):
+        cap = "ok" if check_capabilities(planner_bin, model_name) else "insufficient"
+        act = "*" if model_name == active_model else ""
+        print(f"{model_name:<40} {cap:<12} {act}")
+
+
+def cmd_start(state_dir: Path, discover_bin: Path, planner_bin: Path, model_name: str) -> None:
+    run_discover(discover_bin)
+    models = get_available_models(state_dir)
+    if model_name not in models:
+        die(f"unknown model: {model_name}")
+
+    if not check_capabilities(planner_bin, model_name):
+        die("insufficient capabilities")
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    selected_model_file, serving_disabled_file = control_files(state_dir)
+
+    ms.atomic_write_text(selected_model_file, f"{model_name}\n")
+    serving_disabled_file.unlink(missing_ok=True)
+
+    env = dict(os.environ, PUU_VLLM_SELECTED_MODEL=model_name, PUU_VLLM_REQUIRE_SELECTED_MODEL="true")
+    res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
+    if res.returncode != 0:
+        die("insufficient capabilities")
+
+
+def cmd_stop(state_dir: Path, planner_bin: Path) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    selected_model_file, serving_disabled_file = control_files(state_dir)
+
+    selected_model_file.unlink(missing_ok=True)
+    ms.atomic_write_text(serving_disabled_file, "")
+
+    res = subprocess.run([str(planner_bin)], capture_output=True)
+    if res.returncode != 0:
+        die("stop failed")
+
+
+def main() -> None:
+    state_dir = ms.STATE_DIR
+    discover_bin = libexec_dir / "discover-vllm-models"
+    planner_bin = libexec_dir / "plan-vllm-workloads"
+
+    parser = argparse.ArgumentParser(prog="oksa", description="Puu OS model serving control")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("list", help="List available models")
+    start_parser = subparsers.add_parser("start", help="Start a model")
+    start_parser.add_argument("name", help="Model name")
+    subparsers.add_parser("stop", help="Stop model serving")
+
+    args = parser.parse_args()
+
+    if args.command == "list":
+        cmd_list(state_dir, discover_bin, planner_bin)
+    elif args.command == "start":
+        cmd_start(state_dir, discover_bin, planner_bin, args.name)
+    elif args.command == "stop":
+        cmd_stop(state_dir, planner_bin)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -9,7 +9,7 @@ desktop_portal_dbus_interfaces = gnome_portal_interfaces + [
+   'org.freedesktop.impl.portal.Session',
+ ]
+ 
+-desktop_portal_interfaces_dir = xdg_desktop_portal_dep.get_variable(
++desktop_portal_interfaces_dir = meson.get_external_property('sys_root', '/') + xdg_desktop_portal_dep.get_variable(
+   pkgconfig: 'interfaces_dir')
+ 
+ desktop_portal_dbus_interfaces_files = []

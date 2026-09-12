@@ -1,0 +1,102 @@
+--- a/plugins/media-keys/gsd-media-keys-manager.c
++++ b/plugins/media-keys/gsd-media-keys-manager.c
+@@ -209,0 +210,2 @@
++        guint            inhibit_keys_retry;
++        guint            inhibit_suspend_retry;
+@@ -3206,0 +3209,10 @@
++static void inhibit_suspend (GsdMediaKeysManager *manager);
++
++static gboolean
++retry_inhibit_suspend (gpointer user_data)
++{
++        inhibit_suspend (GSD_MEDIA_KEYS_MANAGER (user_data));
++
++        return G_SOURCE_REMOVE;
++}
++
+@@ -3222,2 +3234,13 @@
+-                if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+-                        g_warning ("Unable to inhibit suspend: %s", error->message);
++                if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
++                        if (g_error_matches (error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED) &&
++                            priv->inhibit_suspend_retry++ < 30) {
++                                priv->inhibit_suspend_taken = FALSE;
++                                g_timeout_add_seconds_full (G_PRIORITY_DEFAULT,
++                                                            1,
++                                                            retry_inhibit_suspend,
++                                                            g_object_ref (manager),
++                                                            g_object_unref);
++                        } else {
++                                g_warning ("Unable to inhibit suspend: %s", error->message);
++                        }
++                }
+@@ -3225,0 +3249 @@
++                priv->inhibit_suspend_retry = 0;
+@@ -3362,0 +3387,10 @@
++static void inhibit_keys (GsdMediaKeysManager *manager);
++
++static gboolean
++retry_inhibit_keys (gpointer user_data)
++{
++        inhibit_keys (GSD_MEDIA_KEYS_MANAGER (user_data));
++
++        return G_SOURCE_REMOVE;
++}
++
+@@ -3378,2 +3412,12 @@
+-                if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+-                        g_warning ("Unable to inhibit keypresses: %s", error->message);
++                if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
++                        if (g_error_matches (error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED) &&
++                            priv->inhibit_keys_retry++ < 30) {
++                                g_timeout_add_seconds_full (G_PRIORITY_DEFAULT,
++                                                            1,
++                                                            retry_inhibit_keys,
++                                                            g_object_ref (manager),
++                                                            g_object_unref);
++                        } else {
++                                g_warning ("Unable to inhibit keypresses: %s", error->message);
++                        }
++                }
+@@ -3381,0 +3426 @@
++                priv->inhibit_keys_retry = 0;
+@@ -3394,0 +3440,22 @@
++inhibit_keys (GsdMediaKeysManager *manager)
++{
++        GsdMediaKeysManagerPrivate *priv = GSD_MEDIA_KEYS_MANAGER_GET_PRIVATE (manager);
++
++        g_debug ("Adding system inhibitors for power keys");
++        priv->inhibit_keys_fd = -1;
++        g_dbus_proxy_call_with_unix_fd_list (priv->logind_proxy,
++                                             "Inhibit",
++                                             g_variant_new ("(ssss)",
++                                                            "handle-power-key:handle-suspend-key:handle-hibernate-key",
++                                                            g_get_user_name (),
++                                                            "GNOME handling keypresses",
++                                                            "block"),
++                                             0,
++                                             G_MAXINT,
++                                             NULL,
++                                             NULL,
++                                             inhibit_done,
++                                             manager);
++}
++
++static void
+@@ -3430,15 +3497 @@
+-        g_debug ("Adding system inhibitors for power keys");
+-        priv->inhibit_keys_fd = -1;
+-        g_dbus_proxy_call_with_unix_fd_list (priv->logind_proxy,
+-                                             "Inhibit",
+-                                             g_variant_new ("(ssss)",
+-                                                            "handle-power-key:handle-suspend-key:handle-hibernate-key",
+-                                                            g_get_user_name (),
+-                                                            "GNOME handling keypresses",
+-                                                            "block"),
+-                                             0,
+-                                             G_MAXINT,
+-                                             NULL,
+-                                             NULL,
+-                                             inhibit_done,
+-                                             manager);
++        inhibit_keys (manager);

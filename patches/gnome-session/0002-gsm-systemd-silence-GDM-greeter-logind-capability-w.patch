@@ -1,0 +1,13 @@
+--- a/gnome-session/gsm-systemd.c
++++ b/gnome-session/gsm-systemd.c
+@@ -511,8 +511,9 @@ can_take_action (GsmSystem  *system,
+         res = g_dbus_proxy_call_sync (manager->priv->sd_proxy, method, NULL,
+                                       0, G_MAXINT, NULL, NULL);
+         if (!res) {
+-                g_warning ("Failed to call %s. Something is very wrong with logind!",
+-                           method);
++                if (!g_getenv ("RUNNING_UNDER_GDM"))
++                        g_warning ("Failed to call %s. Something is very wrong with logind!",
++                                   method);
+                 return GSM_ACTION_UNAVAILABLE;
+         }

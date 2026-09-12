@@ -1,0 +1,10 @@
+[Unit]
+Description=Generate per-model vLLM workloads
+Requires=k3s.service
+After=k3s.service puu-vllm-discovery.service puu-model-serving-labeler.service puu-nvlink-topology.service
+ConditionKernelCommandLine=!puu.live
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/libexec/puu-os/discover-vllm-models
+ExecStart=/usr/libexec/puu-os/plan-vllm-workloads

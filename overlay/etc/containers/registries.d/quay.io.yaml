@@ -1,0 +1,3 @@
+docker:
+  quay.io/puu-os:
+    use-sigstore-attachments: true

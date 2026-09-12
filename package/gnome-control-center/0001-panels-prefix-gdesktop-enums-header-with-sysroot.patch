@@ -1,0 +1,24 @@
+--- a/panels/background/meson.build
++++ b/panels/background/meson.build
+@@ -23,7 +23,8 @@ common_sources += gnome.mkenums_simple(
+ )
+ 
+ gdesktop_enums_header = files(
+-  gsettings_desktop_dep.get_variable(pkgconfig: 'prefix') + '/include/gsettings-desktop-schemas/gdesktop-enums.h'
++  meson.get_external_property('sys_root', '/') +
++  gsettings_desktop_dep.get_variable(pkgconfig: 'prefix') + '/include/gsettings-desktop-schemas/gdesktop-enums.h'
+ )
+ 
+ common_sources += gnome.mkenums_simple(
+--- a/panels/system/meson.build
++++ b/panels/system/meson.build
+@@ -68,7 +68,8 @@ sources += gnome.compile_resources(
+ )
+ 
+ gdesktop_enums_header = files(
+-  gsettings_desktop_dep.get_variable(pkgconfig: 'prefix') + '/include/gsettings-desktop-schemas/gdesktop-enums.h'
++  meson.get_external_property('sys_root', '/') +
++  gsettings_desktop_dep.get_variable(pkgconfig: 'prefix') + '/include/gsettings-desktop-schemas/gdesktop-enums.h'
+ )
+ 
+ sources += gnome.mkenums_simple(

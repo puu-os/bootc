@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import os
+from pathlib import Path
+import sys
+import time
+
+ZERO6 = "0" * 32
+
+
+def has_default_ipv4_route(procfs_root: Path) -> bool:
+    route_file = procfs_root / "net" / "route"
+    if not route_file.is_file():
+        return False
+    try:
+        with route_file.open(encoding="utf-8", errors="replace") as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                if len(parts) > 1 and parts[1] == "00000000":
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def has_default_ipv6_route(procfs_root: Path) -> bool:
+    route_file = procfs_root / "net" / "ipv6_route"
+    if not route_file.is_file():
+        return False
+    try:
+        with route_file.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 5:
+                    if parts[0] == ZERO6 and parts[1] == "00" and parts[4] != ZERO6:
+                        return True
+    except OSError:
+        pass
+    return False
+
+
+def has_default_route(procfs_root: Path) -> bool:
+    return has_default_ipv4_route(procfs_root) or has_default_ipv6_route(procfs_root)
+
+
+def main() -> None:
+    timeout = 120
+    if len(sys.argv) > 1:
+        try:
+            timeout = int(sys.argv[1])
+        except ValueError:
+            sys.stderr.write(f"error: invalid timeout: {sys.argv[1]}\n")
+            sys.exit(2)
+
+    procfs_root = Path("/proc")
+    poll_interval = float(os.environ.get("PUU_ROUTE_POLL_INTERVAL", "1.0"))
+
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < timeout:
+        if has_default_route(procfs_root):
+            sys.exit(0)
+        time.sleep(poll_interval)
+
+    sys.exit("timed out waiting for a default route")
+
+
+if __name__ == "__main__":
+    main()

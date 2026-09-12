@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import os
+import stat
+
+
+def main() -> None:
+    path = "/var/lib/gdm/.config/pulse/cookie"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    with os.fdopen(fd, "wb") as cookie:
+        info = os.fstat(cookie.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{path}: expected a regular file")
+        os.fchmod(cookie.fileno(), 0o600)
+        if info.st_size != 256:
+            cookie.truncate(0)
+            cookie.write(os.urandom(256))
+
+
+if __name__ == "__main__":
+    main()

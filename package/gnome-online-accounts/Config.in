@@ -1,0 +1,17 @@
+config BR2_PACKAGE_GNOME_ONLINE_ACCOUNTS
+	bool "gnome-online-accounts"
+	depends on BR2_PACKAGE_LIBADWAITA
+	depends on BR2_PACKAGE_LIBGTK4
+	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_JSON_GLIB
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBREST
+	select BR2_PACKAGE_LIBSECRET
+	select BR2_PACKAGE_LIBSOUP3
+	select BR2_PACKAGE_LIBXML2
+	help
+	  GNOME Online Accounts (GOA) library, providing the goa-1.0
+	  D-Bus interface and helpers consumed by the GNOME Control
+	  Center.
+
+	  https://gitlab.gnome.org/GNOME/gnome-online-accounts
