@@ -208,6 +208,22 @@ if [ -d "$mutter_typelib_dir" ]; then
   done
 fi
 rm -f "${TARGET_DIR}/usr/share/gdm/greeter/autostart/orca-autostart.desktop"
+
+# Regenerate gdk-pixbuf so that librsvg's SVG loader gets filled in.
+pixbuf_module_dir=lib/gdk-pixbuf-2.0/2.10.0
+pixbuf_loaders_cache="${TARGET_DIR}/usr/${pixbuf_module_dir}/loaders.cache"
+if [ -d "${TARGET_DIR}/usr/${pixbuf_module_dir}/loaders" ]; then
+  GDK_PIXBUF_MODULEDIR="${HOST_DIR}/${pixbuf_module_dir}/loaders" \
+    "${HOST_DIR}/bin/gdk-pixbuf-query-loaders" |
+    sed -e '/^#/d' -e 's,^"lib,"/usr/lib,' > "${pixbuf_loaders_cache}"
+
+  while read -r loader; do
+    if [ ! -f "${TARGET_DIR}${loader}" ]; then
+      echo "${BASH_SOURCE##*/}: ${loader} is in loaders.cache but not in the target" >&2
+      exit 1
+    fi
+  done < <(sed -n 's,^"\(/usr/.*\.so\)".*,\1,p' "${pixbuf_loaders_cache}")
+fi
 mkdir -p "${TARGET_DIR}/etc"/{pulse/default.pa.d,tcb}
 
 write_os_release
