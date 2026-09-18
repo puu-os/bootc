@@ -3,9 +3,9 @@
 
 # Puu OS bootc container
 
-Puu OS is a bootc container operating system. It provides the means to
-create your own images and the supply chain for OS updates using any
-standard OCI container repository.
+Puu OS is a bootc container operating system. It provides the means to create
+your own images and the supply chain for OS updates using any standard OCI
+container repository.
 
 Puu OS builds on top of the following open source projects:
 
@@ -25,45 +25,28 @@ Puu OS builds on top of the following open source projects:
 - [Unified Kernel Image
   (UKI)](https://uapi-group.org/specifications/specs/unified_kernel_image/)
 
+## System Management
 
-## Images & Variants
+- Inspect the active deployment: `bootc status`.
+- Upgrade the current variant to the latest image: `bootc upgrade`.
+- Switch to a different variant or version: `bootc switch quay.io/puu-os/gnome:<version>`.
 
-Puu OS publishes bootc container images as multi-arch OCI manifests:
+## Development
 
-`quay.io/puu-os/<variant>:<version>`
+### Listing the available boards
 
-- **`gnome`**: Default desktop variant featuring GNOME, K3s, and AI services.
+    make list
 
-### System Management
+### Building
 
-```sh
-# Inspect the active deployment
-bootc status
+    make BOARD=puu_amd64 build
+    make BOARD=puu_amd64 burn DEVICE=/dev/sdX
+    make lint
 
-# Upgrade the current variant to the latest image
-bootc upgrade
+### Releasing
 
-# Switch to a different variant or version
-bootc switch quay.io/puu-os/gnome:1
-```
-
-## Building
-
-Builds require a board. List them with `make list` (`puu_amd64`,
-`puu_arm64`).
-
-```sh
-make BOARD=puu_amd64 build
-make BOARD=puu_amd64 burn DEVICE=/dev/sdX
-make lint
-```
-
-## Releasing
-
-```sh
-make release VERSION=N
-make publish
-```
+    make release VERSION=N
+    make publish
 
 ## License
 
@@ -76,10 +59,3 @@ Artwork in [`artwork/`](artwork/) is licensed under the
 The Puu OS logo uses [IBM Plex Mono](https://github.com/IBM/plex), which
 is licensed under the
 [SIL Open Font License 1.1](https://openfontlicense.org/open-font-license-official-text/).
-
-### Third-party software
-
-GPL-2.0-or-later covers only Puu OS's own code and build glue. The shipped
-image bundles independent upstream projects, each under its own license as
-recorded in that package's Buildroot `.mk` (`*_LICENSE` and
-`*_LICENSE_FILES`).
