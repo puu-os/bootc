@@ -28,43 +28,23 @@ spec:
 
     proxy_config:
       model_list:
+        - model_name: "qwen3.8-27b-nvfp4"
+          litellm_params:
+            model: openai/qwen3.8-27b-nvfp4
+            api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
+            api_key: none
+        - model_name: "bonsai-27b"
+          litellm_params:
+            model: openai/bonsai-27b
+            api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
+            api_key: none
         - model_name: "*"
           litellm_params:
             model: openai/*
-            api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local/v1
+            api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
             api_key: none
       general_settings:
         max_parallel_requests: 32
       router_settings:
         timeout: 300
         num_retries: 0
-
-    extraResources:
-      - apiVersion: gateway.networking.k8s.io/v1
-        kind: Gateway
-        metadata:
-          name: litellm-gateway
-        spec:
-          gatewayClassName: agentgateway
-          listeners:
-            - name: http
-              protocol: HTTP
-              port: 80
-              allowedRoutes:
-                namespaces:
-                  from: Same
-      - apiVersion: gateway.networking.k8s.io/v1
-        kind: HTTPRoute
-        metadata:
-          name: litellm
-        spec:
-          parentRefs:
-            - name: litellm-gateway
-          rules:
-            - matches:
-                - path:
-                    type: PathPrefix
-                    value: /
-              backendRefs:
-                - name: litellm
-                  port: 4000
