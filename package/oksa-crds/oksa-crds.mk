@@ -2,7 +2,7 @@ OKSA_CRDS_VERSION = 1.0
 OKSA_CRDS_GATEWAY_API_VERSION = 1.6.1
 OKSA_CRDS_GATEWAY_API_INFERENCE_EXTENSION_VERSION = 1.6.0
 OKSA_CRDS_AGENTGATEWAY_VERSION = 1.2.0
-OKSA_CRDS_SOURCE = standard-install.yaml
+OKSA_CRDS_SOURCE = experimental-install.yaml
 OKSA_CRDS_SITE = https://github.com/kubernetes-sigs/gateway-api/releases/download/v$(OKSA_CRDS_GATEWAY_API_VERSION)
 OKSA_CRDS_AGENTGATEWAY_SITE = https://raw.githubusercontent.com/agentgateway/agentgateway/v$(OKSA_CRDS_AGENTGATEWAY_VERSION)/controller/install/helm/agentgateway-crds/templates
 OKSA_CRDS_AGENTGATEWAY_CRDS = \
@@ -22,8 +22,8 @@ endef
 
 define OKSA_CRDS_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/usr/share/puu-os/k3s/crds
-	$(INSTALL) -D -m 0644 $(OKSA_CRDS_DL_DIR)/standard-install.yaml \
-		$(TARGET_DIR)/usr/share/puu-os/k3s/crds/10-gateway-api-standard-install.yaml
+	$(INSTALL) -D -m 0644 $(OKSA_CRDS_DL_DIR)/experimental-install.yaml \
+		$(TARGET_DIR)/usr/share/puu-os/k3s/crds/10-gateway-api-experimental-install.yaml
 	$(INSTALL) -D -m 0644 $(OKSA_CRDS_DL_DIR)/manifests.yaml \
 		$(TARGET_DIR)/usr/share/puu-os/k3s/crds/11-gateway-api-inference-extension-manifests.yaml
 	set -e; for crd in $(OKSA_CRDS_AGENTGATEWAY_CRDS); do \
