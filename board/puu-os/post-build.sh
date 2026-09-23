@@ -18,6 +18,18 @@ init_puu_arch "${PUU_ARCH}"
 install -Dm644 "${BASH_SOURCE%/*}/../../artwork/splash.png" \
   "${TARGET_DIR}/usr/share/plymouth/themes/puu/splash.png"
 
+# Buildroot generates mime.cache when shared-mime-info is installed, before
+# other packages and the overlay add their own definitions. Rebuild it from
+# the complete set.
+: "${STAGING_DIR:?STAGING_DIR must be set by Buildroot}"
+mime_tmp="$(mktemp -d)"
+mkdir -p "${mime_tmp}/packages"
+cp "${STAGING_DIR}/usr/share/mime/packages/"*.xml "${mime_tmp}/packages/"
+cp "${TARGET_DIR}/usr/share/mime/packages/"*.xml "${mime_tmp}/packages/"
+"${HOST_DIR}/bin/update-mime-database" "${mime_tmp}"
+install -m644 "${mime_tmp}/mime.cache" "${TARGET_DIR}/usr/share/mime/mime.cache"
+rm -rf "${mime_tmp}"
+
 puu_variant="${PUU_VARIANT:-gnome}"
 puu_version="${PUU_VERSION:-1}"
 target_imgref="${PUU_TARGET_IMGREF:-quay.io/puu-os/${puu_variant}:${puu_version}}"

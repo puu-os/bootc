@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- Buildroot ships shared-mime-info 1.12, which predates JPEG XL. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="image/jxl">
+    <comment>JPEG XL image</comment>
+    <acronym>JXL</acronym>
+    <expanded-acronym>JPEG Extended Long-term</expanded-acronym>
+    <magic priority="50">
+      <match type="string" value="\xff\x0a" offset="0"/>
+      <match type="string" value="\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a" offset="0"/>
+    </magic>
+    <glob pattern="*.jxl"/>
+  </mime-type>
+</mime-info>
