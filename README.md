@@ -29,7 +29,8 @@ Puu OS builds on top of the following open source projects:
 
 Default network services available after installation:
 
-- Open WebUI: `http://puu.local:30080`
+- Open WebUI: `http://puu.local/`
+- OpenAI API: `http://puu.local/v1`
 - Kubernetes (K3s): `https://puu.local:6443`
 - SSH: port 22
 
