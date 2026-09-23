@@ -6,10 +6,11 @@ NVIDIA_CONTAINER_TOOLKIT_LICENSE_FILES = LICENSE
 NVIDIA_CONTAINER_TOOLKIT_CPE_ID_VENDOR = nvidia
 NVIDIA_CONTAINER_TOOLKIT_CPE_ID_PRODUCT = container_toolkit
 
-# Explicitly link -lnvidia-ml and -lnvidia-sandboxutils for full RELRO.
-NVIDIA_CONTAINER_TOOLKIT_DEPENDENCIES = nvidia-driver
-NVIDIA_CONTAINER_TOOLKIT_GO_ENV = \
-	CGO_LDFLAGS="$(TARGET_LDFLAGS) -lnvidia-ml -lnvidia-sandboxutils"
+# go-nvml dlopens libnvidia-ml.so.1 at runtime and resolves only the
+# symbols the installed driver provides, so the binaries must not bind
+# now. Use the upstream link flags instead of linking the driver libraries.
+NVIDIA_CONTAINER_TOOLKIT_EXTLDFLAGS = \
+	-Wl,--export-dynamic,--unresolved-symbols=ignore-in-object-files,-z,lazy
 NVIDIA_CONTAINER_TOOLKIT_GOMOD = github.com/NVIDIA/nvidia-container-toolkit
 NVIDIA_CONTAINER_TOOLKIT_CLI_VERSION_PACKAGE = \
 	$(NVIDIA_CONTAINER_TOOLKIT_GOMOD)/internal/info
