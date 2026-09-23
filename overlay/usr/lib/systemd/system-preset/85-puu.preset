@@ -24,6 +24,7 @@ enable colord.service
 enable usbguard-dbus.service
 enable sbctl-sign-uki.path
 enable puu-bootc-upgrade.timer
+disable bootc-fetch-apply-updates.timer
 enable fwupd-refresh.timer
 # Automatically mark successful boot for systemd-boot rollback.
 enable systemd-bless-boot.service
