@@ -181,7 +181,7 @@ mkdir -p "${efi_part}"/{EFI/{BOOT,Linux,systemd},loader}
 genimage_tmp=$(mktemp -d "${BINARIES_DIR}/genimage.XXXXXX")
 cleanup_paths+=("${genimage_tmp}")
 genimage_config="${genimage_tmp}/genimage.cfg"
-cmdline="puu.live SYSTEMD_SULOGIN_FORCE=1 root=live:PARTUUID=@LIVE_PARTUUID@ puu.boot-partuuid=@BOOT_PARTUUID@ puu.payload-partuuid=@PAYLOAD_PARTUUID@ ro rd.live.image rd.overlay systemd.gpt_auto=0${PUU_CMDLINE_EXTRA} splash plymouth.ignore-serial-consoles vt.global_cursor_default=0 console=tty0"
+cmdline="puu.live SYSTEMD_SULOGIN_FORCE=1 root=live:PARTUUID=@LIVE_PARTUUID@ puu.boot-partuuid=@BOOT_PARTUUID@ puu.payload-partuuid=@PAYLOAD_PARTUUID@ ro rd.live.image rd.overlay systemd.gpt_auto=0${PUU_CMDLINE_EXTRA} quiet splash plymouth.ignore-serial-consoles vt.global_cursor_default=0 console=tty0"
 "${HOST_DIR}/bin/python3" "${BASH_SOURCE%/*}/generate-image-config" \
   --arch "${PUU_ARCH}" --epoch "${SOURCE_DATE_EPOCH}" \
   --template "${BASH_SOURCE%/*}/genimage.cfg" --output "${genimage_config}" \
