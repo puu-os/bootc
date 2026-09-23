@@ -31,7 +31,11 @@ fi
 
 install -d -m 0700 -o puu -g puu /home/puu
 
-install -d -m 0755 /etc/dconf/db/local.d
+install -d -m 0755 /etc/dconf/profile /etc/dconf/db/local.d
+cat > /etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
 cat > /etc/dconf/db/local.d/00-puu-live-session <<'EOF'
 [org/gnome/desktop/session]
 idle-delay=uint32 0
