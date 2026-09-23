@@ -15,7 +15,7 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/oksa \
 		$(TARGET_DIR)/usr/bin/oksa
 	for executable in discover-vllm-models label-model-serving-node \
-		collect-nvlink-topology plan-vllm-workloads; do \
+		collect-nvlink-topology plan-vllm-workloads preseed-vllm-models; do \
 		$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/$$executable \
 			$(TARGET_DIR)/usr/libexec/puu-os/$$executable || exit $$?; \
 	done

@@ -37,7 +37,10 @@ def main() -> None:
     state_dir = ms.STATE_DIR
     model_state_dir = state_dir / "models.d"
 
-    model_state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        model_state_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return
 
     models_list_lines = []
     models_json_items = []
