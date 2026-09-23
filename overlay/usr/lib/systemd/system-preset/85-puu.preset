@@ -19,6 +19,11 @@ enable gdm.service
 enable bluetooth.service
 enable bolt.service
 enable rtkit-daemon.service
+# Audio runs in the user session (see user-preset), not system-wide.
+disable pipewire.*
+disable pipewire-pulse.*
+disable pipewire-manager.socket
+disable wireplumber.service
 enable upower.service
 enable colord.service
 enable usbguard-dbus.service
