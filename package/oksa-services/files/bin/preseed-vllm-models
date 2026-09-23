@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+libexec_dir = Path("/usr/libexec/puu-os")
+for directory in (Path(__file__).resolve().parent, libexec_dir):
+    if directory.is_dir() and str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+import model_serving as ms
+
+
+def download_with_cli(repo_id: str, revision: str, dest_dir: Path) -> bool:
+    for cli_cmd in ("hf", "huggingface-cli"):
+        if shutil.which(cli_cmd):
+            cmd = [cli_cmd, "download", repo_id, "--local-dir", str(dest_dir)]
+            if revision and revision != "main":
+                cmd.extend(["--revision", revision])
+            try:
+                res = subprocess.run(cmd, check=False)
+                if res.returncode == 0:
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def download_with_http(repo_id: str, revision: str, dest_dir: Path) -> bool:
+    rev = revision or "main"
+    api_url = f"https://huggingface.co/api/models/{repo_id}/revision/{rev}"
+    req = urllib.request.Request(api_url, headers={"User-Agent": "puu-os-preseed/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+        print(f"error: failed to query HF API for {repo_id}: {exc}", file=sys.stderr)
+        return False
+
+    siblings = data.get("siblings", [])
+    if not siblings:
+        print(f"error: no files found in repository {repo_id}", file=sys.stderr)
+        return False
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for file_info in siblings:
+        rfilename = file_info.get("rfilename", "")
+        if not rfilename or rfilename.startswith(".") or "/" in rfilename:
+            # Skip hidden files or subtrees unless standard
+            pass
+        file_url = f"https://huggingface.co/{repo_id}/resolve/{rev}/{rfilename}"
+        out_path = dest_dir / rfilename
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.is_file() and out_path.stat().st_size > 0:
+            continue
+        print(f"  Fetching {rfilename}...")
+        file_req = urllib.request.Request(file_url, headers={"User-Agent": "puu-os-preseed/1.0"})
+        try:
+            with urllib.request.urlopen(file_req, timeout=120) as in_stream, open(out_path, "wb") as out_stream:
+                shutil.copyfileobj(in_stream, out_stream)
+        except (urllib.error.URLError, OSError) as exc:
+            print(f"error: failed downloading {rfilename}: {exc}", file=sys.stderr)
+            return False
+    return True
+
+
+def preseed_model(catalog_file: Path, models_dir: Path) -> bool:
+    meta = ms.parse_env_file(catalog_file)
+    model_name = meta.get("PUU_VLLM_MODEL_NAME") or catalog_file.stem
+    repo_id = meta.get("PUU_VLLM_REPO_ID")
+    revision = meta.get("PUU_VLLM_REVISION", "main")
+
+    if not repo_id:
+        print(f"error: no PUU_VLLM_REPO_ID in {catalog_file}", file=sys.stderr)
+        return False
+
+    dest_dir = models_dir / model_name
+    config_file = dest_dir / "config.json"
+    serving_env = dest_dir / "puu-serving.env"
+
+    if config_file.is_file():
+        print(f"Model {model_name} already present at {dest_dir}")
+        shutil.copyfile(catalog_file, serving_env)
+        return True
+
+    print(f"Pre-seeding model {model_name} ({repo_id}) to {dest_dir}...")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if not download_with_cli(repo_id, revision, dest_dir):
+        if not download_with_http(repo_id, revision, dest_dir):
+            print(f"error: failed to download {model_name}", file=sys.stderr)
+            return False
+
+    shutil.copyfile(catalog_file, serving_env)
+    print(f"Successfully pre-seeded {model_name}")
+    return True
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Preseed vLLM models from catalog")
+    parser.add_argument(
+        "models",
+        nargs="*",
+        help="Specific model names to preseed (default: all with PUU_VLLM_AUTOSTART=true)",
+    )
+    parser.add_argument(
+        "--catalog-dir",
+        type=Path,
+        default=Path(os.environ.get("PUU_VLLM_MODEL_CATALOG_DIR", "/usr/share/puu-os/vllm/catalog.d")),
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=Path(os.environ.get("PUU_VLLM_MODELS_DIR", str(ms.MODELS_DIR))),
+    )
+    args = parser.parse_args()
+
+    catalog_dir = args.catalog_dir
+    models_dir = args.models_dir
+
+    if not catalog_dir.is_dir():
+        print(f"Catalog directory {catalog_dir} does not exist, skipping pre-seeding.")
+        sys.exit(0)
+
+    target_files: list[Path] = []
+    if args.models:
+        for name in args.models:
+            env_file = catalog_dir / f"{name}.env"
+            if not env_file.is_file():
+                sys.exit(f"error: catalog model not found: {name}")
+            target_files.append(env_file)
+    else:
+        for env_file in sorted(catalog_dir.glob("*.env")):
+            meta = ms.parse_env_file(env_file)
+            if ms.parse_bool(meta.get("PUU_VLLM_AUTOSTART"), False):
+                target_files.append(env_file)
+
+    if not target_files:
+        print("No models to preseed.")
+        sys.exit(0)
+
+    success = True
+    for catalog_file in target_files:
+        if not preseed_model(catalog_file, models_dir):
+            success = False
+
+    if os.geteuid() == 0:
+        discover_bin = libexec_dir / "discover-vllm-models"
+        if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
+            subprocess.run([str(discover_bin)], check=False)
+
+    if not success:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

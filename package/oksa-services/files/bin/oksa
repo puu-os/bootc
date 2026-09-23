@@ -27,7 +27,7 @@ def control_files(state_dir: Path) -> tuple[Path, Path]:
 
 
 def run_discover(discover_bin: Path) -> None:
-    if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
+    if os.geteuid() == 0 and discover_bin.is_file() and os.access(discover_bin, os.X_OK):
         subprocess.run([str(discover_bin)], check=False)
 
 
@@ -97,10 +97,21 @@ def cmd_stop(state_dir: Path, planner_bin: Path) -> None:
         die("stop failed")
 
 
+def cmd_pull(preseed_bin: Path, discover_bin: Path, model_name: str) -> None:
+    if os.geteuid() != 0:
+        die("oksa pull requires root privileges")
+    if not preseed_bin.is_file() or not os.access(preseed_bin, os.X_OK):
+        die(f"preseed helper not found: {preseed_bin}")
+    res = subprocess.run([str(preseed_bin), model_name])
+    if res.returncode != 0:
+        die("pull failed")
+    run_discover(discover_bin)
+
 def main() -> None:
     state_dir = ms.STATE_DIR
     discover_bin = libexec_dir / "discover-vllm-models"
     planner_bin = libexec_dir / "plan-vllm-workloads"
+    preseed_bin = libexec_dir / "preseed-vllm-models"
 
     parser = argparse.ArgumentParser(prog="oksa", description="Puu OS model serving control")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -109,6 +120,8 @@ def main() -> None:
     start_parser = subparsers.add_parser("start", help="Start a model")
     start_parser.add_argument("name", help="Model name")
     subparsers.add_parser("stop", help="Stop model serving")
+    pull_parser = subparsers.add_parser("pull", help="Download a model from the catalog")
+    pull_parser.add_argument("name", help="Model name")
 
     args = parser.parse_args()
 
@@ -118,7 +131,8 @@ def main() -> None:
         cmd_start(state_dir, discover_bin, planner_bin, args.name)
     elif args.command == "stop":
         cmd_stop(state_dir, planner_bin)
-
+    elif args.command == "pull":
+        cmd_pull(preseed_bin, discover_bin, args.name)
 
 if __name__ == "__main__":
     main()
