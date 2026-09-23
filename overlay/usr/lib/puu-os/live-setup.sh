@@ -49,6 +49,11 @@ disable-lock-screen=true
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
+
+[org/gnome/software]
+allow-updates=false
+download-updates=false
+download-updates-notify=false
 EOF
 /usr/bin/dconf update
 

@@ -3,6 +3,7 @@
 
 [Unit]
 Description=Weekly bootc upgrade
+ConditionKernelCommandLine=!puu.live
 
 [Timer]
 OnCalendar=Mon *-*-* 00:00:00

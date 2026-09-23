@@ -3,6 +3,7 @@
 
 [Unit]
 Description=Periodic system Flatpak reconciliation
+ConditionKernelCommandLine=!puu.live
 
 [Timer]
 OnCalendar=Mon *-*-* 00:00:00
