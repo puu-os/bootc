@@ -36,7 +36,7 @@ trap cleanup EXIT
 
 embed_live_image_digest() {
   local rootfs_stage rootfs_tmp
-  local machine_src flatpak_root=""
+  local machine_src flatpak_root="" models_root=""
 
   machine_src="${BR2_EXTERNAL_PUU_PATH}/overlay/usr/share/puu-os/live/machine.yaml"
   test -f "${machine_src}"
@@ -51,6 +51,19 @@ embed_live_image_digest() {
     0) ;;
     *)
       echo "PUU_FLATPAK_PRESEED must be 0 or 1" >&2
+      exit 1
+      ;;
+  esac
+
+  case "${PUU_MODELS_PRESEED:-1}" in
+    1)
+      models_root=$(mktemp -d "${BINARIES_DIR}/models.XXXXXX")
+      cleanup_paths+=("${models_root}")
+      DEST_DIR="${models_root}" "${BASH_SOURCE%/*}/seed-models.sh"
+      ;;
+    0) ;;
+    *)
+      echo "PUU_MODELS_PRESEED must be 0 or 1" >&2
       exit 1
       ;;
   esac
@@ -73,6 +86,7 @@ embed_live_image_digest() {
     source_date_epoch="$7"
     machine_src="$8"
     flatpak_root="$9"
+    models_root="${10}"
 
     "$unsquashfs" -q -d "$stage" "$rootfs"
     if [ -n "$flatpak_root" ] && [ -d "$flatpak_root/var/lib/flatpak" ]; then
@@ -80,6 +94,12 @@ embed_live_image_digest() {
       rm -rf "$stage/var/lib/flatpak"
       mv "$flatpak_root/var/lib/flatpak" "$stage/var/lib/flatpak"
       chown -hR 0:0 "$stage/var/lib/flatpak"
+    fi
+    if [ -n "$models_root" ] && [ -d "$models_root/var/lib/vllm/models" ]; then
+      mkdir -p "$stage/var/lib/vllm"
+      rm -rf "$stage/var/lib/vllm/models"
+      mv "$models_root/var/lib/vllm/models" "$stage/var/lib/vllm/models"
+      chown -hR 0:0 "$stage/var/lib/vllm/models"
     fi
     install -D -m 0644 "$machine_src" "$stage/usr/share/puu-os/machine.yaml"
     printf "\nimage:\n  expectedDigest: %s\n  sourceLabel: null\n" "$digest" >> "$stage/usr/share/puu-os/machine.yaml"
@@ -96,8 +116,8 @@ embed_live_image_digest() {
     SOURCE_DATE_EPOCH="$source_date_epoch" "$mksquashfs" "$stage" "$output" -noappend -b 128K -comp zstd
   ' _ "${HOST_DIR}/bin/unsquashfs" "${HOST_DIR}/bin/mksquashfs" \
     "${rootfs_squashfs}" "${rootfs_stage}" "${rootfs_tmp}" "${oci_digest}" \
-    "${SOURCE_DATE_EPOCH}" "${machine_src}" "${flatpak_root}"
-  rm -rf "${rootfs_stage}" ${flatpak_root:+"${flatpak_root}"}
+    "${SOURCE_DATE_EPOCH}" "${machine_src}" "${flatpak_root}" "${models_root}"
+  rm -rf "${rootfs_stage}" ${flatpak_root:+"${flatpak_root}"} ${models_root:+"${models_root}"}
   mv "${rootfs_tmp}" "${rootfs_squashfs}"
 }
 
