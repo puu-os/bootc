@@ -7,5 +7,5 @@ Description=Puu boot splash
 ModuleName=script
 
 [script]
-ImageDir=/usr/share/plymouth/themes/puu-os
-ScriptFile=/usr/share/plymouth/themes/puu-os/puu.script
+ImageDir=/usr/share/plymouth/themes/puu
+ScriptFile=/usr/share/plymouth/themes/puu/puu.script

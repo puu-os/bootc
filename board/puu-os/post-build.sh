@@ -16,7 +16,7 @@ PUU_ARCH="${2:?arch argument must be set (amd64 or arm64)}"
 init_puu_arch "${PUU_ARCH}"
 
 install -Dm644 "${BASH_SOURCE%/*}/../../artwork/splash.png" \
-  "${TARGET_DIR}/usr/share/plymouth/themes/puu-os/splash.png"
+  "${TARGET_DIR}/usr/share/plymouth/themes/puu/splash.png"
 
 puu_variant="${PUU_VARIANT:-gnome}"
 puu_version="${PUU_VERSION:-1}"
