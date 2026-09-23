@@ -1,0 +1,13 @@
+--- a/dbus/dbus-sysdeps-util-unix.c
++++ b/dbus/dbus-sysdeps-util-unix.c
+@@ -347,6 +347,10 @@
+       return FALSE;
+     }
+ 
++  /* Already running as the daemon user: nothing to drop. */
++  if (getuid () == uid && geteuid () == uid && getgid () == gid && getegid () == gid)
++    return TRUE;
++
+   /* setgroups() only works if we are a privileged process,
+    * so we don't return error on failure; the only possible
+    * failure is that we don't have perms to do it.
