@@ -1,0 +1,12 @@
+--- a/plugins/keyboard/gsd-keyboard-manager.c
++++ b/plugins/keyboard/gsd-keyboard-manager.c
+@@ -326,7 +326,8 @@
+         options = g_settings_get_user_value (settings, KEY_KEYBOARD_OPTIONS);
+         if (options == NULL)
+                 get_options_from_xkb_config (manager);
+-        g_variant_unref (options);
++        else
++                g_variant_unref (options);
+ }
+ 
+ static void
