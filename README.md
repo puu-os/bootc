@@ -25,6 +25,14 @@ Puu OS builds on top of the following open source projects:
 - [Unified Kernel Image
   (UKI)](https://uapi-group.org/specifications/specs/unified_kernel_image/)
 
+## Services
+
+Default network services available after installation:
+
+- Open WebUI: `http://puu.local:30080`
+- Kubernetes (K3s): `https://puu.local:6443`
+- SSH: port 22
+
 ## System Management
 
 - Inspect the active deployment: `bootc status`.
