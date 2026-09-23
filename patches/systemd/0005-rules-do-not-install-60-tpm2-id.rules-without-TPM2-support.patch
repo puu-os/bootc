@@ -1,0 +1,42 @@
+--- a/rules.d/60-tpm2-id.rules
++++ b/rules.d/60-tpm2-id.rules
+@@ -4,7 +4,7 @@
+ SUBSYSTEM!="tpmrm", GOTO="tpm2_id_end"
+ KERNEL!="tpmrm[0-9]*", GOTO="tpm2_id_end"
+ 
+-IMPORT{program}="tpm2_id identify"
++IMPORT{builtin}="tpm2_id identify"
+ ENV{ID_TPM2_MODALIAS}!="", IMPORT{builtin}="hwdb 'tpm2:$env{ID_TPM2_MODALIAS}'"
+ 
+ LABEL="tpm2_id_end"
+--- a/rules.d/meson.build
++++ b/rules.d/meson.build
+@@ -24,7 +24,6 @@
+                '60-persistent-v4l.rules',
+                '60-sensor.rules',
+                '60-serial.rules',
+-               '60-tpm2-id.rules',
+                '65-integration.rules',
+                '70-camera.rules',
+                '70-joystick.rules',
+@@ -41,14 +40,17 @@
+                '90-iocost.rules',
+               )],
+ 
+-        [files('80-drivers.rules'),
+-         conf.get('HAVE_KMOD') == 1],
++        [files('60-tpm2-id.rules'),
++         conf.get('HAVE_TPM2') == 1],
+ 
+         [files('70-memory.rules'),
+          conf.get('HAVE_DMI') == 1],
+ 
+         [files('70-power-switch.rules'),
+-         conf.get('ENABLE_LOGIND') == 1]
++         conf.get('ENABLE_LOGIND') == 1],
++
++        [files('80-drivers.rules'),
++         conf.get('HAVE_KMOD') == 1],
+ ]
+ 
+ all_rules = []
