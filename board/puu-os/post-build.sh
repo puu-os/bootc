@@ -198,6 +198,9 @@ done
 
 rm -f "${TARGET_DIR}/usr/share/xsessions/gnome.desktop"
 
+# Buildroot only applies the system presets.
+"${HOST_DIR}/bin/systemctl" --root="${TARGET_DIR}" --global preset-all
+
 rm -f "${TARGET_DIR}/etc/xdg/autostart/pulseaudio.desktop"
 rm -f \
   "${gnome_user_unit_dir}/flatpak-sync.service" \
