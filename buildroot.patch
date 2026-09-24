@@ -1,18 +1,88 @@
+diff --git a/fs/oci/oci.mk b/fs/oci/oci.mk
+index 4458cf8e..bcaa9219 100644
+--- a/fs/oci/oci.mk
++++ b/fs/oci/oci.mk
+@@ -26,9 +26,14 @@ OCI_SLOCI_IMAGE_OPTS += $(and $(GO_GOARM),--arch-variant v$(GO_GOARM))
+ # We use some trickery to have the shell properly expand this into a list
+ # where each item is single-quoted and prefixed with the appropriate
+ # option string:
++ifneq ($(call qstrip,$(BR2_TARGET_ROOTFS_OCI_ENTRYPOINT)),)
++OCI_SLOCI_IMAGE_OPTS += \
++	$(shell eval printf -- "--entrypoint\ \'%s\'\ " $(BR2_TARGET_ROOTFS_OCI_ENTRYPOINT))
++endif
++ifneq ($(call qstrip,$(BR2_TARGET_ROOTFS_OCI_CMD)),)
+ OCI_SLOCI_IMAGE_OPTS += \
+-	$(shell eval printf -- "--entrypoint\ \'%s\'\ " $(BR2_TARGET_ROOTFS_OCI_ENTRYPOINT)) \
+ 	$(shell eval printf -- "--cmd\ \'%s\'\ " $(BR2_TARGET_ROOTFS_OCI_CMD))
++endif
+ 
+ # author
+ OCI_AUTHOR = $(call qstrip,$(BR2_TARGET_ROOTFS_OCI_AUTHOR))
+@@ -43,10 +48,9 @@ OCI_SLOCI_IMAGE_OPTS += --user "$(OCI_UID)"
+ endif
+ 
+ # labels
+-OCI_LABELS = $(call qstrip,$(BR2_TARGET_ROOTFS_OCI_LABELS))
+-ifneq ($(OCI_LABELS),)
++ifneq ($(call qstrip,$(BR2_TARGET_ROOTFS_OCI_LABELS)),)
+ OCI_SLOCI_IMAGE_OPTS += \
+-	$(foreach label,$(OCI_LABELS),--label "$(label)")
++	$(shell eval printf -- "--label\ \'%s\'\ " $(BR2_TARGET_ROOTFS_OCI_LABELS))
+ endif
+ 
+ # environment variables
+diff --git a/linux/linux.mk b/linux/linux.mk
+index e3c89282..5ed2d80c 100644
+--- a/linux/linux.mk
++++ b/linux/linux.mk
+@@ -125,6 +125,9 @@ endif
+ 
+ ifeq ($(BR2_LINUX_KERNEL_NEEDS_HOST_PAHOLE),y)
+ LINUX_DEPENDENCIES += host-pahole
++# Kconfig probes pahole while generating .config (PAHOLE_VERSION gate for
++# DEBUG_INFO_BTF): order host-pahole before the dot-config stamp.
++LINUX_KCONFIG_DEPENDENCIES += host-pahole
+ else
+ define LINUX_FIXUP_CONFIG_PAHOLE_CHECK
+ 	$(Q)if grep -q "^CONFIG_DEBUG_INFO_BTF=y" $(KCONFIG_DOT_CONFIG); then \
+diff --git a/package/Makefile.in b/package/Makefile.in
+index 229206d3..caea6d48 100644
+--- a/package/Makefile.in
++++ b/package/Makefile.in
+@@ -285,7 +285,8 @@ export PERL5LIB=$(HOST_DIR)/lib/perl
+ 
+ TARGET_MAKE_ENV = \
+ 	GIT_DIR=. \
+-	PATH=$(BR_PATH)
++	PATH=$(BR_PATH) \
++	GETTEXTDATADIRS=$(HOST_DIR)/share/gettext
+ 
+ TARGET_CONFIGURE_OPTS = \
+ 	$(TARGET_MAKE_ENV) \
+@@ -331,6 +332,7 @@ TARGET_CONFIGURE_OPTS = \
+ HOST_MAKE_ENV = \
+ 	GIT_DIR=. \
+ 	PATH=$(BR_PATH) \
++	GETTEXTDATADIRS=$(HOST_DIR)/share/gettext \
+ 	PKG_CONFIG="$(PKG_CONFIG_HOST_BINARY)" \
+ 	PKG_CONFIG_SYSROOT_DIR="/" \
+ 	PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 \
 diff --git a/package/dracut/dracut.mk b/package/dracut/dracut.mk
-index 0bf7553..440bd46 100644
+index e0564954..492bd024 100644
 --- a/package/dracut/dracut.mk
 +++ b/package/dracut/dracut.mk
-@@ -11,6 +11,9 @@ DRACUT_LICENSE_FILES = COPYING
- DRACUT_CPE_ID_VALID = YES
- 
+@@ -13,7 +13,9 @@ DRACUT_CPE_ID_VALID = YES
  HOST_DRACUT_DEPENDENCIES = host-pkgconf host-kmod host-cross-ldd
+ # Dracut is not a real autotools package, and the hand-written
+ # ./configure script does not preserve LDFLAGS for make.
+-HOST_DRACUT_MAKE_ENV = $(HOST_CONFIGURE_OPTS)
 +HOST_DRACUT_MAKE_ENV = \
-+	CARGO_HOME=$(BR_CARGO_HOME) \
-+	LDFLAGS="$(HOST_LDFLAGS)"
++	$(HOST_CONFIGURE_OPTS) \
++	CARGO_HOME=$(BR_CARGO_HOME)
  HOST_DRACUT_INSTALL_OPTS = systemdsystemunitdir="" install
  
- define HOST_DRACUT_POST_INSTALL_WRAPPER_SCRIPT
-@@ -33,6 +36,15 @@ define HOST_DRACUT_POST_INSTALL_LIBC_LINKS_MODULE
+ ifeq ($(BR2_PACKAGE_HOST_RUSTC),y)
+@@ -43,6 +45,15 @@ define HOST_DRACUT_POST_INSTALL_LIBC_LINKS_MODULE
  endef
  HOST_DRACUT_POST_INSTALL_HOOKS += HOST_DRACUT_POST_INSTALL_LIBC_LINKS_MODULE
  
@@ -29,7 +99,7 @@ index 0bf7553..440bd46 100644
  # Dracut does not support busybox init (systemd init is assumed to work
  # out of the box, though). It provides a busybox module, that does not
 diff --git a/package/dracut/dracut_wrapper.in b/package/dracut/dracut_wrapper.in
-index 3301285..6eb68ac 100644
+index 33012853..6eb68ac2 100644
 --- a/package/dracut/dracut_wrapper.in
 +++ b/package/dracut/dracut_wrapper.in
 @@ -41,6 +41,20 @@ export DRACUT_LDD
@@ -54,7 +124,7 @@ index 3301285..6eb68ac 100644
  
  if [ -n "${DRACUT_LDD}" ]; then
 diff --git a/package/fwupd/fwupd.mk b/package/fwupd/fwupd.mk
-index d143740..93cb290 100644
+index d143740c..93cb2907 100644
 --- a/package/fwupd/fwupd.mk
 +++ b/package/fwupd/fwupd.mk
 @@ -10,6 +10,7 @@ FWUPD_SOURCE = fwupd-$(FWUPD_VERSION).tar.xz
@@ -66,33 +136,46 @@ index d143740..93cb290 100644
  	host-pkgconf \
  	host-python-jinja2 \
 diff --git a/package/gsettings-desktop-schemas/gsettings-desktop-schemas.hash b/package/gsettings-desktop-schemas/gsettings-desktop-schemas.hash
-index 0d80c87..6232f67 100644
+index 0d80c87e..6232f67f 100644
 --- a/package/gsettings-desktop-schemas/gsettings-desktop-schemas.hash
 +++ b/package/gsettings-desktop-schemas/gsettings-desktop-schemas.hash
-@@ -1,2 +1,2 @@
+@@ -1,5 +1,5 @@
 -# From https://download.gnome.org/sources/gsettings-desktop-schemas/45/gsettings-desktop-schemas-45.0.sha256sum
 -sha256  365c8d04daf79b38c8b3dc9626349a024f9e4befdd31fede74b42f7a9fbe0ae2  gsettings-desktop-schemas-45.0.tar.xz
 +# From https://download.gnome.org/sources/gsettings-desktop-schemas/50/gsettings-desktop-schemas-50.1.sha256sum
 +sha256  0a2aa25082672585d16fcdab61c7b0e33f035fb87476505c794f29565afa485b  gsettings-desktop-schemas-50.1.tar.xz
+ 
+ # Hash for license file
+ sha256  dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551  COPYING
 diff --git a/package/gsettings-desktop-schemas/gsettings-desktop-schemas.mk b/package/gsettings-desktop-schemas/gsettings-desktop-schemas.mk
-index b47097b..aca70a1 100644
+index b47097b9..aca70a16 100644
 --- a/package/gsettings-desktop-schemas/gsettings-desktop-schemas.mk
 +++ b/package/gsettings-desktop-schemas/gsettings-desktop-schemas.mk
-@@ -7,2 +7,2 @@
+@@ -4,14 +4,20 @@
+ #
+ ################################################################################
+ 
 -GSETTINGS_DESKTOP_SCHEMAS_VERSION_MAJOR = 45
 -GSETTINGS_DESKTOP_SCHEMAS_VERSION = $(GSETTINGS_DESKTOP_SCHEMAS_VERSION_MAJOR).0
 +GSETTINGS_DESKTOP_SCHEMAS_VERSION_MAJOR = 50
 +GSETTINGS_DESKTOP_SCHEMAS_VERSION = $(GSETTINGS_DESKTOP_SCHEMAS_VERSION_MAJOR).1
-@@ -14,0 +15,5 @@ GSETTINGS_DESKTOP_SCHEMAS_LICENSE_FILES = COPYING
+ GSETTINGS_DESKTOP_SCHEMAS_SOURCE = gsettings-desktop-schemas-$(GSETTINGS_DESKTOP_SCHEMAS_VERSION).tar.xz
+ GSETTINGS_DESKTOP_SCHEMAS_SITE = https://download.gnome.org/sources/gsettings-desktop-schemas/$(GSETTINGS_DESKTOP_SCHEMAS_VERSION_MAJOR)
+ GSETTINGS_DESKTOP_SCHEMAS_INSTALL_STAGING = YES
+ GSETTINGS_DESKTOP_SCHEMAS_DEPENDENCIES = host-pkgconf libglib2
+ GSETTINGS_DESKTOP_SCHEMAS_LICENSE = LGPL-2.1+
+ GSETTINGS_DESKTOP_SCHEMAS_LICENSE_FILES = COPYING
 +
 +ifeq ($(BR2_PACKAGE_GOBJECT_INTROSPECTION),y)
 +GSETTINGS_DESKTOP_SCHEMAS_DEPENDENCIES += gobject-introspection
 +GSETTINGS_DESKTOP_SCHEMAS_CONF_OPTS = -Dintrospection=true
 +else
-@@ -15,0 +21 @@ GSETTINGS_DESKTOP_SCHEMAS_CONF_OPTS = -Dintrospection=false
+ GSETTINGS_DESKTOP_SCHEMAS_CONF_OPTS = -Dintrospection=false
 +endif
+ 
+ $(eval $(meson-package))
 diff --git a/package/libcurl/libcurl.mk b/package/libcurl/libcurl.mk
-index 219ce9f..be44999 100644
+index c3590a8a..4b238e1e 100644
 --- a/package/libcurl/libcurl.mk
 +++ b/package/libcurl/libcurl.mk
 @@ -194,7 +194,15 @@ HOST_LIBCURL_CONF_OPTS = \
@@ -113,7 +196,7 @@ index 219ce9f..be44999 100644
  $(eval $(autotools-package))
  $(eval $(host-autotools-package))
 diff --git a/package/libgtk4/Config.in b/package/libgtk4/Config.in
-index 3daa676..9eda7d2 100644
+index 3daa6761..9eda7d27 100644
 --- a/package/libgtk4/Config.in
 +++ b/package/libgtk4/Config.in
 @@ -27,6 +27,7 @@ config BR2_PACKAGE_LIBGTK4
@@ -141,26 +224,44 @@ index 3daa676..9eda7d2 100644
  	  This enables the X11 backend for GDK.
  
 diff --git a/package/libgtk4/libgtk4.hash b/package/libgtk4/libgtk4.hash
-index dff32c5..7226fe7 100644
+index dff32c57..7226fe7e 100644
 --- a/package/libgtk4/libgtk4.hash
 +++ b/package/libgtk4/libgtk4.hash
-@@ -1,2 +1,2 @@
+@@ -1,5 +1,5 @@
 -# From https://download.gnome.org/sources/gtk/4.21/gtk-4.21.0.sha256sum
 -sha256  f52475c5041dfd02cc4eed22ee94f12ec310c16a68fda9203dc54ffd5daa6e6f  gtk-4.21.0.tar.xz
 +# From https://download.gnome.org/sources/gtk/4.22/gtk-4.22.4.sha256sum
 +sha256  51bd9f60c7d23a665a556c7364c21fb2e4e282566b3e7e092455e8f910330893  gtk-4.22.4.tar.xz
+ 
+ # Hash for license file:
+ sha256  b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c  COPYING
 diff --git a/package/libgtk4/libgtk4.mk b/package/libgtk4/libgtk4.mk
-index 9a5ed65..8c79e5e 100644
+index 9a5ed651..8c79e5e0 100644
 --- a/package/libgtk4/libgtk4.mk
 +++ b/package/libgtk4/libgtk4.mk
-@@ -7,2 +7,2 @@
+@@ -4,8 +4,8 @@
+ #
+ ################################################################################
+ 
 -LIBGTK4_VERSION_MAJOR = 4.21
 -LIBGTK4_VERSION = $(LIBGTK4_VERSION_MAJOR).0
 +LIBGTK4_VERSION_MAJOR = 4.22
 +LIBGTK4_VERSION = $(LIBGTK4_VERSION_MAJOR).4
-@@ -21,0 +22 @@ LIBGTK4_DEPENDENCIES = \
+ LIBGTK4_SOURCE = gtk-$(LIBGTK4_VERSION).tar.xz
+ LIBGTK4_SITE = https://download.gnome.org/sources/gtk/$(LIBGTK4_VERSION_MAJOR)
+ LIBGTK4_LICENSE = LGPL-2.0+
+@@ -19,6 +19,7 @@ LIBGTK4_DEPENDENCIES = \
+ 	host-libgtk4 \
+ 	gdk-pixbuf \
+ 	graphene \
 +	libdrm \
-@@ -49 +50,10 @@ ifeq ($(BR2_PACKAGE_LIBGTK4_X11),y)
+ 	libepoxy \
+ 	libglib2 \
+ 	librsvg \
+@@ -46,7 +47,16 @@ LIBGTK4_CONF_OPTS += -Dintrospection=disabled
+ endif
+ 
+ ifeq ($(BR2_PACKAGE_LIBGTK4_X11),y)
 -LIBGTK4_DEPENDENCIES += xlib_libXcursor xlib_libXi xlib_libXinerama
 +LIBGTK4_DEPENDENCIES += \
 +	fontconfig \
@@ -172,25 +273,38 @@ index 9a5ed65..8c79e5e 100644
 +	xlib_libXi \
 +	xlib_libXinerama \
 +	xlib_libXrandr
+ LIBGTK4_CONF_OPTS += -Dx11-backend=true
+ else
+ LIBGTK4_CONF_OPTS += -Dx11-backend=false
 diff --git a/package/libical/Config.in b/package/libical/Config.in
-index 7c1d4a1..a9d7307 100644
+index 7c1d4a14..a9d73078 100644
 --- a/package/libical/Config.in
 +++ b/package/libical/Config.in
-@@ -3,0 +4,2 @@ config BR2_PACKAGE_LIBICAL
+@@ -1,8 +1,12 @@
+ config BR2_PACKAGE_LIBICAL
+ 	bool "libical"
+ 	depends on BR2_INSTALL_LIBSTDCPP
 +	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2
 +	depends on BR2_USE_MMU # libglib2
-@@ -5,0 +8,2 @@ config BR2_PACKAGE_LIBICAL
+ 	depends on !BR2_STATIC_LIBS
+ 	depends on BR2_USE_WCHAR
 +	select BR2_PACKAGE_LIBGLIB2
 +	select BR2_PACKAGE_LIBXML2
-@@ -13 +17,2 @@ config BR2_PACKAGE_LIBICAL
+ 	select BR2_TARGET_TZ_INFO
+ 	help
+ 	  libical is an Open Source (MPL/LGPL) implementation of the
+@@ -10,6 +14,7 @@ config BR2_PACKAGE_LIBICAL
+ 
+ 	  http://libical.github.io/libical
+ 
 -comment "libical needs a toolchain w/ C++, dynamic library, wchar"
 +comment "libical needs a toolchain w/ C++, dynamic library, wchar, threads"
 +	depends on BR2_USE_MMU
-@@ -15 +20 @@ comment "libical needs a toolchain w/ C++, dynamic library, wchar"
+ 	depends on !BR2_INSTALL_LIBSTDCPP || !BR2_USE_WCHAR || \
 -		BR2_STATIC_LIBS
 +		!BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS
 diff --git a/package/libical/libical.mk b/package/libical/libical.mk
-index 56489b4..ac9e2f6 100644
+index 56489b4e..ac9e2f6e 100644
 --- a/package/libical/libical.mk
 +++ b/package/libical/libical.mk
 @@ -10,12 +10,13 @@ LIBICAL_INSTALL_STAGING = YES
@@ -227,7 +341,7 @@ index 56489b4..ac9e2f6 100644
  $(eval $(cmake-package))
 +$(eval $(host-cmake-package))
 diff --git a/package/libostree/Config.in b/package/libostree/Config.in
-index 49eed65..d0bec81 100644
+index 49eed651..d0bec81f 100644
 --- a/package/libostree/Config.in
 +++ b/package/libostree/Config.in
 @@ -1,27 +1,34 @@
@@ -274,24 +388,32 @@ index 49eed65..d0bec81 100644
  	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS
  	depends on BR2_USE_MMU
 diff --git a/package/libostree/libostree.hash b/package/libostree/libostree.hash
-index d4645c5..97e22e1 100644
+index d4645c59..97e22e11 100644
 --- a/package/libostree/libostree.hash
 +++ b/package/libostree/libostree.hash
-@@ -1,2 +1,4 @@
+@@ -1,3 +1,5 @@
 -# Locally calculated
 -sha256  b6fffc267188e40d60755e6d7f2be65831795baa53b0fd9dd6c6809c7e54796d  libostree-2023.8.tar.xz
 +# From https://github.com/ostreedev/ostree/releases/download/v2026.4/libostree-2026.4.tar.xz
 +sha256  b26c9016eb03bb4ee52cc00c642d56e00fc79ae7faac6bf4aa317d7451339ef7  libostree-2026.4.tar.xz
 +
 +# Hash for license file
+ sha256  b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c  COPYING
 diff --git a/package/libostree/libostree.mk b/package/libostree/libostree.mk
-index a737dc0..8024b3f 100644
+index a737dc04..8024b3f0 100644
 --- a/package/libostree/libostree.mk
 +++ b/package/libostree/libostree.mk
-@@ -7 +7 @@
+@@ -4,24 +4,51 @@
+ #
+ ################################################################################
+ 
 -LIBOSTREE_VERSION = 2023.8
 +LIBOSTREE_VERSION = 2026.4
-@@ -13 +13,15 @@ LIBOSTREE_LICENSE_FILES = COPYING
+ LIBOSTREE_SOURCE = libostree-$(LIBOSTREE_VERSION).tar.xz
+ LIBOSTREE_SITE = https://github.com/ostreedev/ostree/releases/download/v$(LIBOSTREE_VERSION)
+ 
+ LIBOSTREE_LICENSE = LGPL-2.0+
+ LIBOSTREE_LICENSE_FILES = COPYING
 -LIBOSTREE_DEPENDENCIES = e2fsprogs host-bison host-pkgconf libglib2 libgpg-error libgpgme xz
 +LIBOSTREE_DEPENDENCIES = \
 +	composefs \
@@ -308,7 +430,11 @@ index a737dc0..8024b3f 100644
 +	util-linux \
 +	xz \
 +	zlib
-@@ -18,0 +33,7 @@ LIBOSTREE_CONF_OPTS += \
+ LIBOSTREE_INSTALL_STAGING = YES
+ 
+ LIBOSTREE_CONF_ENV = \
+ 	GPG_ERROR_CONFIG=$(STAGING_DIR)/usr/bin/gpg-error-config
+ LIBOSTREE_CONF_OPTS += \
 +	--with-composefs \
 +	--without-avahi \
 +	--without-curl \
@@ -316,7 +442,7 @@ index a737dc0..8024b3f 100644
 +	--without-ed25519-libsodium \
 +	--without-ed25519-openssl \
 +	--with-gpgme \
-@@ -20 +41,6 @@ LIBOSTREE_CONF_OPTS += \
+ 	--with-gpgme-prefix=$(STAGING_DIR)/usr \
 -	--without-soup \
 +	--with-libarchive \
 +	--with-libmount \
@@ -324,11 +450,19 @@ index a737dc0..8024b3f 100644
 +	--without-rofiles-fuse \
 +	--with-soup3 \
 +	--with-dracut=yes \
-@@ -24 +50,2 @@ LIBOSTREE_CONF_OPTS += \
+ 	--disable-gtk-doc \
+ 	--disable-gtk-doc-html \
+ 	--disable-gtk-doc-pdf \
 -	--disable-man
 +	--disable-man \
 +	--disable-otmpfile
-@@ -34,42 +60,0 @@ endif
+ 
+ ifeq ($(BR2_PACKAGE_GOBJECT_INTROSPECTION),y)
+ LIBOSTREE_DEPENDENCIES += gobject-introspection
+@@ -31,48 +58,6 @@ else
+ LIBOSTREE_CONF_OPTS += --disable-introspection
+ endif
+ 
 -ifeq ($(BR2_PACKAGE_OPENSSL),y)
 -LIBOSTREE_CONF_OPTS += --with-openssl
 -LIBOSTREE_DEPENDENCIES += openssl
@@ -371,7 +505,13 @@ index a737dc0..8024b3f 100644
 -LIBOSTREE_CONF_OPTS += --disable-rofiles-fuse
 -endif
 -
-@@ -83,8 +68,6 @@ endif
+ ifeq ($(BR2_PACKAGE_LIBSELINUX),y)
+ LIBOSTREE_CONF_OPTS += --with-selinux
+ LIBOSTREE_DEPENDENCIES += libselinux
+@@ -80,13 +65,11 @@ else
+ LIBOSTREE_CONF_OPTS += --without-selinux
+ endif
+ 
 -ifeq ($(BR2_INIT_SYSTEMD),y)
 -LIBOSTREE_CONF_OPTS += \
 -	--with-libsystemd \
@@ -386,8 +526,10 @@ index a737dc0..8024b3f 100644
 +		$(TARGET_DIR)/usr/lib/dracut/modules.d/50ostree/module-setup.sh
 +endef
 +LIBOSTREE_POST_INSTALL_TARGET_HOOKS += LIBOSTREE_INSTALL_DRACUT_MODULE
+ 
+ $(eval $(autotools-package))
 diff --git a/package/librsvg/librsvg.mk b/package/librsvg/librsvg.mk
-index 81a6667..673458a 100644
+index 81a66678..673458a4 100644
 --- a/package/librsvg/librsvg.mk
 +++ b/package/librsvg/librsvg.mk
 @@ -11,8 +11,26 @@ LIBRSVG_SOURCE = librsvg-$(LIBRSVG_VERSION).tar.xz
@@ -419,10 +561,11 @@ index 81a6667..673458a 100644
  LIBRSVG_DEPENDENCIES = cairo host-gdk-pixbuf gdk-pixbuf host-rustc libglib2 libxml2 pango \
  	$(TARGET_NLS_DEPENDENCIES)
 diff --git a/package/libxmlb/libxmlb.mk b/package/libxmlb/libxmlb.mk
-index e9829e4..eadc653 100644
+index e9829e4c..87db22f1 100644
 --- a/package/libxmlb/libxmlb.mk
 +++ b/package/libxmlb/libxmlb.mk
-@@ -35,3 +35,11 @@ LIBXMLB_CONF_OPTS += -Dlzma=disabled
+@@ -34,4 +34,12 @@ else
+ LIBXMLB_CONF_OPTS += -Dlzma=disabled
  endif
  
 +HOST_LIBXMLB_DEPENDENCIES = host-libglib2
@@ -435,7 +578,7 @@ index e9829e4..eadc653 100644
  $(eval $(meson-package))
 +$(eval $(host-meson-package))
 diff --git a/package/linux-firmware/Config.in b/package/linux-firmware/Config.in
-index 7533b3d..45bbdf2 100644
+index 7533b3d8..ed9f9741 100644
 --- a/package/linux-firmware/Config.in
 +++ b/package/linux-firmware/Config.in
 @@ -26,6 +26,15 @@ config BR2_PACKAGE_LINUX_FIRMWARE_AMD_UCODE
@@ -455,10 +598,10 @@ index 7533b3d..45bbdf2 100644
  
  config BR2_PACKAGE_LINUX_FIRMWARE_AMDGPU
 diff --git a/package/linux-firmware/linux-firmware.hash b/package/linux-firmware/linux-firmware.hash
-index 145132b..4f0d3a7 100644
+index 103f4ecf..d89cd5ab 100644
 --- a/package/linux-firmware/linux-firmware.hash
 +++ b/package/linux-firmware/linux-firmware.hash
-@@ -31,6 +31,7 @@
+@@ -31,6 +31,7 @@ sha256  2d6062d63b91eb750bf741498691604f75184b9fee97608ec537cd09bd6a42b4  LICENS
  sha256  a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805  LICENSES/LICENCE.mediatek
  sha256  0fc67bd715b3395f3f2af464781910e9e69c4ba23da304352229b42dc9e986c3  LICENSES/LICENCE.microchip
  sha256  59ae206c89108905ebdc9ad4c9336526bd2c0d50fbf988c21e8c2a82719d42a4  LICENSES/LICENCE.moxa
@@ -467,10 +610,11 @@ index 145132b..4f0d3a7 100644
  sha256  0bd9f7cae3cf72b12a63359a725ccbb76ddbd6831372695a9162144329800dd0  LICENSES/LICENCE.qat_firmware
  sha256  4071a11d878dbc0ac6d9e71203d03b151638f9d7a8bc47a54c3cb964100d5822  LICENSES/LICENCE.qla2xxx
 diff --git a/package/linux-firmware/linux-firmware.mk b/package/linux-firmware/linux-firmware.mk
-index 6025436..cf1e0fe 100644
+index 6025436c..2c83e151 100644
 --- a/package/linux-firmware/linux-firmware.mk
 +++ b/package/linux-firmware/linux-firmware.mk
-@@ -21,6 +21,15 @@ LINUX_FIRMWARE_ALL_LICENSE_FILES += LICENSES/LICENSE.amd-ucode
+@@ -20,6 +20,15 @@ LINUX_FIRMWARE_DIRS += amd-ucode
+ LINUX_FIRMWARE_ALL_LICENSE_FILES += LICENSES/LICENSE.amd-ucode
  endif
  
 +ifeq ($(BR2_PACKAGE_LINUX_FIRMWARE_NVIDIA_TEGRA_XUSB),y)
@@ -485,7 +629,6 @@ index 6025436..cf1e0fe 100644
  ifeq ($(BR2_PACKAGE_LINUX_FIRMWARE_AMDGPU),y)
  LINUX_FIRMWARE_DIRS += amdgpu
  LINUX_FIRMWARE_ALL_LICENSE_FILES += LICENSES/LICENSE.amdgpu
- endif
 @@ -789,9 +798,14 @@ LINUX_FIRMWARE_FILES += \
  	rtl_nic/rtl8106e-2.fw \
  	rtl_nic/rtl8107e-1.fw \
@@ -512,7 +655,7 @@ index 6025436..cf1e0fe 100644
  
  ifeq ($(BR2_PACKAGE_LINUX_FIRMWARE_MARVELL_PRESTERA),y)
 diff --git a/package/lz4/lz4.mk b/package/lz4/lz4.mk
-index 60d321b..ecefb34 100644
+index 60d321ba..ecefb34c 100644
 --- a/package/lz4/lz4.mk
 +++ b/package/lz4/lz4.mk
 @@ -36,7 +36,7 @@ endif
@@ -524,20 +667,8 @@ index 60d321b..ecefb34 100644
  	)
  endef
  
-diff --git a/package/Makefile.in b/package/Makefile.in
-index eac28b3..a23ad70 100644
---- a/package/Makefile.in
-+++ b/package/Makefile.in
-@@ -288 +288,2 @@ TARGET_MAKE_ENV = \
--	PATH=$(BR_PATH)
-+	PATH=$(BR_PATH) \
-+	GETTEXTDATADIRS=$(HOST_DIR)/share/gettext
-@@ -333 +334,2 @@ HOST_MAKE_ENV = \
--	PATH=$(BR_PATH) \
-+	PATH=$(BR_PATH) \
-+	GETTEXTDATADIRS=$(HOST_DIR)/share/gettext \
 diff --git a/package/ncurses/ncurses.mk b/package/ncurses/ncurses.mk
-index 5e20775..7bd0194 100644
+index 5e207750..7bd0194d 100644
 --- a/package/ncurses/ncurses.mk
 +++ b/package/ncurses/ncurses.mk
 @@ -155,6 +155,8 @@ HOST_NCURSES_CONF_ENV = \
@@ -550,7 +681,7 @@ index 5e20775..7bd0194 100644
  	--without-manpages \
  	--without-cxx \
 diff --git a/package/nvidia-driver/Config.in b/package/nvidia-driver/Config.in
-index e4a9dde..550cb23 100644
+index e4a9dde0..550cb238 100644
 --- a/package/nvidia-driver/Config.in
 +++ b/package/nvidia-driver/Config.in
 @@ -1,16 +1,19 @@
@@ -628,10 +759,11 @@ index e4a9dde..550cb23 100644
  
  endif # BR2_PACKAGE_NVIDIA_DRIVER
 diff --git a/package/nvidia-driver/nvidia-driver.hash b/package/nvidia-driver/nvidia-driver.hash
-index 620112e..9c5d463 100644
+index 620112e6..9c5d4637 100644
 --- a/package/nvidia-driver/nvidia-driver.hash
 +++ b/package/nvidia-driver/nvidia-driver.hash
-@@ -2,3 +2,5 @@
+@@ -1,4 +1,6 @@
+ # Locally computed
 -sha256  94e399b459659c12b1344e8c8f4f5eee1ed5915ff459fc8bb831c9e1d44677db  NVIDIA-Linux-x86-390.151.run
 -sha256  6e4fd2258465f5d5527fe80abd46de925a30348b4a84658498a6d75caf42c47c  NVIDIA-Linux-x86_64-390.151-no-compat32.run
 -sha256  bd28b0c5aeeb00eb11d3ec6f6f3449d4b3a40100914258332734a53527997526  LICENSE
@@ -641,10 +773,13 @@ index 620112e..9c5d463 100644
 +sha256  c692fb14ad4f499c6aee1b9e144e6905148c420e6225b17cb2937366c1e507ad  LICENSE
 +sha256  d8e96d29bc323000e7ba56102d77c88226a7a3d0d94e2081cb4b071ae9de4a06  kernel-open-src/COPYING
 diff --git a/package/nvidia-driver/nvidia-driver.mk b/package/nvidia-driver/nvidia-driver.mk
-index f1217b0..5c1d52d 100644
+index f1217b00..5c1d52d5 100644
 --- a/package/nvidia-driver/nvidia-driver.mk
 +++ b/package/nvidia-driver/nvidia-driver.mk
-@@ -7,4 +7,22 @@
+@@ -4,15 +4,92 @@
+ #
+ ################################################################################
+ 
 -NVIDIA_DRIVER_VERSION = 390.151
 -NVIDIA_DRIVER_SUFFIX = $(if $(BR2_x86_64),_64)
 -NVIDIA_DRIVER_SITE = http://download.nvidia.com/XFree86/Linux-x86$(NVIDIA_DRIVER_SUFFIX)/$(NVIDIA_DRIVER_VERSION)
@@ -671,7 +806,11 @@ index f1217b0..5c1d52d 100644
 +NVIDIA_DRIVER_CONF_SUBDIR =
 +endif
 +
-@@ -15,0 +34,59 @@ NVIDIA_DRIVER_INSTALL_STAGING = YES
+ NVIDIA_DRIVER_LICENSE = NVIDIA Software License
+ NVIDIA_DRIVER_LICENSE_FILES = LICENSE
+ NVIDIA_DRIVER_REDISTRIBUTE = NO
+ NVIDIA_DRIVER_INSTALL_STAGING = YES
+ 
 +NVIDIA_DRIVER_LIBS = \
 +	libnvidia-ml.so.$(NVIDIA_DRIVER_VERSION) \
 +	libnvidia-cfg.so.$(NVIDIA_DRIVER_VERSION) \
@@ -731,7 +870,13 @@ index f1217b0..5c1d52d 100644
 +endef
 +endif
 +
-@@ -26,17 +102,0 @@ NVIDIA_DRIVER_PROVIDES += libgl libegl libgles
+ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_XORG),y)
+ 
+ # Since nvidia-driver are binary blobs, the below dependencies are not
+@@ -23,32 +100,21 @@ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_XORG),y)
+ NVIDIA_DRIVER_DEPENDENCIES += mesa3d-headers xlib_libX11 xlib_libXext
+ NVIDIA_DRIVER_PROVIDES += libgl libegl libgles
+ 
 -# libGL.so.$(NVIDIA_DRIVER_VERSION) is the legacy libGL.so library; it
 -# has been replaced with libGL.so.1.0.0. Installing both is technically
 -# possible, but great care must be taken to ensure they do not conflict,
@@ -749,12 +894,16 @@ index f1217b0..5c1d52d 100644
 -# aimed at supporting.
 -#
 -# So we only install the legacy library for now.
-@@ -43,0 +104,2 @@ NVIDIA_DRIVER_LIBS_GL = \
+ NVIDIA_DRIVER_LIBS_GL = \
 +	libGL.so.1.7.0 \
 +	libOpenGL.so.0 \
-@@ -45 +106,0 @@ NVIDIA_DRIVER_LIBS_GL = \
+ 	libGLX.so.0 \
 -	libGL.so.$(NVIDIA_DRIVER_VERSION) \
-@@ -51 +112,6 @@ NVIDIA_DRIVER_LIBS_EGL = \
+ 	libGLX_nvidia.so.$(NVIDIA_DRIVER_VERSION)
+ 
+ NVIDIA_DRIVER_LIBS_EGL = \
+ 	libEGL.so.1.1.0 \
+ 	libGLdispatch.so.0 \
 -	libEGL_nvidia.so.$(NVIDIA_DRIVER_VERSION)
 +	libEGL_nvidia.so.$(NVIDIA_DRIVER_VERSION) \
 +	libnvidia-egl-gbm.so.1.1.3 \
@@ -762,9 +911,16 @@ index f1217b0..5c1d52d 100644
 +	libnvidia-egl-wayland2.so.1.0.1 \
 +	libnvidia-egl-xcb.so.1.0.5 \
 +	libnvidia-egl-xlib.so.1.0.5
-@@ -61 +126,0 @@ NVIDIA_DRIVER_LIBS_MISC = \
+ 
+ NVIDIA_DRIVER_LIBS_GLES = \
+ 	libGLESv1_CM.so.1.2.0 \
+@@ -58,12 +124,16 @@ NVIDIA_DRIVER_LIBS_GLES = \
+ 
+ NVIDIA_DRIVER_LIBS_MISC = \
+ 	libnvidia-eglcore.so.$(NVIDIA_DRIVER_VERSION) \
 -	libnvidia-egl-wayland.so.1.0.2 \
-@@ -64,3 +129,8 @@ NVIDIA_DRIVER_LIBS_MISC = \
+ 	libnvidia-glcore.so.$(NVIDIA_DRIVER_VERSION) \
+ 	libnvidia-glsi.so.$(NVIDIA_DRIVER_VERSION) \
 -	tls/libnvidia-tls.so.$(NVIDIA_DRIVER_VERSION) \
 -	libvdpau_nvidia.so.$(NVIDIA_DRIVER_VERSION):vdpau/ \
 -	libnvidia-ml.so.$(NVIDIA_DRIVER_VERSION)
@@ -776,50 +932,81 @@ index f1217b0..5c1d52d 100644
 +	libnvidia-api.so.1 \
 +	libnvidia-present.so.$(NVIDIA_DRIVER_VERSION) \
 +	libvdpau_nvidia.so.$(NVIDIA_DRIVER_VERSION):vdpau/
-@@ -76,4 +145,0 @@ define NVIDIA_DRIVER_INSTALL_GL_DEV
+ 
+ NVIDIA_DRIVER_LIBS += \
+ 	$(NVIDIA_DRIVER_LIBS_GL) \
+@@ -73,10 +143,6 @@ NVIDIA_DRIVER_LIBS += \
+ 
+ # Install the gl.pc file
+ define NVIDIA_DRIVER_INSTALL_GL_DEV
 -	$(INSTALL) -D -m 0644 $(@D)/libGL.la $(STAGING_DIR)/usr/lib/libGL.la
 -	$(SED) 's:__GENERATED_BY__:Buildroot:' $(STAGING_DIR)/usr/lib/libGL.la
 -	$(SED) 's:__LIBGL_PATH__:/usr/lib:' $(STAGING_DIR)/usr/lib/libGL.la
 -	$(SED) 's:-L[^[:space:]]\+::' $(STAGING_DIR)/usr/lib/libGL.la
-@@ -90 +155,0 @@ NVIDIA_DRIVER_LIBS += \
+ 	$(INSTALL) -D -m 0644 package/nvidia-driver/gl.pc $(STAGING_DIR)/usr/lib/pkgconfig/gl.pc
+ 	$(INSTALL) -D -m 0644 package/nvidia-driver/egl.pc $(STAGING_DIR)/usr/lib/pkgconfig/egl.pc
+ endef
+@@ -87,19 +153,18 @@ endef
+ # wants to run a third-party program developed under such an agreement).
+ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_PRIVATE_LIBS),y)
+ NVIDIA_DRIVER_LIBS += \
 -	libnvidia-ifr.so.$(NVIDIA_DRIVER_VERSION) \
-@@ -97 +162 @@ NVIDIA_DRIVER_LIBS += \
+ 	libnvidia-fbc.so.$(NVIDIA_DRIVER_VERSION)
+ endif
+ 
+ # We refer to the destination path; the origin file has no directory component
+ NVIDIA_DRIVER_LIBS += \
+ 	nvidia_drv.so:xorg/modules/drivers/ \
 -	libglx.so.$(NVIDIA_DRIVER_VERSION):xorg/modules/extensions/
 +	libglxserver_nvidia.so.$(NVIDIA_DRIVER_VERSION):xorg/modules/extensions/
-@@ -99 +164 @@ NVIDIA_DRIVER_LIBS += \
+ 
 -# libglx needs a symlink according to the driver README. It has no SONAME
 +# The X.org GLX module has no SONAME.
-@@ -101,2 +166,2 @@ define NVIDIA_DRIVER_SYMLINK_LIBGLX
+ define NVIDIA_DRIVER_SYMLINK_LIBGLX
 -	ln -sf libglx.so.$(NVIDIA_DRIVER_VERSION) \
 -		$(TARGET_DIR)/usr/lib/xorg/modules/extensions/libglx.so
 +	ln -sf libglxserver_nvidia.so.$(NVIDIA_DRIVER_VERSION) \
 +		$(TARGET_DIR)/usr/lib/xorg/modules/extensions/libglxserver_nvidia.so
-@@ -110,3 +174,0 @@ NVIDIA_DRIVER_LIBS += \
+ endef
+ 
+ endif # X drivers
+@@ -107,13 +172,12 @@ endif # X drivers
+ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_CUDA),y)
+ NVIDIA_DRIVER_LIBS += \
+ 	libcuda.so.$(NVIDIA_DRIVER_VERSION) \
 -	libnvidia-compiler.so.$(NVIDIA_DRIVER_VERSION) \
 -	libnvcuvid.so.$(NVIDIA_DRIVER_VERSION) \
 -	libnvidia-fatbinaryloader.so.$(NVIDIA_DRIVER_VERSION) \
-@@ -113,0 +176,2 @@ NVIDIA_DRIVER_LIBS += \
+ 	libnvidia-ptxjitcompiler.so.$(NVIDIA_DRIVER_VERSION) \
 +	libnvidia-nvvm.so.$(NVIDIA_DRIVER_VERSION) \
 +	libnvcuvid.so.$(NVIDIA_DRIVER_VERSION) \
-@@ -116 +180 @@ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_CUDA_PROGS),y)
+ 	libnvidia-encode.so.$(NVIDIA_DRIVER_VERSION)
+ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_CUDA_PROGS),y)
 -NVIDIA_DRIVER_PROGS = nvidia-cuda-mps-control nvidia-cuda-mps-server
 +NVIDIA_DRIVER_PROGS += nvidia-cuda-mps-control nvidia-cuda-mps-server
-@@ -125,0 +190,5 @@ NVIDIA_DRIVER_PROVIDES += libopencl
+ endif
+ endif
+ 
+@@ -123,34 +187,113 @@ NVIDIA_DRIVER_LIBS += \
+ 	libnvidia-opencl.so.$(NVIDIA_DRIVER_VERSION)
+ NVIDIA_DRIVER_DEPENDENCIES += mesa3d-headers
+ NVIDIA_DRIVER_PROVIDES += libopencl
 +
 +define NVIDIA_DRIVER_INSTALL_OPENCL_VENDOR_FILE
 +	$(INSTALL) -D -m 0644 $(@D)/nvidia.icd \
 +		$(TARGET_DIR)/etc/OpenCL/vendors/nvidia.icd
 +endef
-@@ -128 +196,0 @@ endif
+ endif
+ 
 -# Build and install the kernel modules if needed
-@@ -129,0 +198,6 @@ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_MODULE),y)
+ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_MODULE),y)
 +NVIDIA_DRIVER_LICENSE += , MIT/GPL-2.0
 +NVIDIA_DRIVER_LICENSE_FILES += kernel-open-src/COPYING
 +
 +NVIDIA_DRIVER_OGKM_TARBALL = open-gpu-kernel-modules-$(NVIDIA_DRIVER_VERSION).tar.gz
 +NVIDIA_DRIVER_EXTRA_DOWNLOADS = \
 +	$(call github,NVIDIA,open-gpu-kernel-modules,$(NVIDIA_DRIVER_VERSION))/$(NVIDIA_DRIVER_OGKM_TARBALL)
-@@ -131,3 +205,5 @@ ifeq ($(BR2_PACKAGE_NVIDIA_DRIVER_MODULE),y)
+ 
 -NVIDIA_DRIVER_MODULES = nvidia nvidia-modeset nvidia-drm
 -ifeq ($(BR2_x86_64),y)
 -NVIDIA_DRIVER_MODULES += nvidia-uvm
@@ -828,7 +1015,7 @@ index f1217b0..5c1d52d 100644
 +# modfinal time, and out-of-tree builds run with this package's per-package PATH.
 +ifeq ($(BR2_LINUX_KERNEL_NEEDS_HOST_PAHOLE),y)
 +NVIDIA_DRIVER_DEPENDENCIES += host-pahole
-@@ -134,0 +211,38 @@ endif
+ endif
 +NVIDIA_DRIVER_MODULES = nvidia nvidia-modeset nvidia-drm nvidia-uvm
 +
 +# The downloaded archive is in fact an auto-extract script. So, it can run
@@ -867,7 +1054,7 @@ index f1217b0..5c1d52d 100644
 +	$(NVIDIA_DRIVER_BUILD_MODULES)
 +	$(NVIDIA_DRIVER_SIGN_MODULES)
 +endef
-@@ -136,8 +250,13 @@ endif
+ 
 -# They can't do everything like everyone. They need those variables,
 -# because they don't recognise the usual variables set by the kernel
 -# build system. We also need to tell them what modules to build.
@@ -889,7 +1076,7 @@ index f1217b0..5c1d52d 100644
 +				$(LINUX_DIR)/certs/signing_key.x509 {} \; ; \
 +	fi
 +endef
-@@ -145 +264,6 @@ NVIDIA_DRIVER_MODULE_MAKE_OPTS = \
+ 
 -NVIDIA_DRIVER_MODULE_SUBDIRS = kernel
 +define NVIDIA_DRIVER_INSTALL_MODULES
 +	mkdir -p $(TARGET_DIR)/usr/lib/modules/$(LINUX_VERSION_PROBED)/extra/nvidia
@@ -897,7 +1084,7 @@ index f1217b0..5c1d52d 100644
 +		$(INSTALL) -m 0644 {} \
 +			$(TARGET_DIR)/usr/lib/modules/$(LINUX_VERSION_PROBED)/extra/nvidia/ \;
 +endef
-@@ -147 +271,21 @@ NVIDIA_DRIVER_MODULE_SUBDIRS = kernel
+ 
 -$(eval $(kernel-module))
 +define NVIDIA_DRIVER_INSTALL_FIRMWARE
 +	for dir in $(@D)/firmware $(@D)/kernel-open-src/kernel-open/nvidia/nv-firmware; do \
@@ -920,28 +1107,52 @@ index f1217b0..5c1d52d 100644
 +		echo 'options nvidia-drm modeset=1$(if $(BR2_x86_64), fbdev=1)'; \
 +	} > $(TARGET_DIR)/etc/modprobe.d/nvidia.conf
 +endef
-@@ -151,3 +295,2 @@ endif # BR2_PACKAGE_NVIDIA_DRIVER_MODULE == y
+ 
+ endif # BR2_PACKAGE_NVIDIA_DRIVER_MODULE == y
+ 
 -# The downloaded archive is in fact an auto-extract script. So, it can run
 -# virtually everywhere, and it is fine enough to provide useful options.
 -# Except it can't extract into an existing (even empty) directory.
 +ifneq ($(filter y,$(BR2_x86_64) $(BR2_aarch64)),)
 +# The .run archive cannot extract into an existing directory.
-@@ -160,0 +304 @@ endef
+ define NVIDIA_DRIVER_EXTRACT_CMDS
+ 	$(SHELL) $(NVIDIA_DRIVER_DL_DIR)/$(NVIDIA_DRIVER_SOURCE) --extract-only --target \
+ 		$(@D)/tmp-extract
+@@ -158,6 +301,7 @@ define NVIDIA_DRIVER_EXTRACT_CMDS
+ 	mv $(@D)/tmp-extract/* $(@D)/tmp-extract/.manifest $(@D)
+ 	rm -rf $(@D)/tmp-extract
+ endef
 +endif
-@@ -170,3 +314,3 @@ define NVIDIA_DRIVER_INSTALL_LIB
+ 
+ # Helper to install libraries
+ # $1: library name
+@@ -167,9 +311,9 @@ endef
+ # their SONAME, so we can link to them at runtime; we also create
+ # the no-version symlink, so we can link to them at build time.
+ define NVIDIA_DRIVER_INSTALL_LIB
 -	$(INSTALL) -D -m 0644 $(@D)/$(1) $(2)$(notdir $(1))
 -	libsoname="$$( $(TARGET_READELF) -d "$(@D)/$(1)" \
 -		|sed -r -e '/.*\(SONAME\).*\[(.*)\]$$/!d; s//\1/;' )"; \
 +	$(INSTALL) -D -m 0644 $(@D)/$(NVIDIA_DRIVER_LIB_SUBDIR)$(1) $(2)$(notdir $(1))
 +	libsoname="$$($(TARGET_READELF) -d "$(@D)/$(NVIDIA_DRIVER_LIB_SUBDIR)$(1)" \
 +		| sed -r -e '/.*\(SONAME\).*\[(.*)\]$$/!d; s//\1/;' )"; \
-@@ -197 +341 @@ endef
+ 	if [ -n "$${libsoname}" -a "$${libsoname}" != "$(notdir $(1))" ]; then \
+ 		ln -sf $(notdir $(1)) $(2)$${libsoname}; \
+ 	fi
+@@ -194,15 +338,20 @@ define NVIDIA_DRIVER_INSTALL_STAGING_CMDS
+ 	$(NVIDIA_DRIVER_INSTALL_GL_DEV)
+ endef
+ 
 -# For target, install libraries and X.org modules
 +# For target, install libraries, programs, X.org modules and kernel modules
-@@ -202 +346 @@ define NVIDIA_DRIVER_INSTALL_TARGET_CMDS
+ define NVIDIA_DRIVER_INSTALL_TARGET_CMDS
+ 	$(call NVIDIA_DRIVER_INSTALL_LIBS,$(TARGET_DIR))
+ 	$(foreach p,$(NVIDIA_DRIVER_PROGS), \
+ 		$(INSTALL) -D -m 0755 $(@D)/$(p) \
 -			$(TARGET_DIR)/usr/bin/$(p)
 +			$(TARGET_DIR)/usr/bin/$(notdir $(p))
-@@ -205 +349,6 @@ define NVIDIA_DRIVER_INSTALL_TARGET_CMDS
+ 	)
+ 	$(NVIDIA_DRIVER_SYMLINK_LIBGLX)
 -	$(NVIDIA_DRIVER_INSTALL_KERNEL_MODULE)
 +	$(NVIDIA_DRIVER_INSTALL_GL_VENDOR_FILES)
 +	$(NVIDIA_DRIVER_INSTALL_GBM_BACKEND)
@@ -949,8 +1160,38 @@ index f1217b0..5c1d52d 100644
 +	$(NVIDIA_DRIVER_INSTALL_MODULES)
 +	$(NVIDIA_DRIVER_INSTALL_FIRMWARE)
 +	$(NVIDIA_DRIVER_INSTALL_MODPROBE)
+ endef
+ 
+ # Due to a conflict with xserver_xorg-server, this needs to be performed when
+diff --git a/package/pkg-cargo.mk b/package/pkg-cargo.mk
+index 47a6353f..59a7bb5e 100644
+--- a/package/pkg-cargo.mk
++++ b/package/pkg-cargo.mk
+@@ -153,15 +153,18 @@ PKG_CARGO_ENV += \
+ 	CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS="false"
+ endif
+ 
+-#
++# Isolate rustflags from host ~/.cargo/config.toml.
++PKG_CARGO_RUSTFLAGS = $(addprefix -C link-args=,$(TARGET_LDFLAGS))
++
+ # This is a workaround for https://github.com/rust-lang/compiler-builtins/issues/420
+ # and should be removed when fixed upstream
+-#
+ ifeq ($(NORMALIZED_ARCH),arm)
+-	PKG_CARGO_ENV += \
+-		CARGO_TARGET_$(call UPPERCASE,$(RUSTC_TARGET_NAME))_RUSTFLAGS="-Clink-arg=-Wl,--allow-multiple-definition"
++PKG_CARGO_RUSTFLAGS += -Clink-arg=-Wl,--allow-multiple-definition
+ endif
+ 
++PKG_CARGO_ENV += \
++	RUSTFLAGS="$(PKG_CARGO_RUSTFLAGS)"
++
+ HOST_PKG_CARGO_ENV = \
+ 	$(PKG_COMMON_CARGO_ENV) \
+ 	RUSTFLAGS="$(addprefix -C link-args=,$(HOST_LDFLAGS))"
 diff --git a/package/polkit/polkit.mk b/package/polkit/polkit.mk
-index 653a281..411b31c 100644
+index 653a2819..411b31c6 100644
 --- a/package/polkit/polkit.mk
 +++ b/package/polkit/polkit.mk
 @@ -19,8 +19,17 @@ POLKIT_LDFLAGS = $(TARGET_NLS_LIBS)
@@ -974,7 +1215,7 @@ index 653a281..411b31c 100644
  ifeq ($(BR2_PACKAGE_GOBJECT_INTROSPECTION),y)
  POLKIT_CONF_OPTS += -Dintrospection=true
 diff --git a/package/python-gobject/python-gobject.mk b/package/python-gobject/python-gobject.mk
-index 9386b6f..ad9e8ff 100644
+index 310cde24..802bc956 100644
 --- a/package/python-gobject/python-gobject.mk
 +++ b/package/python-gobject/python-gobject.mk
 @@ -29,4 +29,15 @@ PYTHON_GOBJECT_CONF_ENV += \
@@ -994,7 +1235,7 @@ index 9386b6f..ad9e8ff 100644
  $(eval $(meson-package))
 +$(eval $(host-meson-package))
 diff --git a/package/strace/strace.mk b/package/strace/strace.mk
-index a068893..1e7373c 100644
+index a0688939..1e7373c6 100644
 --- a/package/strace/strace.mk
 +++ b/package/strace/strace.mk
 @@ -12,6 +12,10 @@ STRACE_LICENSE_FILES = COPYING LGPL-2.1-or-later
@@ -1009,7 +1250,7 @@ index a068893..1e7373c 100644
  STRACE_DEPENDENCIES += libunwind
  STRACE_CONF_OPTS += --with-libunwind
 diff --git a/package/systemd/systemd.hash b/package/systemd/systemd.hash
-index e96d3ba..1c82877 100644
+index e96d3ba7..25f0f37f 100644
 --- a/package/systemd/systemd.hash
 +++ b/package/systemd/systemd.hash
 @@ -1,5 +1,5 @@
@@ -1019,11 +1260,14 @@ index e96d3ba..1c82877 100644
  sha256  ac4985facb553559981f507982444d779115e3e3a4c8b7847ae956198490c1b3  LICENSE.GPL2
  sha256  6d9bb3b7fc818a8facc4cc296060a0883fef8710d6498f86165335846e82ee9d  LICENSE.LGPL2.1
  sha256  c9e7bf5b7c243c719b8b43c36158effb9b54c5e80abc9d82e4b2d4b2a4aa64ad  LICENSES/alg-sha1-public-domain.txt
-@@ -16 +16 @@
+@@ -13,4 +13,4 @@ sha256  8a6fc0879cecc0b96bf4c08159b9d733bf0f15fcf32879aec98c4ffd05424554  LICENS
+ sha256  b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0  LICENSES/MIT.txt
+ sha256  2a98749f6bec00dfaed86fa9c1edea871aaae4f11ee4d100b671aaf4ce353a73  LICENSES/murmurhash2-public-domain.txt
+ sha256  1a7adaa2c86cedfd6c7f5c0c7c72fd6d3e02cd0c9593f21fdb53c89bb2b130ec  LICENSES/OFL-1.1.txt
 -sha256  bce1d2e9bad517b493168b37604c5d02a7fb638b4d1b9fc730adafa06c603456  LICENSES/README.md
 +sha256  55dc358743e4bd7d026cba1401ac56c548a886a073b3f07a18a5c538fa8102ed  LICENSES/README.md
 diff --git a/package/systemd/systemd.mk b/package/systemd/systemd.mk
-index 3223915..ba5e0ef 100644
+index 3223915d..be5756d5 100644
 --- a/package/systemd/systemd.mk
 +++ b/package/systemd/systemd.mk
 @@ -19,7 +19,7 @@
@@ -1044,21 +1288,29 @@ index 3223915..ba5e0ef 100644
  SYSTEMD_CONF_OPTS += -Dpolkit=disabled
  endif
 diff --git a/package/upower/upower.hash b/package/upower/upower.hash
-index cabce1f..ba1130e 100644
+index cabce1f5..ba1130e0 100644
 --- a/package/upower/upower.hash
 +++ b/package/upower/upower.hash
-@@ -2 +2 @@
+@@ -1,3 +1,3 @@
+ # Locally calculated
 -sha256  e5bda2f5837ee311f5b7b6ec9549b029c88f4958011c6a8f5550b54408ee06ae  upower-v0.99.19.tar.bz2
 +sha256  12227b3dcd34c5097bbda25984b192ea0bd5e11dce479358d9ef70415a38e4b6  upower-v1.91.3.tar.bz2
+ sha256  c1753877db41d798d63369a825ad9225bbeb5e10a407be5fcd8de96182f1c50d  COPYING
 diff --git a/package/upower/upower.mk b/package/upower/upower.mk
-index 49aac8c..5c3d286 100644
+index 49aac8c7..5c3d2863 100644
 --- a/package/upower/upower.mk
 +++ b/package/upower/upower.mk
-@@ -7 +7 @@
+@@ -4,7 +4,7 @@
+ #
+ ################################################################################
+ 
 -UPOWER_VERSION = 0.99.19
 +UPOWER_VERSION = 1.91.3
+ UPOWER_SOURCE = upower-v$(UPOWER_VERSION).tar.bz2
+ UPOWER_SITE = https://gitlab.freedesktop.org/upower/upower/-/archive/v$(UPOWER_VERSION)
+ UPOWER_LICENSE = GPL-2.0+
 diff --git a/package/usbguard/Config.in b/package/usbguard/Config.in
-index 254209f..0da4455 100644
+index 254209ff..0da44558 100644
 --- a/package/usbguard/Config.in
 +++ b/package/usbguard/Config.in
 @@ -3,12 +3,16 @@ config BR2_PACKAGE_USBGUARD
@@ -1091,7 +1343,7 @@ index 254209f..0da4455 100644
  
  comment "usbguard needs a toolchain not affected by GCC bug 64735"
 diff --git a/package/usbguard/usbguard.mk b/package/usbguard/usbguard.mk
-index 5f6672d..1fdbf15 100644
+index 5f6672d4..1fdbf15f 100644
 --- a/package/usbguard/usbguard.mk
 +++ b/package/usbguard/usbguard.mk
 @@ -15,11 +15,11 @@ USBGUARD_CONF_OPTS = \
@@ -1110,7 +1362,7 @@ index 5f6672d..1fdbf15 100644
  ifeq ($(BR2_PACKAGE_LIBSODIUM),y)
  USBGUARD_CONF_OPTS += --with-crypto-library=sodium
 diff --git a/package/x11r7/xlib_libxcvt/xlib_libxcvt.mk b/package/x11r7/xlib_libxcvt/xlib_libxcvt.mk
-index 428553a..20fdb35 100644
+index 428553a1..20fdb353 100644
 --- a/package/x11r7/xlib_libxcvt/xlib_libxcvt.mk
 +++ b/package/x11r7/xlib_libxcvt/xlib_libxcvt.mk
 @@ -12,3 +12,4 @@ XLIB_LIBXCVT_LICENSE_FILES = COPYING
@@ -1118,8 +1370,22 @@ index 428553a..20fdb35 100644
  
  $(eval $(meson-package))
 +$(eval $(host-meson-package))
+diff --git a/package/x11r7/xwayland/xwayland.mk b/package/x11r7/xwayland/xwayland.mk
+index 02a21b96..cc316b47 100644
+--- a/package/x11r7/xwayland/xwayland.mk
++++ b/package/x11r7/xwayland/xwayland.mk
+@@ -40,6 +40,9 @@ endif
+ ifeq ($(BR2_PACKAGE_HAS_LIBGL),y)
+ XWAYLAND_CONF_OPTS += -Dglx=true
+ XWAYLAND_DEPENDENCIES += libgl
++ifeq ($(BR2_PACKAGE_MESA3D),y)
++XWAYLAND_DEPENDENCIES += mesa3d
++endif
+ else
+ XWAYLAND_CONF_OPTS += -Dglx=false
+ endif
 diff --git a/support/download/helpers b/support/download/helpers
-index f4102e3..dd61bc3 100755
+index f4102e3b..dd61bc37 100755
 --- a/support/download/helpers
 +++ b/support/download/helpers
 @@ -64,8 +64,12 @@ mk_tar_gz() {
@@ -1153,9 +1419,11 @@ index f4102e3..dd61bc3 100755
      one_file="$(find "${dest}" -type f -print0 |LC_ALL=C sort -z |sed 's/\x0.*//')"
      touch -r "${one_file}" "${dest}.timestamp"
  }
+diff --git a/support/scripts/apply-patches.sh b/support/scripts/apply-patches.sh
+index 2acaa63e..f6fe5686 100755
 --- a/support/scripts/apply-patches.sh
 +++ b/support/scripts/apply-patches.sh
-@@ -115,12 +115,11 @@
+@@ -115,12 +115,11 @@ function apply_patch {
          echo "  to be applied  : ${path}/${patch}"
          exit 1
      fi
@@ -1170,47 +1438,3 @@ index f4102e3..dd61bc3 100755
  }
  
  function scan_patchdir {
-
---- a/fs/oci/oci.mk
-+++ b/fs/oci/oci.mk
-@@ -28,0 +29,5 @@
-+ifneq ($(call qstrip,$(BR2_TARGET_ROOTFS_OCI_ENTRYPOINT)),)
-+OCI_SLOCI_IMAGE_OPTS += \
-+	$(shell eval printf -- "--entrypoint\ \'%s\'\ " $(BR2_TARGET_ROOTFS_OCI_ENTRYPOINT))
-+endif
-+ifneq ($(call qstrip,$(BR2_TARGET_ROOTFS_OCI_CMD)),)
-@@ -30 +34,0 @@
--	$(shell eval printf -- "--entrypoint\ \'%s\'\ " $(BR2_TARGET_ROOTFS_OCI_ENTRYPOINT)) \
-@@ -31,0 +36 @@
-+endif
-@@ -46,2 +51 @@
--OCI_LABELS = $(call qstrip,$(BR2_TARGET_ROOTFS_OCI_LABELS))
--ifneq ($(OCI_LABELS),)
-+ifneq ($(call qstrip,$(BR2_TARGET_ROOTFS_OCI_LABELS)),)
-@@ -49 +53 @@
--	$(foreach label,$(OCI_LABELS),--label "$(label)")
-+	$(shell eval printf -- "--label\ \'%s\'\ " $(BR2_TARGET_ROOTFS_OCI_LABELS))
---- a/package/x11r7/xwayland/xwayland.mk
-+++ b/package/x11r7/xwayland/xwayland.mk
-@@ -40,6 +40,9 @@
- ifeq ($(BR2_PACKAGE_HAS_LIBGL),y)
- XWAYLAND_CONF_OPTS += -Dglx=true
- XWAYLAND_DEPENDENCIES += libgl
-+ifeq ($(BR2_PACKAGE_MESA3D),y)
-+XWAYLAND_DEPENDENCIES += mesa3d
-+endif
- else
- XWAYLAND_CONF_OPTS += -Dglx=false
- endif
---- a/linux/linux.mk
-+++ b/linux/linux.mk
-@@ -125,6 +125,9 @@
- 
- ifeq ($(BR2_LINUX_KERNEL_NEEDS_HOST_PAHOLE),y)
- LINUX_DEPENDENCIES += host-pahole
-+# Kconfig probes pahole while generating .config (PAHOLE_VERSION gate for
-+# DEBUG_INFO_BTF): order host-pahole before the dot-config stamp.
-+LINUX_KCONFIG_DEPENDENCIES += host-pahole
- else
- define LINUX_FIXUP_CONFIG_PAHOLE_CHECK
- 	$(Q)if grep -q "^CONFIG_DEBUG_INFO_BTF=y" $(KCONFIG_DOT_CONFIG); then \
