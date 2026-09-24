@@ -13,11 +13,6 @@ flatpak:
   syncHelper: /usr/libexec/puu-os/flatpak-sync
   liveStore: /var/lib/flatpak
 
-models:
-  catalogDir: /usr/share/puu-os/vllm/catalog.d
-  syncHelper: /usr/libexec/puu-os/preseed-vllm-models
-  liveStore: /var/lib/vllm/models
-
 k3s:
   helper: /usr/libexec/puu-os/configure-k3s-cluster
 
