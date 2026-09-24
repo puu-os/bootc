@@ -53,9 +53,8 @@ def download_with_http(repo_id: str, revision: str, dest_dir: Path) -> bool:
     dest_dir.mkdir(parents=True, exist_ok=True)
     for file_info in siblings:
         rfilename = file_info.get("rfilename", "")
-        if not rfilename or rfilename.startswith(".") or "/" in rfilename:
-            # Skip hidden files or subtrees unless standard
-            pass
+        if not rfilename or rfilename.startswith("."):
+            continue
         file_url = f"https://huggingface.co/{repo_id}/resolve/{rev}/{rfilename}"
         out_path = dest_dir / rfilename
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,10 +62,14 @@ def download_with_http(repo_id: str, revision: str, dest_dir: Path) -> bool:
             continue
         print(f"  Fetching {rfilename}...")
         file_req = urllib.request.Request(file_url, headers={"User-Agent": "puu-os-preseed/1.0"})
+        tmp_path = out_path.with_name(f".{out_path.name}.tmp")
         try:
-            with urllib.request.urlopen(file_req, timeout=120) as in_stream, open(out_path, "wb") as out_stream:
+            with urllib.request.urlopen(file_req, timeout=120) as in_stream, open(tmp_path, "wb") as out_stream:
                 shutil.copyfileobj(in_stream, out_stream)
+            tmp_path.replace(out_path)
         except (urllib.error.URLError, OSError) as exc:
+            if tmp_path.exists():
+                tmp_path.unlink()
             print(f"error: failed downloading {rfilename}: {exc}", file=sys.stderr)
             return False
     return True
@@ -104,12 +107,22 @@ def preseed_model(catalog_file: Path, models_dir: Path) -> bool:
     return True
 
 
+def notify_discovery_and_planner() -> None:
+    if os.geteuid() == 0:
+        discover_bin = libexec_dir / "discover-vllm-models"
+        if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
+            subprocess.run([str(discover_bin)], check=False)
+        planner_bin = libexec_dir / "plan-vllm-workloads"
+        if planner_bin.is_file() and os.access(planner_bin, os.X_OK):
+            subprocess.run([str(planner_bin)], check=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Preseed vLLM models from catalog")
     parser.add_argument(
         "models",
         nargs="*",
-        help="Specific model names to preseed (default: all with PUU_VLLM_AUTOSTART=true)",
+        help="Specific model names to preseed (default: all catalog models)",
     )
     parser.add_argument(
         "--catalog-dir",
@@ -138,10 +151,17 @@ def main() -> None:
                 sys.exit(f"error: catalog model not found: {name}")
             target_files.append(env_file)
     else:
+        candidates = []
         for env_file in sorted(catalog_dir.glob("*.env")):
             meta = ms.parse_env_file(env_file)
-            if ms.parse_bool(meta.get("PUU_VLLM_AUTOSTART"), False):
-                target_files.append(env_file)
+            autostart = ms.parse_bool(meta.get("PUU_VLLM_AUTOSTART"), False)
+            try:
+                prio = int(meta.get("PUU_VLLM_AUTOSTART_PRIORITY", "0"))
+            except ValueError:
+                prio = 0
+            candidates.append((autostart, prio, env_file))
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        target_files = [item[2] for item in candidates]
 
     if not target_files:
         print("No models to preseed.")
@@ -151,11 +171,8 @@ def main() -> None:
     for catalog_file in target_files:
         if not preseed_model(catalog_file, models_dir):
             success = False
-
-    if os.geteuid() == 0:
-        discover_bin = libexec_dir / "discover-vllm-models"
-        if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
-            subprocess.run([str(discover_bin)], check=False)
+        else:
+            notify_discovery_and_planner()
 
     if not success:
         sys.exit(1)
