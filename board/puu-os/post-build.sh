@@ -251,6 +251,12 @@ if [ "${PUU_ARCH}" = amd64 ] && [ ! -e "${TARGET_DIR}/lib64" ]; then
   ln -s lib "${TARGET_DIR}/lib64"
 fi
 
+# Ensure ldconfig is present in the target for container runtimes (such as nvidia-container-cli).
+ldconfig_bin=$(find "${HOST_DIR}" -path "*/sysroot/usr/bin/ldconfig" 2>/dev/null | head -n1)
+if [ -n "${ldconfig_bin}" ] && [ -f "${ldconfig_bin}" ]; then
+  install -Dm0755 "${ldconfig_bin}" "${TARGET_DIR}/usr/bin/ldconfig"
+fi
+
 mkdir -p "${TARGET_DIR}/etc/systemd/system/getty.target.wants"
 ln -sfn /usr/lib/systemd/system/serial-getty@.service \
   "${TARGET_DIR}/etc/systemd/system/getty.target.wants/serial-getty@${PUU_SERIAL_TTY}.service"
