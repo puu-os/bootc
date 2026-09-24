@@ -17,6 +17,7 @@ spec:
       labels:
         app.kubernetes.io/name: nvidia-device-plugin
     spec:
+      runtimeClassName: nvidia-cdi
       priorityClassName: system-node-critical
       tolerations:
         - key: nvidia.com/gpu
@@ -28,11 +29,15 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: DEVICE_LIST_STRATEGY
-              value: cdi-annotations
+              value: envvar
             - name: DEVICE_ID_STRATEGY
               value: uuid
             - name: FAIL_ON_INIT_ERROR
               value: "false"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: all
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
