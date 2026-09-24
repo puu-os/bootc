@@ -17,15 +17,16 @@ CCACHE_DIR            := $(CACHE_DIR)/ccache
 STAMP_DIR             := $(BOARD_DIR)/stamp
 
 BUILDROOT_JOBS        ?= 8
-BUILDROOT_VERSION     ?= 2026.08-rc1
-BUILDROOT_HASH        ?= fbb78d7e07ca91cc4def0a0730a332e5bcf2234b59f3b0c151104e2dc79ff6fe
+BUILDROOT_VERSION     ?= 2026.08
+BUILDROOT_HASH        ?= 87aaca4164ea9d5c8085854953018263f7963f07c22e73a2a2185cc98c581c34
 BUILDROOT_URL         ?= https://buildroot.org/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 BUILDROOT_DL_DIR      := $(DOWNLOAD_DIR)/buildroot
 BUILDROOT_TARBALL     := $(BUILDROOT_DL_DIR)/source/$(BUILDROOT_HASH)/buildroot-$(BUILDROOT_VERSION).tar.xz
-BUILDROOT_PATCH       := $(CURDIR)/buildroot-$(BUILDROOT_VERSION).patch
-BUILDROOT_SRC_PATCHES := $(sort $(wildcard $(CURDIR)/patches/pkg-cargo/*.patch))
-BUILDROOT_PATCH_KEY   := $(shell sha256sum $(BUILDROOT_PATCH) $(BUILDROOT_SRC_PATCHES) | sha256sum | cut -d' ' -f1)
+BUILDROOT_PATCH       := $(CURDIR)/buildroot.patch
+BUILDROOT_PATCH_KEY   := $(shell sha256sum $(BUILDROOT_PATCH) | cut -d' ' -f1)
 BUILDROOT_SRC_DIR     := $(BOARD_DIR)/src/$(BUILDROOT_HASH)/buildroot-$(BUILDROOT_VERSION)
+BUILDROOT_PATCH_LOCK  := $(abspath $(OUTPUT_DIR))/.locks/$(BOARD).patch
+BUILDROOT_PATCH_STAMP := $(STAMP_DIR)/$(BUILDROOT_VERSION)/$(BUILDROOT_HASH)/$(BUILDROOT_PATCH_KEY)/patch
 
 SDK_DIR               := $(CACHE_DIR)/sdk
 SDK_CACHE_DIR         := $(SDK_DIR)/$(BUILDROOT_VERSION)
@@ -52,8 +53,6 @@ SDK_ARCH :=
 endif
 
 SDK_INSTALL_DIR       := $(SDK_INSTALL_ROOT)/$(SDK_ARCH)/$(SDK_ARCH)-puu-linux-gnu_sdk-buildroot
-PATCH_LOCK            := $(abspath $(OUTPUT_DIR))/.locks/$(BOARD).patch
-PATCH_STAMP           := $(STAMP_DIR)/$(BUILDROOT_VERSION)/$(BUILDROOT_HASH)/$(BUILDROOT_PATCH_KEY)/patch
 SDK_INSTALL_STAMP     := $(SDK_INSTALL_ROOT)/.stamp/$(SDK_ARCH)/install
 
 ifneq ($(filter configure build burn,$(MAKECMDGOALS)),)
@@ -105,11 +104,11 @@ $(SDK_INSTALL_ROOT)/.stamp/%/install: $(BUILDROOT_TARBALL) sdk/%_defconfig
 	./scripts/build-sdk.sh "$*" "sdk/$*_defconfig" "$(BUILDROOT_TARBALL)" "$(BUILDROOT_HASH)" \
 		"$(SDK_BUILD_DIR)" "$(SDK_INSTALL_ROOT)" "$(SDK_LOCK)" "$(BUILDROOT_DL_DIR)" "$(SOURCE_DATE_EPOCH)"
 
-$(PATCH_STAMP): $(BUILDROOT_TARBALL) $(BUILDROOT_PATCH) $(BUILDROOT_SRC_PATCHES)
-	./scripts/setup-buildroot.sh "$(PATCH_LOCK)" "$(BUILDROOT_TARBALL)" "$(BUILDROOT_HASH)" \
-		"$(BOARD_DIR)" "$(BUILDROOT_SRC_DIR)" "$@" "$(BUILDROOT_PATCH)" $(BUILDROOT_SRC_PATCHES)
+$(BUILDROOT_PATCH_STAMP): $(BUILDROOT_TARBALL) $(BUILDROOT_PATCH)
+	./scripts/setup-buildroot.sh "$(BUILDROOT_PATCH_LOCK)" "$(BUILDROOT_TARBALL)" "$(BUILDROOT_HASH)" \
+		"$(BOARD_DIR)" "$(BUILDROOT_SRC_DIR)" "$@" "$(BUILDROOT_PATCH)"
 
-configure: $(SDK_INSTALL_STAMP) $(PATCH_STAMP) ## Run <BOARD>_defconfig
+configure: $(SDK_INSTALL_STAMP) $(BUILDROOT_PATCH_STAMP) ## Run <BOARD>_defconfig
 	$(call buildroot,$(BOARD)_defconfig)
 
 build: configure ## Build <BOARD>

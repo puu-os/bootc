@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-if (($# < 7)); then
-  echo "usage: $0 <lock_file> <tarball> <hash> <board_dir> <src_dir> <stamp_file> <base_patch> [extra_patches...]" >&2
+if (($# != 7)); then
+  echo "usage: $0 <lock_file> <tarball> <hash> <board_dir> <src_dir> <stamp_file> <patch_file>" >&2
   exit 1
 fi
 
@@ -15,9 +15,7 @@ hash=$3
 board_dir=$4
 src_dir=$5
 stamp_file=$6
-base_patch=$7
-shift 7
-extra_patches=("$@")
+patch_file=$7
 
 mkdir -p "$(dirname "$lock_file")"
 exec 9>"$lock_file"
@@ -33,11 +31,7 @@ rm -rf "$board_dir"
 mkdir -p "$src_dir"
 tar -xf "$tarball" --strip-components=1 -C "$src_dir"
 
-patch -d "$src_dir" -p1 -i "$base_patch"
-for p in "${extra_patches[@]}"; do
-  [[ -f "$p" ]] || continue
-  patch -d "$src_dir" -p1 -i "$p"
-done
+patch -d "$src_dir" -p1 -i "$patch_file"
 
 mkdir -p "$(dirname "$stamp_file")"
 touch "$stamp_file"
