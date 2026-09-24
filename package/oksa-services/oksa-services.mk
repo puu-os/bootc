@@ -36,7 +36,7 @@ define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
 		puu-vllm-discovery.timer puu-model-serving-labeler.service \
 		puu-model-serving-labeler.timer puu-nvlink-topology.service \
 		puu-nvlink-topology.timer puu-vllm-planner.service \
-		puu-vllm-planner.timer; do \
+		puu-vllm-planner.timer puu-vllm-preseed.service; do \
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/systemd/$$unit \
 			$(TARGET_DIR)/usr/lib/systemd/system/$$unit || exit $$?; \
 	done
