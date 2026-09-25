@@ -63,15 +63,15 @@ EOF
   ln -sf ../usr/lib/os-release "${TARGET_DIR}/etc/os-release"
 }
 
-rm -f "${TARGET_DIR}/etc/pki/puu-os/cosign.pub"
-rm -rf "${TARGET_DIR}/etc/pki/puu-os/cosign"
+rm -f "${TARGET_DIR}/etc/pki/puu/cosign.pub"
+rm -rf "${TARGET_DIR}/etc/pki/puu/cosign"
 trusted_key_paths=()
 if split_cosign_keys; then
-  mkdir -p "${TARGET_DIR}/etc/pki/puu-os/cosign"
+  mkdir -p "${TARGET_DIR}/etc/pki/puu/cosign"
 
   for i in "${!cosign_key_paths[@]}"; do
     cosign_key="${cosign_key_paths[${i}]}"
-    trusted_key_path="/etc/pki/puu-os/cosign/key-${i}.pub"
+    trusted_key_path="/etc/pki/puu/cosign/key-${i}.pub"
     write_cosign_public_key "${cosign_key}" \
       "${TARGET_DIR}${trusted_key_path}"
     trusted_key_paths+=("${trusted_key_path}")
@@ -111,7 +111,7 @@ ln -sfn "${HOST_DIR}/lib/dracut" "${host_dracut_link}"
 rm -f \
   "${TARGET_DIR}/etc/systemd/system/emergency.service.d/10-live-root-shell.conf" \
   "${TARGET_DIR}/etc/systemd/system/rescue.service.d/10-live-root-shell.conf" \
-  "${TARGET_DIR}/usr/libexec/puu-os/live-root-shell"
+  "${TARGET_DIR}/usr/libexec/puu/live-root-shell"
 rmdir \
   "${TARGET_DIR}/etc/systemd/system/emergency.service.d" \
   "${TARGET_DIR}/etc/systemd/system/rescue.service.d" \
@@ -245,7 +245,7 @@ write_os_release
 rm -f "${TARGET_DIR}/usr/share/dbus-1/services/org.freedesktop.systemd1.service"
 chmod 0440 \
   "${TARGET_DIR}/etc/sudoers.d/10-puu-wheel" \
-  "${TARGET_DIR}/usr/share/puu-os/live/sudoers-nopasswd"
+  "${TARGET_DIR}/usr/share/puu/live/sudoers-nopasswd"
 
 if [ "${PUU_ARCH}" = amd64 ] && [ ! -e "${TARGET_DIR}/lib64" ]; then
   ln -s lib "${TARGET_DIR}/lib64"

@@ -37,9 +37,9 @@ def copy_manifests(manifest_src: Path, manifest_dst: Path) -> None:
 
 
 def main() -> None:
-    manifest_src = Path("/usr/share/puu-os/k3s/manifests")
+    manifest_src = Path("/usr/share/puu/k3s/manifests")
     manifest_dst = Path("/var/lib/rancher/k3s/server/manifests")
-    crd_src = Path("/usr/share/puu-os/k3s/crds")
+    crd_src = Path("/usr/share/puu/k3s/crds")
 
     if not ms.wait_for_kubectl("get", "--raw=/readyz"):
         sys.exit("kubernetes API did not become ready")

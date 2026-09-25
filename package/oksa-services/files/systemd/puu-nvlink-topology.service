@@ -6,4 +6,4 @@ ConditionKernelCommandLine=!puu.live
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/puu-os/collect-nvlink-topology
+ExecStart=/usr/libexec/puu/collect-nvlink-topology
