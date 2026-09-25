@@ -37,7 +37,7 @@ branch="$(git symbolic-ref --short HEAD)"
 [[ -z "$(git tag -l "$next_ver")" ]] || die "tag $next_ver already exists"
 
 check_tag="puu-signing-check-$$"
-git tag -s "$check_tag" -m "puu-os release signing check" \
+git tag -s "$check_tag" -m "puu release signing check" \
   || die "cannot sign release tags; configure a signing key"
 git tag -d "$check_tag" >/dev/null
 check_tag=""
@@ -65,7 +65,7 @@ git commit -s -m "Bump the version to $next_ver" -- Makefile
 committed=1
 
 sob="Signed-off-by: $(git config user.name) <$(git config user.email)>"
-printf '%s %s\n\n%s\n\n%s\n' "puu-os" "$next_ver" "$log" "$sob" | git tag -s "$next_ver" -F -
+printf '%s %s\n\n%s\n\n%s\n' "puu" "$next_ver" "$log" "$sob" | git tag -s "$next_ver" -F -
 
 printf 'tagged %s\n' "$next_ver"
 printf 'push the commit and tag: git push --atomic origin %q %q\n' \
