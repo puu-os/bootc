@@ -196,7 +196,7 @@ BR2_TARGET_ROOTFS_OCI_AUTHOR="puu-oci"
 BR2_TARGET_ROOTFS_OCI_ENTRYPOINT=""
 BR2_TARGET_ROOTFS_OCI_CMD="/sbin/init"
 BR2_TARGET_ROOTFS_OCI_UID=""
-BR2_TARGET_ROOTFS_OCI_LABELS="containers.bootc=1 ostree.bootable=1 .title=Puu .version=$(PUU_VERSION) .variant=$(PUU_VARIANT) .licenses=GPL-2.0-or-later .source=https://gitlab.com/puu-os/puu-os \".vendor=Opinsys Oy\""
+BR2_TARGET_ROOTFS_OCI_LABELS="containers.bootc=1 ostree.bootable=1 .title=Puu .version=$(PUU_VERSION) .variant=$(PUU_VARIANT) .licenses=GPL-2.0-or-later .source=https://gitlab.com/puu-os/bootc \".vendor=Opinsys Oy\""
 BR2_TARGET_ROOTFS_OCI_ARCHIVE=y
 BR2_TARGET_ROOTFS_SQUASHFS=y
 # BR2_TARGET_ROOTFS_TAR is not set
