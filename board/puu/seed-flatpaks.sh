@@ -9,7 +9,7 @@ set -euo pipefail
 : "${DEST_DIR:?DEST_DIR must be set}"
 : "${PUU_ARCH:?PUU_ARCH must be set (amd64 or arm64)}"
 
-# shellcheck source=board/puu-os/lib.sh
+# shellcheck source=board/puu/lib.sh
 . "${BASH_SOURCE%/*}/lib.sh"
 
 manifest="${TARGET_DIR}/usr/share/puu-os/flatpaks.list"

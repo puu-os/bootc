@@ -14,7 +14,7 @@ export PUU_ARCH="${2:?arch argument must be set (amd64 or arm64)}"
 : "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set by Buildroot}"
 export SOURCE_DATE_EPOCH TZ=UTC
 
-# shellcheck source=board/puu-os/lib.sh
+# shellcheck source=board/puu/lib.sh
 . "${BASH_SOURCE%/*}/lib.sh"
 
 init_puu_arch "${PUU_ARCH}"

@@ -10,7 +10,7 @@ set -euo pipefail
 PUU_ARCH="${2:?arch argument must be set (amd64 or arm64)}"
 : "${PUU_COSIGN_KEYS?PUU_COSIGN_KEYS must be set (empty for unsigned builds)}"
 
-# shellcheck source=board/puu-os/lib.sh
+# shellcheck source=board/puu/lib.sh
 . "${BASH_SOURCE%/*}/lib.sh"
 
 init_puu_arch "${PUU_ARCH}"
