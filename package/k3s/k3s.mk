@@ -55,9 +55,9 @@ define K3S_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/bin/k3s \
 		$(TARGET_DIR)/usr/bin/k3s
 	$(INSTALL) -D -m 0755 $(K3S_PKGDIR)/files/configure-k3s-cluster \
-		$(TARGET_DIR)/usr/libexec/puu-os/configure-k3s-cluster
+		$(TARGET_DIR)/usr/libexec/puu/configure-k3s-cluster
 	$(INSTALL) -D -m 0755 $(K3S_PKGDIR)/files/wait-default-route \
-		$(TARGET_DIR)/usr/libexec/puu-os/wait-default-route
+		$(TARGET_DIR)/usr/libexec/puu/wait-default-route
 	for link in kubectl crictl k3s-agent k3s-server k3s-token \
 		k3s-etcd-snapshot k3s-secrets-encrypt k3s-certificate k3s-completion; do \
 		ln -sf k3s $(TARGET_DIR)/usr/bin/$$link; \

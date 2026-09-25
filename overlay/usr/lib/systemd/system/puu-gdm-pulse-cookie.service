@@ -6,4 +6,4 @@ Before=gdm.service
 Type=oneshot
 User=gdm
 Group=gdm
-ExecStart=/usr/libexec/puu-os/ensure-gdm-pulse-cookie
+ExecStart=/usr/libexec/puu/ensure-gdm-pulse-cookie

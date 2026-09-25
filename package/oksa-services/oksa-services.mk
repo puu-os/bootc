@@ -9,15 +9,15 @@ OKSA_SERVICES_FILES = $(OKSA_SERVICES_PKGDIR)/files
 
 define OKSA_SERVICES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/model_serving.py \
-		$(TARGET_DIR)/usr/libexec/puu-os/model_serving.py
+		$(TARGET_DIR)/usr/libexec/puu/model_serving.py
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/install-k3s-addons \
-		$(TARGET_DIR)/usr/libexec/puu-os/install-k3s-addons
+		$(TARGET_DIR)/usr/libexec/puu/install-k3s-addons
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/oksa \
 		$(TARGET_DIR)/usr/bin/oksa
 	for executable in discover-vllm-models label-model-serving-node \
 		collect-nvlink-topology plan-vllm-workloads preseed-vllm-models; do \
 		$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/$$executable \
-			$(TARGET_DIR)/usr/libexec/puu-os/$$executable || exit $$?; \
+			$(TARGET_DIR)/usr/libexec/puu/$$executable || exit $$?; \
 	done
 	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/oksa-services.conf \
 		$(TARGET_DIR)/usr/lib/tmpfiles.d/oksa-services.conf
@@ -25,10 +25,10 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 		30-llm-d.yaml 30-nvidia-cdi-runtime.yaml 32-nvidia-device-plugin.yaml \
 		40-litellm.yaml 45-open-webui.yaml,\
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/manifests/$(manifest) \
-			$(TARGET_DIR)/usr/share/puu-os/k3s/manifests/$(manifest)$(sep))
+			$(TARGET_DIR)/usr/share/puu/k3s/manifests/$(manifest)$(sep))
 	$(foreach catalog,$(notdir $(wildcard $(OKSA_SERVICES_FILES)/vllm/catalog.d/*.env)),\
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/vllm/catalog.d/$(catalog) \
-			$(TARGET_DIR)/usr/share/puu-os/vllm/catalog.d/$(catalog)$(sep))
+			$(TARGET_DIR)/usr/share/puu/vllm/catalog.d/$(catalog)$(sep))
 endef
 
 define OKSA_SERVICES_INSTALL_INIT_SYSTEMD

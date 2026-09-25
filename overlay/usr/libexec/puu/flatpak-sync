@@ -52,7 +52,7 @@ def write_state(state_path: Path, refs: list[str]) -> None:
 
 
 def main() -> None:
-    manifest_path = Path("/usr/share/puu-os/flatpaks.list")
+    manifest_path = Path("/usr/share/puu/flatpaks.list")
     if not manifest_path.is_file():
         sys.exit(0)
 

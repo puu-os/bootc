@@ -40,7 +40,7 @@ define NVIDIA_CONTAINER_TOOLKIT_INSTALL_INIT_SYSTEMD
 		$(TARGET_DIR)/etc/nvidia-container-toolkit/nvidia-cdi-refresh.env
 	$(INSTALL) -D -m 0755 \
 		$(NVIDIA_CONTAINER_TOOLKIT_PKGDIR)/files/has-nvidia-hardware \
-		$(TARGET_DIR)/usr/libexec/puu-os/has-nvidia-hardware
+		$(TARGET_DIR)/usr/libexec/puu/has-nvidia-hardware
 endef
 
 $(eval $(golang-package))

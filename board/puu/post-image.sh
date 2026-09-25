@@ -38,7 +38,7 @@ embed_live_image_digest() {
   local rootfs_stage rootfs_tmp
   local machine_src flatpak_root=""
 
-  machine_src="${BR2_EXTERNAL_PUU_PATH}/overlay/usr/share/puu-os/live/machine.yaml"
+  machine_src="${BR2_EXTERNAL_PUU_PATH}/overlay/usr/share/puu/live/machine.yaml"
   test -f "${machine_src}"
 
 
@@ -81,16 +81,16 @@ embed_live_image_digest() {
       mv "$flatpak_root/var/lib/flatpak" "$stage/var/lib/flatpak"
       chown -hR 0:0 "$stage/var/lib/flatpak"
     fi
-    install -D -m 0644 "$machine_src" "$stage/usr/share/puu-os/machine.yaml"
-    printf "\nimage:\n  expectedDigest: %s\n  sourceLabel: null\n" "$digest" >> "$stage/usr/share/puu-os/machine.yaml"
+    install -D -m 0644 "$machine_src" "$stage/usr/share/puu/machine.yaml"
+    printf "\nimage:\n  expectedDigest: %s\n  sourceLabel: null\n" "$digest" >> "$stage/usr/share/puu/machine.yaml"
     install -d -m 0755 "$stage/etc/sudoers.d"
-    printf "PUU_INSTALLER_CONFIG=/usr/share/puu-os/machine.yaml\n" \
+    printf "PUU_INSTALLER_CONFIG=/usr/share/puu/machine.yaml\n" \
       > "$stage/etc/environment"
     echo "Defaults env_file=/etc/environment" > "$stage/etc/sudoers.d/30-puu-installer"
     chmod 0644 "$stage/etc/environment"
     chmod 0440 "$stage/etc/sudoers.d/30-puu-installer"
     touch -d "@${source_date_epoch}" \
-      "$stage/usr/share/puu-os/machine.yaml" \
+      "$stage/usr/share/puu/machine.yaml" \
       "$stage/etc/environment" \
       "$stage/etc/sudoers.d/30-puu-installer"
     SOURCE_DATE_EPOCH="$source_date_epoch" "$mksquashfs" "$stage" "$output" -noappend -b 128K -comp zstd

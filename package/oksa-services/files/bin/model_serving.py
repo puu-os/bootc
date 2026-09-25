@@ -14,7 +14,7 @@ import tempfile
 import time
 from typing import Any, Dict
 
-STATE_DIR = Path("/var/lib/puu-os/vllm")
+STATE_DIR = Path("/var/lib/puu/vllm")
 MODELS_DIR = Path("/var/lib/vllm/models")
 
 
@@ -67,7 +67,7 @@ def parse_float(val: Any, default: float = 0.0) -> float:
 
 
 def has_nvidia_hardware() -> bool:
-    has_bin = Path("/usr/libexec/puu-os/has-nvidia-hardware")
+    has_bin = Path("/usr/libexec/puu/has-nvidia-hardware")
     if has_bin.is_file() and os.access(has_bin, os.X_OK):
         return subprocess.run([str(has_bin)]).returncode == 0
     return False
