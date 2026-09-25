@@ -14,7 +14,7 @@ set -euo pipefail
 
 manifest="${TARGET_DIR}/usr/share/puu/flatpaks.list"
 remote="${TARGET_DIR}/usr/share/flatpak/remotes.d/flathub.flatpakrepo"
-cache_root="${PUU_FLATPAK_CACHE_DIR:-${HOME}/.cache/puu-os/flatpak}"
+cache_root="${PUU_FLATPAK_CACHE_DIR:-${HOME}/.cache/puu/flatpak}"
 
 init_puu_arch "${PUU_ARCH}"
 
