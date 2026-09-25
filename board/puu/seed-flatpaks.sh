@@ -12,7 +12,7 @@ set -euo pipefail
 # shellcheck source=board/puu/lib.sh
 . "${BASH_SOURCE%/*}/lib.sh"
 
-manifest="${TARGET_DIR}/usr/share/puu-os/flatpaks.list"
+manifest="${TARGET_DIR}/usr/share/puu/flatpaks.list"
 remote="${TARGET_DIR}/usr/share/flatpak/remotes.d/flathub.flatpakrepo"
 cache_root="${PUU_FLATPAK_CACHE_DIR:-${HOME}/.cache/puu-os/flatpak}"
 

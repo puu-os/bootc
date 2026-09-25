@@ -7,4 +7,4 @@ ConditionPathExists=/var/lib/sbctl/keys/db/db.key
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/puu-os/sbctl-sign-uki
+ExecStart=/usr/libexec/puu/sbctl-sign-uki

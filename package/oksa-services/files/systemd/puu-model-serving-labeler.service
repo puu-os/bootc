@@ -6,5 +6,5 @@ ConditionKernelCommandLine=!puu.live
 
 [Service]
 Type=oneshot
-ExecStartPre=/usr/libexec/puu-os/discover-vllm-models
-ExecStart=/usr/libexec/puu-os/label-model-serving-node
+ExecStartPre=/usr/libexec/puu/discover-vllm-models
+ExecStart=/usr/libexec/puu/label-model-serving-node

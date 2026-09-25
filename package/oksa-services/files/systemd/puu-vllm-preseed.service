@@ -9,7 +9,7 @@ ConditionKernelCommandLine=!puu.live
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/puu-os/preseed-vllm-models
+ExecStart=/usr/libexec/puu/preseed-vllm-models
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=1min

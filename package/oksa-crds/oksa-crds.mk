@@ -21,14 +21,14 @@ define OKSA_CRDS_EXTRACT_CMDS
 endef
 
 define OKSA_CRDS_INSTALL_TARGET_CMDS
-	mkdir -p $(TARGET_DIR)/usr/share/puu-os/k3s/crds
+	mkdir -p $(TARGET_DIR)/usr/share/puu/k3s/crds
 	$(INSTALL) -D -m 0644 $(OKSA_CRDS_DL_DIR)/experimental-install.yaml \
-		$(TARGET_DIR)/usr/share/puu-os/k3s/crds/10-gateway-api-experimental-install.yaml
+		$(TARGET_DIR)/usr/share/puu/k3s/crds/10-gateway-api-experimental-install.yaml
 	$(INSTALL) -D -m 0644 $(OKSA_CRDS_DL_DIR)/manifests.yaml \
-		$(TARGET_DIR)/usr/share/puu-os/k3s/crds/11-gateway-api-inference-extension-manifests.yaml
+		$(TARGET_DIR)/usr/share/puu/k3s/crds/11-gateway-api-inference-extension-manifests.yaml
 	set -e; for crd in $(OKSA_CRDS_AGENTGATEWAY_CRDS); do \
 		$(INSTALL) -D -m 0644 $(OKSA_CRDS_DL_DIR)/$$crd \
-			$(TARGET_DIR)/usr/share/puu-os/k3s/crds/12-$$crd; \
+			$(TARGET_DIR)/usr/share/puu/k3s/crds/12-$$crd; \
 	done
 endef
 

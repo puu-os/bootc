@@ -7,7 +7,7 @@ Before=display-manager.service systemd-user-sessions.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/lib/puu-os/live-setup.sh
+ExecStart=/usr/lib/puu/live-setup.sh
 
 [Install]
 WantedBy=multi-user.target

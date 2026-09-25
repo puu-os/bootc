@@ -3,7 +3,7 @@
 
 [Unit]
 Description=Notify the operator about a pending bootc reboot
-ConditionPathExists=/run/puu-os/upgrade-pending
+ConditionPathExists=/run/puu/upgrade-pending
 After=gnome-session-initialized.target
 
 [Service]

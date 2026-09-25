@@ -10,6 +10,6 @@ StartLimitBurst=3
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/puu-os/flatpak-sync
+ExecStart=/usr/libexec/puu/flatpak-sync
 Restart=on-failure
 RestartSec=5min

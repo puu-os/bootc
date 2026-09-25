@@ -47,7 +47,7 @@ spec:
       volumes:
         - name: data
           hostPath:
-            path: /var/lib/puu-os/open-webui
+            path: /var/lib/puu/open-webui
             type: DirectoryOrCreate
 ---
 apiVersion: v1

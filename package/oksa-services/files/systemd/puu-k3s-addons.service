@@ -7,7 +7,7 @@ ConditionKernelCommandLine=!puu.live
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/libexec/puu-os/install-k3s-addons
+ExecStart=/usr/libexec/puu/install-k3s-addons
 
 [Install]
 WantedBy=multi-user.target

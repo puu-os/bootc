@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-libexec_dir = Path("/usr/libexec/puu-os")
+libexec_dir = Path("/usr/libexec/puu")
 for directory in (Path(__file__).resolve().parent, libexec_dir):
     if directory.is_dir() and str(directory) not in sys.path:
         sys.path.insert(0, str(directory))

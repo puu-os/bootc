@@ -23,5 +23,5 @@ Restart=always
 RestartSec=5s
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-ExecStartPre=/usr/libexec/puu-os/wait-default-route
+ExecStartPre=/usr/libexec/puu/wait-default-route
 ExecStart=/usr/bin/k3s $K3S_EXEC

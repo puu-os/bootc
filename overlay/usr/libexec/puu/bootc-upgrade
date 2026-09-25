@@ -9,7 +9,7 @@ import sys
 
 
 def main() -> None:
-    run_dir = Path("/run/puu-os")
+    run_dir = Path("/run/puu")
     bootc_bin = Path("/usr/bin/bootc")
 
     run_dir.mkdir(parents=True, exist_ok=True)
