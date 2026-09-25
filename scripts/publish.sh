@@ -52,7 +52,7 @@ if "$GLAB" release view "$version" >/dev/null 2>&1; then
   printf 'GitLab release %s already exists\n' "$version"
 else
   "$GLAB" release create "$version" \
-    --name "puu-os $version" --notes-file "$notes"
+    --name "puu $version" --notes-file "$notes"
 fi
 
-printf 'published puu-os %s\n' "$version"
+printf 'published puu %s\n' "$version"

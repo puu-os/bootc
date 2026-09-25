@@ -12,7 +12,7 @@ CONTAINER_CPUS=${CONTAINER_CPUS:-8}
 CONTAINER_MEMORY=${CONTAINER_MEMORY:-16G}
 container_kind=$(basename -- "${CONTAINER}")
 
-build_args=(--tag puu-os-builder:latest)
+build_args=(--tag puu-builder:latest)
 if [ "${container_kind}" = container ]; then
   "${CONTAINER}" system status >/dev/null 2>&1 || "${CONTAINER}" system start
   build_args=(
@@ -24,7 +24,7 @@ fi
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-for volume in puu-os-build puu-os-cache; do
+for volume in puu-build puu-cache; do
   "${CONTAINER}" volume inspect "${volume}" >/dev/null 2>&1 ||
     "${CONTAINER}" volume create "${volume}" >/dev/null
 done
@@ -54,6 +54,6 @@ fi
   --memory "${CONTAINER_MEMORY}" \
   "${run_args[@]}" \
   --volume "${PWD}:/workspace" \
-  --volume puu-os-build:/build \
-  --volume puu-os-cache:/cache \
-  puu-os-builder:latest
+  --volume puu-build:/build \
+  --volume puu-cache:/cache \
+  puu-builder:latest

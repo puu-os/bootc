@@ -46,7 +46,7 @@ mkdir -p "$build_dir"
 make_args=(
   -C "$src_dir" O="$build_dir"
   BR2_DL_DIR="$dl_dir"
-  BR2_CCACHE_DIR="${CCACHE_DIR:-${HOME}/.cache/puu-os/ccache}"
+  BR2_CCACHE_DIR="${CCACHE_DIR:-${HOME}/.cache/puu/ccache}"
   SOURCE_DATE_EPOCH="$epoch"
 )
 

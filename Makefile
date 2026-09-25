@@ -11,7 +11,7 @@ SOURCE_DATE_EPOCH     ?= 1735689600
 
 OUTPUT_DIR            ?= build
 BOARD_DIR             := $(abspath $(OUTPUT_DIR)/$(BOARD))
-CACHE_DIR             := $(HOME)/.cache/puu-os
+CACHE_DIR             := $(HOME)/.cache/puu
 DOWNLOAD_DIR          := $(CACHE_DIR)/download
 CCACHE_DIR            := $(CACHE_DIR)/ccache
 STAMP_DIR             := $(BOARD_DIR)/stamp
