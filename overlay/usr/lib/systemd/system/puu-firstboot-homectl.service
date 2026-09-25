@@ -11,7 +11,7 @@ Before=display-manager.service gdm.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/puu-os/firstboot-homectl
+ExecStart=/usr/libexec/puu/firstboot-homectl
 
 [Install]
 WantedBy=multi-user.target

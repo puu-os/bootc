@@ -66,6 +66,6 @@ XSession=gnome
 SystemAccount=false
 EOF
 
-install -Dm0644 /usr/share/puu-os/live/gdm-custom.conf /etc/gdm/custom.conf
-install -Dm0440 /usr/share/puu-os/live/sudoers-nopasswd \
+install -Dm0644 /usr/share/puu/live/gdm-custom.conf /etc/gdm/custom.conf
+install -Dm0440 /usr/share/puu/live/sudoers-nopasswd \
   /etc/sudoers.d/20-puu-nopasswd
