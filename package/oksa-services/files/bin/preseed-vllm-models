@@ -3,13 +3,17 @@
 # Copyright (C) Opinsys Oy 2026
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 libexec_dir = Path("/usr/libexec/puu")
@@ -34,75 +38,159 @@ def download_with_cli(repo_id: str, revision: str, dest_dir: Path) -> bool:
     return False
 
 
-def download_with_http(repo_id: str, revision: str, dest_dir: Path) -> bool:
-    rev = revision or "main"
-    api_url = f"https://huggingface.co/api/models/{repo_id}/revision/{rev}"
+def model_files(repo_id: str, revision: str) -> list[dict] | None:
+    rev = urllib.parse.quote(revision, safe="/")
+    api_url = f"https://huggingface.co/api/models/{repo_id}/revision/{rev}?blobs=true"
     req = urllib.request.Request(api_url, headers={"User-Agent": "puu-preseed/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
-        print(f"error: failed to query HF API for {repo_id}: {exc}", file=sys.stderr)
-        return False
+        files = []
+        for sibling in data["siblings"]:
+            name = sibling["rfilename"]
+            if name.startswith("."):
+                continue
+            size = sibling["size"]
+            if not ms.valid_model_file(name) or not isinstance(size, int) or size <= 0:
+                raise ValueError(f"invalid model file metadata: {name!r}")
+            sha256 = sibling.get("lfs", {}).get("sha256")
+            blob_id = sibling.get("blobId")
+            if sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                raise ValueError(f"invalid checksum for {name!r}")
+            if blob_id is not None and not re.fullmatch(r"[0-9a-f]{40}", blob_id):
+                raise ValueError(f"invalid blob ID for {name!r}")
+            if sha256 is None and blob_id is None:
+                raise ValueError(f"missing checksum for {name!r}")
+            files.append({"path": name, "size": size, "sha256": sha256, "blob_id": blob_id})
+        names = {entry["path"] for entry in files}
+        if len(names) != len(files) or "config.json" not in names or not any(
+            name.endswith((".safetensors", ".bin")) for name in names
+        ):
+            raise ValueError("repository has no config or model weights, or has duplicate files")
+        return files
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"error: failed to query HF file metadata for {repo_id}: {exc}", file=sys.stderr)
+        return None
 
-    siblings = data.get("siblings", [])
-    if not siblings:
-        print(f"error: no files found in repository {repo_id}", file=sys.stderr)
-        return False
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for file_info in siblings:
-        rfilename = file_info.get("rfilename", "")
-        if not rfilename or rfilename.startswith("."):
-            continue
-        file_url = f"https://huggingface.co/{repo_id}/resolve/{rev}/{rfilename}"
+def file_matches(path: Path, info: dict) -> bool:
+    if not path.is_file() or path.stat().st_size != info["size"]:
+        return False
+    if info["sha256"] is None:
+        digest = hashlib.sha1(f"blob {info['size']}\0".encode())
+        expected = info["blob_id"]
+    else:
+        digest = hashlib.sha256()
+        expected = info["sha256"]
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest() == expected
+
+
+def download_with_http(repo_id: str, revision: str, dest_dir: Path, files: list[dict]) -> bool:
+    rev = urllib.parse.quote(revision, safe="/")
+    for info in files:
+        rfilename = info["path"]
         out_path = dest_dir / rfilename
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        if out_path.is_file() and out_path.stat().st_size > 0:
+        if file_matches(out_path, info):
             continue
         print(f"  Fetching {rfilename}...")
+        file_url = f"https://huggingface.co/{repo_id}/resolve/{rev}/{urllib.parse.quote(rfilename, safe='/')}"
         file_req = urllib.request.Request(file_url, headers={"User-Agent": "puu-preseed/1.0"})
         tmp_path = out_path.with_name(f".{out_path.name}.tmp")
         try:
             with urllib.request.urlopen(file_req, timeout=120) as in_stream, open(tmp_path, "wb") as out_stream:
                 shutil.copyfileobj(in_stream, out_stream)
+            if not file_matches(tmp_path, info):
+                raise ValueError(f"downloaded file has incorrect size or checksum: {rfilename}")
             tmp_path.replace(out_path)
-        except (urllib.error.URLError, OSError) as exc:
-            if tmp_path.exists():
-                tmp_path.unlink()
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            tmp_path.unlink(missing_ok=True)
             print(f"error: failed downloading {rfilename}: {exc}", file=sys.stderr)
             return False
     return True
+
+
+def write_manifest(model_dir: Path, manifest: dict) -> None:
+    data = {**manifest, "files": [
+        {**info, "mtime_ns": (model_dir / info["path"]).stat().st_mtime_ns}
+        for info in manifest["files"]
+    ]}
+    ms.atomic_write_text(model_dir / ms.PRESEED_MANIFEST, json.dumps(data) + "\n")
 
 
 def preseed_model(catalog_file: Path, models_dir: Path) -> bool:
     meta = ms.parse_env_file(catalog_file)
     model_name = meta.get("PUU_VLLM_MODEL_NAME") or catalog_file.stem
     repo_id = meta.get("PUU_VLLM_REPO_ID")
-    revision = meta.get("PUU_VLLM_REVISION", "main")
+    revision = meta.get("PUU_VLLM_REVISION", "main") or "main"
 
-    if not repo_id:
-        print(f"error: no PUU_VLLM_REPO_ID in {catalog_file}", file=sys.stderr)
+    if not repo_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
+        print(f"error: invalid model name or missing repository in {catalog_file}", file=sys.stderr)
         return False
 
-    dest_dir = models_dir / model_name
-    config_file = dest_dir / "config.json"
-    serving_env = dest_dir / "puu-serving.env"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = models_dir.parent / f".{model_name}.preseed.lock"
+    with lock_path.open("w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        return preseed_locked(catalog_file, models_dir, model_name, repo_id, revision)
 
-    if config_file.is_file():
+
+def preseed_locked(catalog_file: Path, models_dir: Path, model_name: str, repo_id: str, revision: str) -> bool:
+    dest_dir = models_dir / model_name
+    backup_dir = models_dir.parent / f".{model_name}.previous"
+    if backup_dir.exists():
+        with ms.preseed_publish_lock(models_dir, exclusive=True):
+            if dest_dir.exists():
+                shutil.rmtree(backup_dir)
+            else:
+                backup_dir.rename(dest_dir)
+    if ms.verified_preseed(dest_dir, repo_id, revision):
+        shutil.copyfile(catalog_file, dest_dir / "puu-serving.env")
         print(f"Model {model_name} already present at {dest_dir}")
-        shutil.copyfile(catalog_file, serving_env)
         return True
 
+    files = model_files(repo_id, revision)
+    if files is None:
+        return False
+    manifest = {"repo_id": repo_id, "revision": revision, "files": files}
     print(f"Pre-seeding model {model_name} ({repo_id}) to {dest_dir}...")
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    stage_dir = models_dir.parent / f".{model_name}.preseed"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    verified = all(file_matches(stage_dir / info["path"], info) for info in files)
+    if not verified:
+        verified = download_with_cli(repo_id, revision, stage_dir) and all(
+            file_matches(stage_dir / info["path"], info) for info in files
+        )
+    if not verified:
+        verified = download_with_http(repo_id, revision, stage_dir, files) and all(
+            file_matches(stage_dir / info["path"], info) for info in files
+        )
+    if not verified:
+        print(f"error: model {model_name} failed download or file verification", file=sys.stderr)
+        return False
 
-    if not download_with_cli(repo_id, revision, dest_dir):
-        if not download_with_http(repo_id, revision, dest_dir):
-            print(f"error: failed to download {model_name}", file=sys.stderr)
+    expected = {info["path"] for info in files}
+    for path in stage_dir.rglob("*"):
+        relative = path.relative_to(stage_dir)
+        if path.is_file() and not relative.parts[0].startswith(".") and relative.as_posix() not in expected:
+            path.unlink()
+    shutil.copyfile(catalog_file, stage_dir / "puu-serving.env")
+    write_manifest(stage_dir, manifest)
+    with ms.preseed_publish_lock(models_dir, exclusive=True):
+        try:
+            if dest_dir.exists():
+                dest_dir.rename(backup_dir)
+            stage_dir.rename(dest_dir)
+        except OSError as exc:
+            if backup_dir.exists() and not dest_dir.exists():
+                backup_dir.rename(dest_dir)
+            print(f"error: failed to publish {model_name}: {exc}", file=sys.stderr)
             return False
-
-    shutil.copyfile(catalog_file, serving_env)
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
     print(f"Successfully pre-seeded {model_name}")
     return True
 
