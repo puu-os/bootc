@@ -29,9 +29,12 @@ spec:
             - name: OPENAI_API_BASE_URL
               value: http://litellm.puu-ai.svc.cluster.local:4000/v1
             - name: OPENAI_API_KEY
-              value: none
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-masterkey
+                  key: masterkey
             - name: DEFAULT_MODELS
-              value: qwen3.8-27b-nvfp4
+              value: bonsai-27b
           ports:
             - name: http
               containerPort: 8080
