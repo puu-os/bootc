@@ -174,9 +174,26 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             capacity.release()
 
-    def _proxy(self):
+    def _read_request_body(self):
+        if (self.headers.get("transfer-encoding", "").lower() == "chunked"):
+            chunks = []
+            while True:
+                size_line = self.rfile.readline(1024).strip()
+                chunk_size = int(size_line.split(b";", 1)[0], 16)
+                if chunk_size == 0:
+                    while True:
+                        trailer = self.rfile.readline(65536)
+                        if trailer in (b"\\r\\n", b"\\n", b""):
+                            break
+                    break
+                chunks.append(self.rfile.read(chunk_size))
+                self.rfile.read(2)
+            return b"".join(chunks)
         body_length = int(self.headers.get("content-length", "0") or "0")
-        body = self.rfile.read(body_length) if body_length else None
+        return self.rfile.read(body_length) if body_length else None
+
+    def _proxy(self):
+        body = self._read_request_body()
         headers = {key: value for key, value in self.headers.items() if key.lower() not in hop_by_hop}
         headers["host"] = f"{backend_host}:{backend_port}"
         conn = http.client.HTTPConnection(backend_host, backend_port, timeout=3600)
