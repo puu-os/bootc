@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+from contextlib import contextmanager
 import dataclasses
+import fcntl
 import hashlib
+import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import socket
@@ -16,6 +19,52 @@ from typing import Any, Dict
 
 STATE_DIR = Path("/var/lib/puu/vllm")
 MODELS_DIR = Path("/var/lib/vllm/models")
+PRESEED_MANIFEST = ".puu-preseed.json"
+
+
+@contextmanager
+def preseed_publish_lock(models_dir: Path, exclusive: bool = False):
+    lock_path = models_dir.parent / ".puu-preseed-publish.lock"
+    with lock_path.open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+
+
+def valid_model_file(name: str) -> bool:
+    if not isinstance(name, str) or not name:
+        return False
+    path = PurePosixPath(name)
+    return not path.is_absolute() and all(part not in ("", ".", "..") for part in name.split("/")) and "\\" not in name
+
+
+def verified_preseed(model_dir: Path, repo_id: str | None = None, revision: str | None = None) -> bool:
+    try:
+        manifest = json.loads((model_dir / PRESEED_MANIFEST).read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or not manifest.get("repo_id") or not manifest.get("revision"):
+            return False
+        if repo_id is not None and manifest["repo_id"] != repo_id:
+            return False
+        if revision is not None and manifest["revision"] != revision:
+            return False
+        files = manifest.get("files")
+        if not isinstance(files, list) or not files:
+            return False
+        names = set()
+        for entry in files:
+            name, size = entry["path"], entry["size"]
+            mtime_ns = entry["mtime_ns"]
+            if not valid_model_file(name) or name in names or not isinstance(size, int) or size <= 0:
+                return False
+            names.add(name)
+            path = model_dir / name
+            if not path.is_file():
+                return False
+            stat = path.stat()
+            if stat.st_size != size or stat.st_mtime_ns != mtime_ns:
+                return False
+        return "config.json" in names and any(name.endswith((".safetensors", ".bin")) for name in names)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
 
 
 def parse_env_file(path: Path | str) -> Dict[str, str]:
