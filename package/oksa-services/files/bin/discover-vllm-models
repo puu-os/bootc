@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -25,11 +26,26 @@ def estimate_model_memory_mib(model_dir: Path) -> int:
 def discover(models_dir: Path) -> list[Path]:
     if not models_dir.is_dir():
         return []
-    return [
-        entry
-        for entry in sorted(models_dir.iterdir())
-        if entry.is_dir() and NAME_RE.match(entry.name) and (entry / "config.json").is_file()
-    ]
+    catalog_dir = Path(os.environ.get("PUU_VLLM_MODEL_CATALOG_DIR", "/usr/share/puu/vllm/catalog.d"))
+    catalog = {}
+    for catalog_file in catalog_dir.glob("*.env"):
+        meta = ms.parse_env_file(catalog_file)
+        catalog[meta.get("PUU_VLLM_MODEL_NAME") or catalog_file.stem] = meta
+    result = []
+    for entry in sorted(models_dir.iterdir()):
+        if not entry.is_dir() or not NAME_RE.match(entry.name) or not (entry / "config.json").is_file():
+            continue
+        if entry.name in catalog:
+            meta = catalog[entry.name]
+            repo_id = meta.get("PUU_VLLM_REPO_ID")
+            if not repo_id or not ms.verified_preseed(
+                entry, repo_id, meta.get("PUU_VLLM_REVISION", "main") or "main"
+            ):
+                continue
+        elif (entry / ms.PRESEED_MANIFEST).exists():
+            continue
+        result.append(entry)
+    return result
 
 
 def main() -> None:
@@ -42,6 +58,14 @@ def main() -> None:
     except PermissionError:
         return
 
+    if models_dir.parent.is_dir():
+        with ms.preseed_publish_lock(models_dir):
+            publish_state(models_dir, state_dir, model_state_dir)
+    else:
+        publish_state(models_dir, state_dir, model_state_dir)
+
+
+def publish_state(models_dir: Path, state_dir: Path, model_state_dir: Path) -> None:
     models_list_lines = []
     models_json_items = []
     created_envs: set[Path] = set()
