@@ -1,6 +1,6 @@
 [Unit]
 Description=Install Puu k3s add-ons
-Requires=k3s.service
+Wants=k3s.service
 After=k3s.service
 ConditionKernelCommandLine=!puu.live
 
@@ -8,6 +8,8 @@ ConditionKernelCommandLine=!puu.live
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/puu/install-k3s-addons
+Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
