@@ -7,6 +7,12 @@ OKSA_SERVICES_DEPENDENCIES = k3s oksa-crds
 
 OKSA_SERVICES_FILES = $(OKSA_SERVICES_PKGDIR)/files
 
+ifeq ($(BR2_aarch64),y)
+OKSA_SERVICES_BONSAI_MANIFEST_DIR = arm64/
+else
+OKSA_SERVICES_BONSAI_MANIFEST_DIR =
+endif
+
 define OKSA_SERVICES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/model_serving.py \
 		$(TARGET_DIR)/usr/libexec/puu/model_serving.py
@@ -26,9 +32,13 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 		40-litellm.yaml 45-open-webui.yaml,\
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/manifests/$(manifest) \
 			$(TARGET_DIR)/usr/share/puu/k3s/manifests/$(manifest)$(sep))
+	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/manifests/$(OKSA_SERVICES_BONSAI_MANIFEST_DIR)33-bonsai-2-27b.yaml \
+		$(TARGET_DIR)/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml
 	$(foreach catalog,$(notdir $(wildcard $(OKSA_SERVICES_FILES)/vllm/catalog.d/*.env)),\
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/vllm/catalog.d/$(catalog) \
 			$(TARGET_DIR)/usr/share/puu/vllm/catalog.d/$(catalog)$(sep))
+	$(SED) 's/^PUU_VLLM_AUTOSTART=true$$/PUU_VLLM_AUTOSTART=false/' \
+		$(TARGET_DIR)/usr/share/puu/vllm/catalog.d/qwen3.8-27b-nvfp4.env
 endef
 
 define OKSA_SERVICES_INSTALL_INIT_SYSTEMD

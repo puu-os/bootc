@@ -28,14 +28,14 @@ spec:
 
     proxy_config:
       model_list:
+        - model_name: "bonsai-2-27b"
+          litellm_params:
+            model: openai/Bonsai-2-27B
+            api_base: http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1
+            api_key: none
         - model_name: "qwen3.8-27b-nvfp4"
           litellm_params:
             model: openai/qwen3.8-27b-nvfp4
-            api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
-            api_key: none
-        - model_name: "bonsai-27b"
-          litellm_params:
-            model: openai/bonsai-27b
             api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
             api_key: none
         - model_name: "*"
@@ -47,5 +47,5 @@ spec:
         disable_auth: true
         max_parallel_requests: 32
       router_settings:
-        timeout: 300
+        timeout: 1200
         num_retries: 0
