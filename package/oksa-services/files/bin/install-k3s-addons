@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 from pathlib import Path
+import secrets
 import subprocess
 import sys
 
@@ -36,6 +37,22 @@ def copy_manifests(manifest_src: Path, manifest_dst: Path) -> None:
         ms.atomic_write_text(manifest_dst / manifest.name, manifest.read_text(), 0o644)
 
 
+def ensure_webui_secret(manifest_dst: Path) -> None:
+    secret_path = manifest_dst / "44-open-webui-secret.yaml"
+    if secret_path.exists():
+        return
+    secret_key = secrets.token_hex(32)
+    ms.atomic_write_text(
+        secret_path,
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: puu-ai\n"
+        "---\napiVersion: v1\nkind: Secret\nmetadata:\n"
+        "  name: open-webui-secret\n  namespace: puu-ai\n"
+        "type: Opaque\nstringData:\n"
+        f"  secretkey: '{secret_key}'\n",
+        0o600,
+    )
+
+
 def main() -> None:
     manifest_src = Path("/usr/share/puu/k3s/manifests")
     manifest_dst = Path("/var/lib/rancher/k3s/server/manifests")
@@ -48,6 +65,7 @@ def main() -> None:
     except subprocess.CalledProcessError as exc:
         sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")
     copy_manifests(manifest_src, manifest_dst)
+    ensure_webui_secret(manifest_dst)
 
 
 if __name__ == "__main__":
