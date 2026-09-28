@@ -27,5 +27,10 @@ if [[ $(uname -s) == Darwin ]]; then
   sudo dd if="$image_path" of="$device" bs=1m
   sync
 else
+  if ! command -v sgdisk >/dev/null; then
+    echo "error: sgdisk is required to relocate the GPT backup header" >&2
+    exit 1
+  fi
   sudo dd if="$image_path" of="$device" bs=1M status=progress oflag=sync
+  sudo sgdisk --move-second-header "$device"
 fi
