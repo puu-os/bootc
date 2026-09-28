@@ -33,6 +33,11 @@ spec:
                 secretKeyRef:
                   name: litellm-masterkey
                   key: masterkey
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: open-webui-secret
+                  key: secretkey
             - name: DEFAULT_MODELS
               value: bonsai-2-27b
           ports:
