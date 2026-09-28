@@ -34,7 +34,7 @@ spec:
                   name: litellm-masterkey
                   key: masterkey
             - name: DEFAULT_MODELS
-              value: bonsai-27b
+              value: bonsai-2-27b
           ports:
             - name: http
               containerPort: 8080
