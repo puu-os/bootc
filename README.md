@@ -49,6 +49,7 @@ Default network services available after installation:
 ### Building
 
     make BOARD=puu_amd64 build
+    make BOARD=puu_arm64 build
     make BOARD=puu_amd64 burn DEVICE=/dev/sdX
     make lint
 
