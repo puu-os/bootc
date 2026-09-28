@@ -33,11 +33,6 @@ spec:
             model: openai/Bonsai-2-27B
             api_base: http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1
             api_key: none
-        - model_name: "qwen3.8-27b-nvfp4"
-          litellm_params:
-            model: openai/qwen3.8-27b-nvfp4
-            api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
-            api_key: none
         - model_name: "*"
           litellm_params:
             model: openai/*
