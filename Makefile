@@ -112,6 +112,39 @@ configure: $(SDK_INSTALL_STAMP) $(BUILDROOT_PATCH_STAMP) ## Run <BOARD>_defconfi
 	$(call buildroot,$(BOARD)_defconfig)
 
 build: configure ## Build <BOARD>
+	linux_version=$$(awk -F '"' '/^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="/ { print $$2; exit }' "configs/$(BOARD)_defconfig")
+	[[ -n "$$linux_version" ]] || { echo 'missing kernel version in board defconfig' >&2; exit 1; }
+	linux_dir="$(BOARD_DIR)/build/linux-$$linux_version"
+	linux_changed=false
+	linux_built=
+	if [[ ! -d "$$linux_dir" || ! -f "$$linux_dir/.stamp_configured" || ! -d "$(BOARD_DIR)/per-package/linux" || "linux/$(patsubst puu_%,%,$(BOARD))_efi_defconfig" -nt "$$linux_dir/.stamp_configured" ]]; then
+		linux_changed=true
+		if [[ -d "$$linux_dir" || -d "$(BOARD_DIR)/per-package/linux" ]]; then
+			$(call buildroot,linux-dirclean)
+		fi
+	elif [[ ! -f "$$linux_dir/.stamp_built" ]]; then
+		linux_changed=true
+	else
+		linux_built="$$linux_dir/.stamp_built"
+	fi
+	modules_changed=$$linux_changed
+	nvidia_count=0
+	for package in linux-tools nvidia-driver; do
+		if [[ "$$package" == linux-tools ]]; then
+			package_dir="$(BOARD_DIR)/build/linux-tools"
+		else
+			package_dir=$$(find "$(BOARD_DIR)/build" -mindepth 1 -maxdepth 1 -type d -name 'nvidia-driver-[0-9]*' -print -quit)
+			nvidia_count=$$(find "$(BOARD_DIR)/build" -mindepth 1 -maxdepth 1 -type d -name 'nvidia-driver-[0-9]*' -printf x | wc -c)
+		fi
+		package_cache="$(BOARD_DIR)/per-package/$$package"
+		if [[ ( -d "$$package_dir" || -d "$$package_cache" ) && ( "$$linux_changed" == true || ! -d "$$package_cache" || "$$linux_built" -nt "$$package_dir/.stamp_built" || ( "$$package" == nvidia-driver && "$$nvidia_count" -gt 1 ) ) ]]; then
+			$(call buildroot,$${package}-dirclean)
+			modules_changed=true
+		fi
+	done
+	if [[ "$$modules_changed" == true ]]; then
+		rm -rf -- "$(BOARD_DIR)/target/usr/lib/modules"
+	fi
 	$(call buildroot,BR2_CCACHE=y)
 
 burn: ## Write <BOARD>.img to DEVICE
