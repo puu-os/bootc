@@ -488,6 +488,12 @@ spec:
               value: {json.dumps(spec.extra_args)}
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: compute,utility
+            - name: HF_HOME
+              value: /var/lib/huggingface
+            - name: VLLM_CACHE_ROOT
+              value: /var/lib/vllm/cache
+            - name: TORCH_EXTENSIONS_DIR
+              value: /var/lib/vllm/cache/torch_extensions
 {assigned_gpu_yaml}          ports:
             - name: backend
               containerPort: 8001
@@ -499,6 +505,10 @@ spec:
             - name: models
               mountPath: {json.dumps(str(models_dir))}
               readOnly: true
+            - name: huggingface
+              mountPath: /var/lib/huggingface
+            - name: vllm-cache
+              mountPath: /var/lib/vllm/cache
             - name: nvidia-cdi
               mountPath: /var/run/cdi
               readOnly: true
@@ -541,6 +551,14 @@ spec:
           hostPath:
             path: {json.dumps(str(models_dir))}
             type: Directory
+        - name: huggingface
+          hostPath:
+            path: /var/lib/huggingface
+            type: DirectoryOrCreate
+        - name: vllm-cache
+          hostPath:
+            path: /var/lib/vllm/cache
+            type: DirectoryOrCreate
         - name: nvidia-cdi
           hostPath:
             path: /var/run/cdi
