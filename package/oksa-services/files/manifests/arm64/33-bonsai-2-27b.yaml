@@ -22,7 +22,7 @@ data:
   serve.sh: |-
     #!/bin/sh
     set -eu
-    apt_cache=/cache/apt
+    apt_cache=/var/lib/vllm/apt
     mkdir -p "$apt_cache/lists/partial" "$apt_cache/archives/partial"
     if [ ! -f "$apt_cache/.ready" ]; then
       apt-get -o Dir::State::lists="$apt_cache/lists" update
@@ -32,8 +32,9 @@ data:
       -o APT::Keep-Downloaded-Packages=true install -y --no-install-recommends \
       libcusparse-dev-13-0 libcusolver-dev-13-0
     touch "$apt_cache/.ready"
-    target=/cache/prism-ternary-e5ed2454
+    target=/var/lib/vllm/plugins/prism-ternary-e5ed2454
     if [ ! -f "$target/.ready" ]; then
+      mkdir -p "$(dirname "$target")"
       rm -rf "$target"
       python3 -m pip install --no-deps --break-system-packages --target "$target" \
         https://github.com/fraserprice/bonsai-vllm/archive/e5ed2454a6b06a857a2146ba8cc60b7814c54bdf.tar.gz
@@ -102,13 +103,13 @@ spec:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: compute,utility
             - name: HF_HOME
-              value: /cache/huggingface
+              value: /var/lib/huggingface
             - name: VLLM_CACHE_ROOT
-              value: /cache/vllm
+              value: /var/lib/vllm/cache
             - name: PYTHONPATH
-              value: /cache/prism-ternary-e5ed2454
+              value: /var/lib/vllm/plugins/prism-ternary-e5ed2454
             - name: TORCH_EXTENSIONS_DIR
-              value: /cache/torch_extensions
+              value: /var/lib/vllm/cache/torch_extensions
           ports:
             - name: http
               containerPort: 8000
@@ -125,15 +126,21 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           volumeMounts:
-            - name: cache
-              mountPath: /cache
+            - name: huggingface
+              mountPath: /var/lib/huggingface
+            - name: vllm
+              mountPath: /var/lib/vllm
             - name: installer
               mountPath: /install
               readOnly: true
       volumes:
-        - name: cache
+        - name: huggingface
           hostPath:
-            path: /var/lib/puu/bonsai-2-27b
+            path: /var/lib/huggingface
+            type: DirectoryOrCreate
+        - name: vllm
+          hostPath:
+            path: /var/lib/vllm
             type: DirectoryOrCreate
         - name: installer
           configMap:

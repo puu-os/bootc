@@ -71,6 +71,12 @@ spec:
           env:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: compute,utility
+            - name: HF_HOME
+              value: /var/lib/huggingface
+            - name: VLLM_CACHE_ROOT
+              value: /var/lib/vllm/cache
+            - name: TORCH_EXTENSIONS_DIR
+              value: /var/lib/vllm/cache/torch_extensions
           ports:
             - name: http
               containerPort: 8000
@@ -87,10 +93,16 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           volumeMounts:
-            - name: cache
-              mountPath: /cache
+            - name: huggingface
+              mountPath: /var/lib/huggingface
+            - name: vllm
+              mountPath: /var/lib/vllm
       volumes:
-        - name: cache
+        - name: huggingface
           hostPath:
-            path: /var/lib/puu/bonsai-2-27b
+            path: /var/lib/huggingface
+            type: DirectoryOrCreate
+        - name: vllm
+          hostPath:
+            path: /var/lib/vllm
             type: DirectoryOrCreate
