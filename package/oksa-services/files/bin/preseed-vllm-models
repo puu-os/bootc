@@ -30,7 +30,9 @@ def download_with_cli(repo_id: str, revision: str, dest_dir: Path) -> bool:
             if revision and revision != "main":
                 cmd.extend(["--revision", revision])
             try:
-                res = subprocess.run(cmd, check=False)
+                env = os.environ.copy()
+                env.setdefault("HF_HOME", "/var/lib/huggingface")
+                res = subprocess.run(cmd, check=False, env=env)
                 if res.returncode == 0:
                     return True
             except OSError:
