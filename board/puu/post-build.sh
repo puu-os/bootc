@@ -7,6 +7,7 @@ set -euo pipefail
 
 : "${TARGET_DIR:?TARGET_DIR must be set by Buildroot}"
 : "${HOST_DIR:?HOST_DIR must be set by Buildroot}"
+: "${BINARIES_DIR:?BINARIES_DIR must be set by Buildroot}"
 PUU_ARCH="${2:?arch argument must be set (amd64 or arm64)}"
 : "${PUU_COSIGN_KEYS?PUU_COSIGN_KEYS must be set (empty for unsigned builds)}"
 
@@ -83,7 +84,7 @@ fi
 
 kver=$(kernel_version)
 
-kernel="${TARGET_DIR}/boot/${PUU_KERNEL_IMAGE}"
+kernel="${BINARIES_DIR}/${PUU_KERNEL_IMAGE}"
 [ -f "${kernel}" ] || { echo "kernel image not found: ${kernel}" >&2; exit 1; }
 install -Dm644 "${kernel}" "${TARGET_DIR}/usr/lib/modules/${kver}/vmlinuz"
 
