@@ -137,7 +137,7 @@ build: configure ## Build <BOARD>
 			nvidia_count=$$(find "$(BOARD_DIR)/build" -mindepth 1 -maxdepth 1 -type d -name 'nvidia-driver-[0-9]*' -printf x | wc -c)
 		fi
 		package_cache="$(BOARD_DIR)/per-package/$$package"
-		if [[ ( -d "$$package_dir" || -d "$$package_cache" ) && ( "$$linux_changed" == true || ! -d "$$package_cache" || "$$linux_built" -nt "$$package_dir/.stamp_built" || ( "$$package" == nvidia-driver && "$$nvidia_count" -gt 1 ) ) ]]; then
+		if [[ ( -d "$$package_dir" || -d "$$package_cache" ) && ( "$$linux_changed" == true || ! -d "$$package_cache" || "$$linux_built" -nt "$$package_dir/.stamp_configured" || ( "$$package" == nvidia-driver && "$$nvidia_count" -gt 1 ) ) ]]; then
 			$(call buildroot,$${package}-dirclean)
 			modules_changed=true
 		fi
