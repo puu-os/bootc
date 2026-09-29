@@ -7,8 +7,6 @@ from pathlib import Path
 import sys
 import time
 
-ZERO6 = "0" * 32
-
 
 def has_default_ipv4_route(procfs_root: Path) -> bool:
     route_file = procfs_root / "net" / "route"
@@ -19,31 +17,11 @@ def has_default_ipv4_route(procfs_root: Path) -> bool:
             next(f, None)
             for line in f:
                 parts = line.split()
-                if len(parts) > 1 and parts[1] == "00000000":
+                if len(parts) > 7 and parts[1] == "00000000" and parts[7] == "00000000":
                     return True
     except OSError:
         pass
     return False
-
-
-def has_default_ipv6_route(procfs_root: Path) -> bool:
-    route_file = procfs_root / "net" / "ipv6_route"
-    if not route_file.is_file():
-        return False
-    try:
-        with route_file.open(encoding="utf-8", errors="replace") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 5:
-                    if parts[0] == ZERO6 and parts[1] == "00" and parts[4] != ZERO6:
-                        return True
-    except OSError:
-        pass
-    return False
-
-
-def has_default_route(procfs_root: Path) -> bool:
-    return has_default_ipv4_route(procfs_root) or has_default_ipv6_route(procfs_root)
 
 
 def main() -> None:
@@ -60,11 +38,11 @@ def main() -> None:
 
     start_time = time.monotonic()
     while time.monotonic() - start_time < timeout:
-        if has_default_route(procfs_root):
+        if has_default_ipv4_route(procfs_root):
             sys.exit(0)
         time.sleep(poll_interval)
 
-    sys.exit("timed out waiting for a default route")
+    sys.exit("timed out waiting for an IPv4 default route")
 
 
 if __name__ == "__main__":
