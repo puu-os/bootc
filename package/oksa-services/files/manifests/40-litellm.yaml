@@ -22,9 +22,14 @@ spec:
 
     db:
       deployStandalone: false
+      useExisting: true
+      database: litellm
+      secret:
+        name: puu-litellm-db
+        endpointKey: endpoint
 
     migrationJob:
-      enabled: false
+      enabled: true
 
     proxy_config:
       model_list:

@@ -1,0 +1,15 @@
+[Unit]
+Description=Initialize the LiteLLM PostgreSQL database
+Requires=postgresql.service
+After=postgresql.service
+ConditionKernelCommandLine=!puu.live
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/puu/init-litellm-db
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

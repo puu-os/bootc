@@ -1,4 +1,6 @@
 enable puu-live-setup.service
+enable postgresql.service
+enable puu-postgresql.service
 enable k3s.service
 enable puu-k3s-addons.service
 enable puu-vllm-discovery.timer
