@@ -14,6 +14,16 @@ import model_serving as ms
 NVIDIA_MANIFESTS = ("30-nvidia-cdi-runtime.yaml", "32-nvidia-device-plugin.yaml")
 
 
+PUU_AI_NAMESPACE = "puu-ai"
+POSTGRESQL_SERVICE = "puu-postgresql"
+POSTGRESQL_PORT = 5432
+
+DB_PASSWORD_FILE = Path("/var/lib/puu/postgresql/litellm.pass")
+DB_SECRET_NAME = "puu-litellm-db"
+DB_SECRET_MANIFEST = "39-litellm-db-secret.yaml"
+POSTGRESQL_MANIFEST = "38-postgresql.yaml"
+
+
 def apply_crds(crd_src: Path) -> None:
     if not crd_src.is_dir():
         return
@@ -37,6 +47,24 @@ def copy_manifests(manifest_src: Path, manifest_dst: Path) -> None:
         ms.atomic_write_text(manifest_dst / manifest.name, manifest.read_text(), 0o644)
 
 
+def write_secret(manifest_dst: Path, filename: str, name: str, data: dict[str, str]) -> None:
+    for value in data.values():
+        if "'" in value or "\n" in value:
+            sys.exit(f"{name}: secret values cannot contain quotes or newlines")
+    lines = [
+        "apiVersion: v1",
+        "kind: Secret",
+        "metadata:",
+        f"  name: {name}",
+        f"  namespace: {PUU_AI_NAMESPACE}",
+        "type: Opaque",
+        "stringData:",
+    ]
+    lines += [f"  {key}: '{value}'" for key, value in data.items()]
+    ms.atomic_write_text(manifest_dst / filename, "\n".join(lines) + "\n", 0o600)
+
+
+
 def ensure_webui_secret(manifest_dst: Path) -> None:
     secret_path = manifest_dst / "44-open-webui-secret.yaml"
     if secret_path.exists():
@@ -53,6 +81,81 @@ def ensure_webui_secret(manifest_dst: Path) -> None:
     )
 
 
+def service_dns(name: str) -> str:
+    return f"{name}.{PUU_AI_NAMESPACE}.svc.cluster.local"
+
+
+
+def node_internal_ip() -> str:
+    node = ms.resolve_k3s_node_name()
+    if not ms.wait_for_node(node):
+        sys.exit(f"node {node} did not register")
+    address = ms.run_kubectl(
+        "get", "node", node, "-o", 'jsonpath={.status.addresses[?(@.type=="InternalIP")].address}'
+    ).stdout.strip()
+    if not address:
+        sys.exit(f"node {node} has no internal address")
+    return address
+
+
+
+def read_litellm_db_password() -> str:
+    try:
+        password = DB_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        sys.exit(f"{DB_PASSWORD_FILE}: {exc.strerror}; puu-postgresql.service must run first")
+    if not password or any(character not in "0123456789abcdef" for character in password):
+        sys.exit(f"{DB_PASSWORD_FILE} does not hold a generated password")
+    return password
+
+
+
+def ensure_postgresql_endpoints(manifest_dst: Path) -> None:
+    address = node_internal_ip()
+    ms.atomic_write_text(
+        manifest_dst / POSTGRESQL_MANIFEST,
+        f"""apiVersion: v1
+kind: Service
+metadata:
+  name: {POSTGRESQL_SERVICE}
+  namespace: {PUU_AI_NAMESPACE}
+spec:
+  ports:
+    - name: postgresql
+      port: {POSTGRESQL_PORT}
+      targetPort: {POSTGRESQL_PORT}
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: {POSTGRESQL_SERVICE}
+  namespace: {PUU_AI_NAMESPACE}
+subsets:
+  - addresses:
+      - ip: {address}
+    ports:
+      - name: postgresql
+        port: {POSTGRESQL_PORT}
+""",
+        0o644,
+    )
+
+
+
+def ensure_litellm_db(manifest_dst: Path) -> None:
+    write_secret(
+        manifest_dst,
+        DB_SECRET_MANIFEST,
+        DB_SECRET_NAME,
+        {
+            "username": "litellm",
+            "password": read_litellm_db_password(),
+            "endpoint": service_dns(POSTGRESQL_SERVICE),
+        },
+    )
+
+
+
 def main() -> None:
     manifest_src = Path("/usr/share/puu/k3s/manifests")
     manifest_dst = Path("/var/lib/rancher/k3s/server/manifests")
@@ -66,6 +169,8 @@ def main() -> None:
         sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")
     copy_manifests(manifest_src, manifest_dst)
     ensure_webui_secret(manifest_dst)
+    ensure_postgresql_endpoints(manifest_dst)
+    ensure_litellm_db(manifest_dst)
 
 
 if __name__ == "__main__":

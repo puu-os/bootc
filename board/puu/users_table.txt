@@ -17,3 +17,4 @@ gdm 42 gdm 42 * /var/lib/gdm /sbin/nologin video,input,render GNOME Display Mana
 sshd 74 sshd 74 * /var/empty /sbin/nologin - SSH drop priv user
 dbus 81 dbus 81 * /run/dbus - dbus DBus messagebus user
 polkitd 114 polkitd 114 * - - - Polkit Daemon
+postgres 109 postgres 109 * /var/lib/pgsql /bin/sh - PostgreSQL Server
