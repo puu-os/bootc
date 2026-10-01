@@ -34,12 +34,6 @@ Default network services available after installation:
 - Kubernetes (K3s): `https://puu.local:6443`
 - SSH: port 22
 
-## System Management
-
-- Inspect the active deployment: `bootc status`.
-- Upgrade the current variant to the latest image: `bootc upgrade`.
-- Switch to a different variant or version: `bootc switch quay.io/puu-os/gnome:<version>`.
-
 ## Development
 
 ### Listing the available boards
