@@ -44,7 +44,7 @@ spec:
             api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
             api_key: none
       general_settings:
-        disable_auth: true
+        master_key: os.environ/PUU_LITELLM_MASTER_KEY
         max_parallel_requests: 32
       router_settings:
         timeout: 1200

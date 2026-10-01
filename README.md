@@ -34,6 +34,14 @@ Default network services available after installation:
 - Kubernetes (K3s): `https://puu.local:6443`
 - SSH: port 22
 
+LiteLLM proxies the OpenAI API keyless by default. Store a master key to
+require credentials and to hand out per-user keys:
+
+```sh
+sudo systemd-creds encrypt --with-key=host - /etc/credstore.encrypted/litellm-master-key
+sudo systemctl restart puu-k3s-addons.service
+```
+
 ## Development
 
 ### Listing the available boards
