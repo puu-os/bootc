@@ -1,0 +1,42 @@
+From: Jarkko Sakkinen <jarkko.sakkinen@opinsys.fi>
+Subject: [PATCH] block: mark devices without media unavailable
+
+An empty removable-media device can return ENOMEDIUM when DiskBusy opens
+it exclusively. Propagating that error aborts ListDisks, hiding usable
+target drives as well.
+
+Treat missing media as a per-device unavailable reason. The TUI can keep
+listing other disks, while installation-time validation still rejects the
+empty device. Other open errors continue to propagate.
+
+--- a/src/engine/block.cc
++++ b/src/engine/block.cc
+@@ -287,6 +287,8 @@ std::string_view BusyReasonText(BusyReason reason) {
+       return "swap";
+     case BusyReason::kInUse:
+       return "in use";
++    case BusyReason::kNoMedia:
++      return "no medium";
+   }
+   return "in use";
+ }
+@@ -403,6 +405,9 @@ StatusOr<std::optional<BusyReason>> DiskBusy(const std::filesystem::path& drive,
+     if (error == EBUSY) {
+       return BusyReason::kInUse;
+     }
++    if (error == ENOMEDIUM) {
++      return BusyReason::kNoMedia;
++    }
+     return ErrnoToStatus(error,
+                          fmt::format("open {} exclusively", devnode.string()));
+   }
+--- a/src/engine/block.h
++++ b/src/engine/block.h
+@@ -24,6 +24,7 @@ enum class BusyReason : std::uint8_t {
+   kRaid,
+   kSwap,
+   kInUse,
++  kNoMedia,
+ };
+ 
+ std::string_view BusyReasonText(BusyReason reason);
