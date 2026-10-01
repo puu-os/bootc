@@ -1,0 +1,61 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+#
+# Create the LiteLLM role and database in the host PostgreSQL server and let
+# cluster pods reach them.  Runs on every boot before puu-k3s-addons.service,
+# which publishes the credentials to the cluster.  The server itself listens on
+# every address from its first start (postgresql.service.d/puu.conf), while the
+# rules below admit cluster clients only.
+
+set -eu
+
+PGDATA=/var/lib/pgsql
+PASSWORD_FILE=/var/lib/puu/postgresql/litellm.pass
+ROLE=litellm
+DATABASE=litellm
+# k3s hands out pod addresses from its default cluster CIDR and flannel routes
+# them through the host, so cluster clients only ever arrive from this range.
+POD_CIDR=10.42.0.0/16
+HBA_RULE="host $DATABASE $ROLE $POD_CIDR scram-sha-256"
+
+admin_psql() {
+	psql --no-psqlrc --quiet --username postgres --dbname postgres "$@"
+}
+
+if [ ! -s "$PASSWORD_FILE" ]; then
+	umask 077
+	head -c 24 /dev/urandom | od -An -tx1 | tr -d '[:space:]' > "$PASSWORD_FILE"
+fi
+password=$(cat "$PASSWORD_FILE")
+
+if ! admin_psql --set=ON_ERROR_STOP=1 >/dev/null <<SQL
+DO \$\$
+BEGIN
+	IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '$ROLE') THEN
+		ALTER ROLE $ROLE WITH LOGIN PASSWORD '$password';
+	ELSE
+		CREATE ROLE $ROLE WITH LOGIN PASSWORD '$password';
+	END IF;
+END
+\$\$;
+SQL
+then
+	echo "cannot create the $ROLE role" >&2
+	exit 1
+fi
+
+if [ "$(admin_psql -tAc "SELECT count(*) FROM pg_database WHERE datname = '$DATABASE'")" = 0 ]; then
+	admin_psql --set=ON_ERROR_STOP=1 -c "CREATE DATABASE $DATABASE OWNER $ROLE" >/dev/null
+fi
+
+if ! grep -qxF "$HBA_RULE" "$PGDATA/pg_hba.conf"; then
+	{
+		printf '\n# Puu LiteLLM: cluster clients only, the server stays off the local network\n'
+		printf '%s\n' "$HBA_RULE"
+		printf '%s\n' 'host    all             all             0.0.0.0/0            reject'
+		printf '%s\n' 'host    all             all             ::/0                 reject'
+	} >> "$PGDATA/pg_hba.conf"
+	# pg_hba.conf is a sighup setting, so a reload is enough to apply it.
+	admin_psql --set=ON_ERROR_STOP=1 -c 'SELECT pg_reload_conf()' >/dev/null
+fi
