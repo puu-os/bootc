@@ -7,6 +7,8 @@ ConditionKernelCommandLine=!puu.live
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Operator-managed LiteLLM master key; absent means the cluster serves keyless.
+ImportCredential=litellm-master-key
 ExecStart=/usr/libexec/puu/install-k3s-addons
 Restart=on-failure
 RestartSec=5s
