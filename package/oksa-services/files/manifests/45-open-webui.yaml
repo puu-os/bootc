@@ -31,8 +31,8 @@ spec:
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: litellm-masterkey
-                  key: masterkey
+                  name: puu-litellm-openwebui-key
+                  key: api_key
             - name: WEBUI_SECRET_KEY
               valueFrom:
                 secretKeyRef:

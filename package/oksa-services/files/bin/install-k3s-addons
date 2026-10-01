@@ -3,9 +3,14 @@
 # Copyright (C) Opinsys Oy 2026
 
 from pathlib import Path
+import json
+import os
 import secrets
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import model_serving as ms
@@ -13,15 +18,29 @@ import model_serving as ms
 
 NVIDIA_MANIFESTS = ("30-nvidia-cdi-runtime.yaml", "32-nvidia-device-plugin.yaml")
 
-
 PUU_AI_NAMESPACE = "puu-ai"
+LITELLM_SERVICE = "litellm"
+LITELLM_PORT = 4000
+LITELLM_TIMEOUT_SEC = 900
+POLL_SEC = 5
 POSTGRESQL_SERVICE = "puu-postgresql"
 POSTGRESQL_PORT = 5432
+OPENWEBUI_DEPLOYMENT = "open-webui"
+OPENWEBUI_KEY_ALIAS = "open-webui"
 
 DB_PASSWORD_FILE = Path("/var/lib/puu/postgresql/litellm.pass")
 DB_SECRET_NAME = "puu-litellm-db"
 DB_SECRET_MANIFEST = "39-litellm-db-secret.yaml"
 POSTGRESQL_MANIFEST = "38-postgresql.yaml"
+
+MASTER_KEY_CREDENTIAL = "litellm-master-key"
+MASTER_KEY_STORE = Path("/etc/credstore.encrypted")
+MASTER_KEY_ENV = "PUU_LITELLM_MASTER_KEY"
+MASTER_KEY_SECRET_NAME = "puu-litellm-masterkey"
+MASTER_KEY_MANIFEST = "39-litellm-masterkey.yaml"
+AUTH_MANIFEST = "40-litellm-auth.yaml"
+OPENWEBUI_KEY_SECRET_NAME = "puu-litellm-openwebui-key"
+OPENWEBUI_KEY_MANIFEST = "44-litellm-openwebui-key.yaml"
 
 
 def apply_crds(crd_src: Path) -> None:
@@ -64,6 +83,15 @@ def write_secret(manifest_dst: Path, filename: str, name: str, data: dict[str, s
     ms.atomic_write_text(manifest_dst / filename, "\n".join(lines) + "\n", 0o600)
 
 
+def secret_value(path: Path, key: str) -> str | None:
+    if not path.is_file():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name, separator, value = line.partition(":")
+        if separator and name.strip() == key:
+            return value.strip().strip("'") or None
+    return None
+
 
 def ensure_webui_secret(manifest_dst: Path) -> None:
     secret_path = manifest_dst / "44-open-webui-secret.yaml"
@@ -85,7 +113,6 @@ def service_dns(name: str) -> str:
     return f"{name}.{PUU_AI_NAMESPACE}.svc.cluster.local"
 
 
-
 def node_internal_ip() -> str:
     node = ms.resolve_k3s_node_name()
     if not ms.wait_for_node(node):
@@ -98,7 +125,6 @@ def node_internal_ip() -> str:
     return address
 
 
-
 def read_litellm_db_password() -> str:
     try:
         password = DB_PASSWORD_FILE.read_text(encoding="utf-8").strip()
@@ -107,7 +133,6 @@ def read_litellm_db_password() -> str:
     if not password or any(character not in "0123456789abcdef" for character in password):
         sys.exit(f"{DB_PASSWORD_FILE} does not hold a generated password")
     return password
-
 
 
 def ensure_postgresql_endpoints(manifest_dst: Path) -> None:
@@ -141,7 +166,6 @@ subsets:
     )
 
 
-
 def ensure_litellm_db(manifest_dst: Path) -> None:
     write_secret(
         manifest_dst,
@@ -154,6 +178,131 @@ def ensure_litellm_db(manifest_dst: Path) -> None:
         },
     )
 
+
+def master_key_from_credential() -> str | None:
+    credential_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if not credential_dir:
+        return None
+    try:
+        master_key = (Path(credential_dir) / MASTER_KEY_CREDENTIAL).read_text(encoding="utf-8").strip()
+    except OSError:
+        if (MASTER_KEY_STORE / MASTER_KEY_CREDENTIAL).exists():
+            sys.exit(
+                f"{MASTER_KEY_STORE / MASTER_KEY_CREDENTIAL} cannot be decrypted; re-encrypt it with "
+                "--with-key=host or remove it to serve keyless"
+            )
+        return None
+    return master_key or None
+
+
+def ensure_litellm_auth(manifest_dst: Path) -> str | None:
+    auth_manifest = manifest_dst / AUTH_MANIFEST
+    master_key = master_key_from_credential()
+    if master_key is None:
+        auth_manifest.unlink(missing_ok=True)
+        return None
+    write_secret(manifest_dst, MASTER_KEY_MANIFEST, MASTER_KEY_SECRET_NAME, {"masterkey": master_key})
+    ms.atomic_write_text(
+        auth_manifest,
+        f"""apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: {LITELLM_SERVICE}
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    extraEnvVars:
+      - name: {MASTER_KEY_ENV}
+        valueFrom:
+          secretKeyRef:
+            name: {MASTER_KEY_SECRET_NAME}
+            key: masterkey
+""",
+        0o600,
+    )
+    return master_key
+
+
+def litellm_address() -> str | None:
+    proc = ms.run_kubectl(
+        "get", "service", LITELLM_SERVICE, "--namespace", PUU_AI_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def litellm_request(method: str, path: str, api_key: str, payload: dict | None = None) -> tuple[int, dict]:
+    address = litellm_address()
+    if address is None:
+        return 0, {}
+    request = urllib.request.Request(
+        f"http://{address}:{LITELLM_PORT}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, parse_json(response.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, parse_json(exc.read())
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0, {}
+
+
+def parse_json(raw: bytes) -> dict:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def openwebui_key_is_valid(key: str) -> bool | None:
+    deadline = time.monotonic() + LITELLM_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        status, _ = litellm_request("GET", "/v1/models", key)
+        if status == 200:
+            return True
+        if status in (401, 403):
+            return False
+        time.sleep(POLL_SEC)
+    return None
+
+
+def mint_openwebui_key(master_key: str) -> str:
+    deadline = time.monotonic() + LITELLM_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        status, payload = litellm_request("POST", "/key/generate", master_key, {"key_alias": OPENWEBUI_KEY_ALIAS})
+        key = payload.get("key")
+        if status == 200 and isinstance(key, str) and key:
+            return key
+        time.sleep(POLL_SEC)
+    sys.exit("LiteLLM did not mint an OpenWebUI key")
+
+
+def ensure_openwebui_key(manifest_dst: Path, master_key: str | None) -> None:
+    key_manifest = manifest_dst / OPENWEBUI_KEY_MANIFEST
+    stored_key = secret_value(key_manifest, "api_key")
+    if master_key is None:
+        if stored_key is None:
+            write_secret(manifest_dst, OPENWEBUI_KEY_MANIFEST, OPENWEBUI_KEY_SECRET_NAME, {"api_key": secrets.token_hex(32)})
+        return
+    valid = stored_key is not None and openwebui_key_is_valid(stored_key)
+    if valid is None:
+        sys.exit("LiteLLM did not answer the OpenWebUI key probe")
+    if valid:
+        return
+    write_secret(
+        manifest_dst,
+        OPENWEBUI_KEY_MANIFEST,
+        OPENWEBUI_KEY_SECRET_NAME,
+        {"api_key": mint_openwebui_key(master_key)},
+    )
+    ms.run_kubectl(
+        "rollout", "restart", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", PUU_AI_NAMESPACE, check=False
+    )
 
 
 def main() -> None:
@@ -171,6 +320,8 @@ def main() -> None:
     ensure_webui_secret(manifest_dst)
     ensure_postgresql_endpoints(manifest_dst)
     ensure_litellm_db(manifest_dst)
+    master_key = ensure_litellm_auth(manifest_dst)
+    ensure_openwebui_key(manifest_dst, master_key)
 
 
 if __name__ == "__main__":
