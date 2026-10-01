@@ -21,7 +21,8 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/oksa \
 		$(TARGET_DIR)/usr/bin/oksa
 	for executable in discover-vllm-models label-model-serving-node \
-		collect-nvlink-topology plan-vllm-workloads preseed-vllm-models; do \
+		collect-nvlink-topology plan-vllm-workloads preseed-vllm-models \
+		init-litellm-db; do \
 		$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/$$executable \
 			$(TARGET_DIR)/usr/libexec/puu/$$executable || exit $$?; \
 	done
@@ -46,10 +47,13 @@ define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
 		puu-vllm-discovery.timer puu-model-serving-labeler.service \
 		puu-model-serving-labeler.timer puu-nvlink-topology.service \
 		puu-nvlink-topology.timer puu-vllm-planner.service \
-		puu-vllm-planner.timer puu-vllm-preseed.service; do \
+		puu-vllm-planner.timer puu-vllm-preseed.service \
+		puu-postgresql.service; do \
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/systemd/$$unit \
 			$(TARGET_DIR)/usr/lib/systemd/system/$$unit || exit $$?; \
-	done
+	done; \
+	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/systemd/postgresql.service.d/puu.conf \
+		$(TARGET_DIR)/usr/lib/systemd/system/postgresql.service.d/puu.conf || exit $$?;
 endef
 
 $(eval $(generic-package))
