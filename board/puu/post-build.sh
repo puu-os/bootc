@@ -33,7 +33,7 @@ rm -rf "${mime_tmp}"
 
 puu_variant="${PUU_VARIANT:-gnome}"
 puu_version="${PUU_VERSION:-1}"
-target_imgref="${PUU_TARGET_IMGREF:-quay.io/puu-os/${puu_variant}:${puu_version}}"
+target_imgref="${PUU_TARGET_IMGREF:-quay.io/puu/puu:${puu_variant}}"
 target_repo="${target_imgref%@*}"
 target_name="${target_repo##*/}"
 if [[ "${target_name}" == *:* ]]; then

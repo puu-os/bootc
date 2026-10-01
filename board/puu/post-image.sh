@@ -105,7 +105,7 @@ oci_archive="${BINARIES_DIR}/image.tar"
 mv "${BINARIES_DIR}/rootfs-oci-latest-${PUU_ARCH}-linux.oci-image.tar" "${oci_archive}"
 rootfs_squashfs="${BINARIES_DIR}/rootfs.squashfs"
 image_ref="latest"
-target_imgref="${PUU_TARGET_IMGREF:-quay.io/puu-os/${puu_variant}:${puu_version}}"
+target_imgref="${PUU_TARGET_IMGREF:-quay.io/puu/puu:${puu_variant}}"
 
 test -f "${oci_archive}"
 index_json=$(tar -xOf "${oci_archive}" index.json | tr -d '[:space:]')
