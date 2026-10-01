@@ -31,6 +31,11 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: bonsai-2-27b
+        puu.ai/inference: "enabled"
+        puu.ai/model-server: vllm
+        puu.ai/model-capacity: gpu
+        puu.ai/model-source: local-discovery
+        puu.ai/cluster-routing: "enabled"
     spec:
       nodeSelector:
         puu.ai/cuda-ready: "true"
