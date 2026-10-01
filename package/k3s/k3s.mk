@@ -74,3 +74,7 @@ define K3S_INSTALL_INIT_SYSTEMD
 endef
 
 $(eval $(golang-package))
+
+# Reconfigure when support files change so they are reinstalled and the
+# file accounting from the configure/install steps stays consistent.
+$(K3S_TARGET_CONFIGURE): $(wildcard $(K3S_PKGDIR)/files/*) $(K3S_PKGDIR)/k3s.mk
