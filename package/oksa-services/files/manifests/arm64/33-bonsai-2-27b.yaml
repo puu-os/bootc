@@ -30,7 +30,7 @@ data:
     apt-get -o Dir::State::lists="$apt_cache/lists" \
       -o Dir::Cache::archives="$apt_cache/archives" \
       -o APT::Keep-Downloaded-Packages=true install -y --no-install-recommends \
-      libcusparse-dev-13-0 libcusolver-dev-13-0
+      libcublas-dev-13-0 libcusparse-dev-13-0 libcusolver-dev-13-0
     touch "$apt_cache/.ready"
     target=/var/lib/vllm/plugins/prism-ternary-e5ed2454
     if [ ! -f "$target/.ready" ]; then
