@@ -53,3 +53,12 @@ define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
 endef
 
 $(eval $(generic-package))
+
+# Refresh the dependency snapshot so it cannot overwrite newer K3s support files.
+$(OKSA_SERVICES_TARGET_CONFIGURE): $(K3S_TARGET_INSTALL_TARGET)
+
+# Reinstall when the support files change so the image gets the current copies and
+# the file accounting from the configure/install steps stays consistent.
+$(OKSA_SERVICES_TARGET_CONFIGURE): $(wildcard $(OKSA_SERVICES_FILES)/* \
+	$(OKSA_SERVICES_FILES)/*/* $(OKSA_SERVICES_FILES)/*/*/*) \
+	$(OKSA_SERVICES_PKGDIR)/oksa-services.mk
