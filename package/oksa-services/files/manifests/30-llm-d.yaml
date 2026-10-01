@@ -4,33 +4,33 @@ metadata:
   name: llm-d
   namespace: kube-system
 spec:
-  chart: oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool@sha256:bc6b00e127fe93961c4788e99abc398efff7344cc427e3620deb2027191db197
-  version: v1.5.0
+  chart: oci://ghcr.io/llm-d/charts/llm-d-router-gateway@sha256:63a79a842974691be73d44918c7086bcc52d6fee546ff39113517a23c03eeab0
+  version: v0.11.0
   targetNamespace: puu-ai
   createNamespace: true
   valuesContent: |-
     provider:
       name: none
 
-    inferenceExtension:
-      image:
-        tag: v1.5.0@sha256:86c679b057298e68c6e65ff5603e92066d432e77b11f1f81f0a06399694810bc
-        pullPolicy: IfNotPresent
-      flags:
-        v: 1
-      resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          memory: 512Mi
+    router:
+      epp:
+        image:
+          tag: v0.11.0@sha256:39257d24552d16d8f215d3de25cc734fd44af3b282b67032db01aff900c610cf
+          pullPolicy: IfNotPresent
+        flags:
+          v: 1
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 512Mi
 
-    inferencePool:
-      targetPorts:
-        - number: 8000
-      modelServerType: vllm
-      modelServerProtocol: http
       modelServers:
+        targetPorts:
+          - number: 8000
+        type: vllm
+        protocol: http
         matchLabels:
           puu.ai/inference: "enabled"
           puu.ai/model-server: vllm
@@ -38,7 +38,7 @@ spec:
           puu.ai/model-source: local-discovery
           puu.ai/cluster-routing: "enabled"
 
-    experimentalHttpRoute:
-      enabled: true
+    httpRoute:
+      create: true
       inferenceGatewayName: llm-d-inference-gateway
       requestTimeout: 300s
