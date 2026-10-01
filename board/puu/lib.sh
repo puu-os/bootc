@@ -52,12 +52,12 @@ init_puu_arch() {
     arm64)
       PUU_TARGET_ARCH=aarch64
       PUU_KERNEL_IMAGE=Image
-      PUU_SERIAL_TTY=ttyAMA0
+      PUU_SERIAL_TTY=
       PUU_EFI_BOOT_NAME=BOOTAA64.EFI
       PUU_EFI_SDBOOT_NAME=systemd-bootaa64.efi
       PUU_EFI_STUB_NAME=linuxaa64.efi.stub
       PUU_LDSO_NAME=ld-linux-aarch64.so.1
-      PUU_CMDLINE_EXTRA=" cma=256M plymouth.ignore-udev console=ttyAMA0,115200n8"
+      PUU_CMDLINE_EXTRA=" cma=256M plymouth.ignore-udev"
       ;;
     *)
       echo "unknown PUU_ARCH: ${arch}" >&2

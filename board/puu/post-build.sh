@@ -258,9 +258,16 @@ if [ -n "${ldconfig_bin}" ] && [ -f "${ldconfig_bin}" ]; then
   install -Dm0755 "${ldconfig_bin}" "${TARGET_DIR}/usr/bin/ldconfig"
 fi
 
-mkdir -p "${TARGET_DIR}/etc/systemd/system/getty.target.wants"
-ln -sfn /usr/lib/systemd/system/serial-getty@.service \
-  "${TARGET_DIR}/etc/systemd/system/getty.target.wants/serial-getty@${PUU_SERIAL_TTY}.service"
+getty_port=$(sed -n 's/^BR2_TARGET_GENERIC_GETTY_PORT="\(.*\)"$/\1/p' "${BR2_CONFIG}")
+if [[ -n "${getty_port}" && "${getty_port}" != console && ! "${getty_port}" =~ ^tty[0-9]*$ ]]; then
+  mkdir -p "${TARGET_DIR}/etc/systemd/system/getty.target.wants"
+  ln -sfn /usr/lib/systemd/system/serial-getty@.service \
+    "${TARGET_DIR}/etc/systemd/system/getty.target.wants/serial-getty@${getty_port}.service"
+elif [ -z "${PUU_SERIAL_TTY}" ] && [ "${getty_port}" = console ]; then
+  # Remove the old ARM64 default, including the drop-in used by preset-all.
+  rm -f "${TARGET_DIR}/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA0.service" \
+    "${TARGET_DIR}/usr/lib/systemd/system/serial-getty@.service.d/buildroot-console.conf"
+fi
 
 find "${TARGET_DIR}/etc/systemd/system" -type l -regextype posix-extended \
   -regex '.*/Cu[[:alnum:]]{6}' -delete

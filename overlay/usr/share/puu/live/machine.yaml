@@ -18,4 +18,4 @@ k3s:
 
 serialConsole:
   x86_64: console=ttyS0,115200
-  aarch64: console=ttyAMA0,115200
+  aarch64: console=tty0
