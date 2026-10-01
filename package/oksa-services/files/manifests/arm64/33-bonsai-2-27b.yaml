@@ -60,6 +60,11 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: bonsai-2-27b
+        "@OKSA_LABEL_NAMESPACE@/inference": "enabled"
+        "@OKSA_LABEL_NAMESPACE@/model-server": vllm
+        "@OKSA_LABEL_NAMESPACE@/model-capacity": gpu
+        "@OKSA_LABEL_NAMESPACE@/model-source": local-discovery
+        "@OKSA_LABEL_NAMESPACE@/cluster-routing": "enabled"
     spec:
       nodeSelector:
         "@OKSA_LABEL_NAMESPACE@/cuda-ready": "true"
