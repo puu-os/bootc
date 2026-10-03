@@ -13,6 +13,7 @@ else
 OKSA_SERVICES_BONSAI_MANIFEST_DIR =
 endif
 
+
 define OKSA_SERVICES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/model_serving.py \
 		$(TARGET_DIR)/usr/libexec/puu/model_serving.py
