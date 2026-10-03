@@ -30,9 +30,13 @@ Puu OS builds on top of the following open source projects:
 Default network services available after installation:
 
 - Open WebUI: `http://puu.local/`
-- OpenAI API: `http://puu.local/v1`
+- OpenAI-compatible API: `http://api.puu.local/v1`
 - Kubernetes (K3s): `https://puu.local:6443`
 - SSH: port 22
+
+Puu publishes `api.puu.local` over mDNS. Linux clients using `mdns4_minimal`
+need `mdns4` before `resolve`/`dns` in `/etc/nsswitch.conf` and `.puu.local`
+allowed in `/etc/mdns.allow`, or a local DNS record for the API hostname.
 
 LiteLLM proxies the OpenAI API keyless by default. Store a master key to
 require credentials and to hand out per-user keys:

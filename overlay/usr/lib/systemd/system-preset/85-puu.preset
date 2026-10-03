@@ -12,6 +12,7 @@ enable nvidia-cdi-refresh.service
 enable nvidia-cdi-refresh.path
 enable iwd.service
 enable avahi-daemon.service
+enable puu-mdns-alias.service
 disable containerd.service
 enable sshd.service
 enable systemd-resolved.service

@@ -2,11 +2,15 @@ config BR2_PACKAGE_OKSA_SERVICES
 	bool "oksa services"
 	depends on BR2_INIT_SYSTEMD
 	depends on BR2_PACKAGE_K3S
+	select BR2_PACKAGE_AVAHI
+	select BR2_PACKAGE_AVAHI_DAEMON
+	select BR2_PACKAGE_DBUS # Avahi client library
 	select BR2_PACKAGE_OKSA_CRDS
 	select BR2_PACKAGE_UTIL_LINUX
 	select BR2_PACKAGE_UTIL_LINUX_MOUNTPOINT
 	help
-	  Puu Kubernetes AI service bootstrap manifests for k3s.
+	  Puu Kubernetes AI service bootstrap manifests for k3s and
+	  mDNS publication of api.puu.local.
 
 comment "oksa services needs systemd"
 	depends on BR2_PACKAGE_K3S

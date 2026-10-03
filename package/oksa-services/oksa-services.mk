@@ -3,7 +3,7 @@ OKSA_SERVICES_SITE = $(OKSA_SERVICES_PKGDIR)/files
 OKSA_SERVICES_SITE_METHOD = local
 OKSA_SERVICES_LICENSE = GPL-2.0+
 OKSA_SERVICES_LICENSE_FILES = LICENSE
-OKSA_SERVICES_DEPENDENCIES = k3s oksa-crds
+OKSA_SERVICES_DEPENDENCIES = avahi k3s oksa-crds
 
 OKSA_SERVICES_FILES = $(OKSA_SERVICES_PKGDIR)/files
 
@@ -13,7 +13,15 @@ else
 OKSA_SERVICES_BONSAI_MANIFEST_DIR =
 endif
 
+define OKSA_SERVICES_BUILD_CMDS
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
+		-o $(@D)/mdns-alias $(OKSA_SERVICES_FILES)/mdns-alias.c \
+		-lavahi-client -lavahi-common
+endef
+
 define OKSA_SERVICES_INSTALL_TARGET_CMDS
+	$(INSTALL) -D -m 0755 $(@D)/mdns-alias \
+		$(TARGET_DIR)/usr/libexec/puu/mdns-alias
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/model_serving.py \
 		$(TARGET_DIR)/usr/libexec/puu/model_serving.py
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/install-k3s-addons \
@@ -48,7 +56,7 @@ define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
 		puu-model-serving-labeler.timer puu-nvlink-topology.service \
 		puu-nvlink-topology.timer puu-vllm-planner.service \
 		puu-vllm-planner.timer puu-vllm-preseed.service \
-		puu-postgresql.service; do \
+		puu-postgresql.service puu-mdns-alias.service; do \
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/systemd/$$unit \
 			$(TARGET_DIR)/usr/lib/systemd/system/$$unit || exit $$?; \
 	done; \

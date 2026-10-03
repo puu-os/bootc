@@ -1,0 +1,3 @@
+# Allow service names such as api.puu.local, not just two-label hostnames.
+.puu.local
+.puu.local.

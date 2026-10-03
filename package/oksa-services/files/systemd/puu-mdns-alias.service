@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Publish api.puu.local mDNS alias
+Wants=avahi-daemon.service
+After=dbus.service avahi-daemon.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/libexec/puu/mdns-alias
+Restart=on-failure
+RestartSec=5s
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
