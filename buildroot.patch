@@ -1267,7 +1267,7 @@ index e96d3ba7..25f0f37f 100644
 -sha256  bce1d2e9bad517b493168b37604c5d02a7fb638b4d1b9fc730adafa06c603456  LICENSES/README.md
 +sha256  55dc358743e4bd7d026cba1401ac56c548a886a073b3f07a18a5c538fa8102ed  LICENSES/README.md
 diff --git a/package/systemd/systemd.mk b/package/systemd/systemd.mk
-index 3223915d..be5756d5 100644
+index 3223915d..2f88bf2a 100644
 --- a/package/systemd/systemd.mk
 +++ b/package/systemd/systemd.mk
 @@ -19,7 +19,7 @@
@@ -1287,6 +1287,19 @@ index 3223915d..be5756d5 100644
  else
  SYSTEMD_CONF_OPTS += -Dpolkit=disabled
  endif
+@@ -774,9 +773,9 @@
+ 	fi; \
+ 	if [ $(call qstrip,$(BR2_TARGET_GENERIC_GETTY_BAUDRATE)) -gt 0 ] ; \
+ 	then \
+-		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/getty@.service; \
+-		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/serial-getty@.service; \
+-		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/console-getty@.service; \
++		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/getty@.service && \
++		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/serial-getty@.service && \
++		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/console-getty.service && \
+ 		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/container-getty@.service; \
+ 	fi
+ endef
 diff --git a/package/upower/upower.hash b/package/upower/upower.hash
 index cabce1f5..ba1130e0 100644
 --- a/package/upower/upower.hash
