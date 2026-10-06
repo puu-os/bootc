@@ -8,6 +8,9 @@ identity:
   timezone: UTC
   hostname: puu
 
+partitions:
+  efi: 2G
+
 flatpak:
   manifestPath: /usr/share/puu/flatpaks.list
   syncHelper: /usr/libexec/puu/flatpak-sync
