@@ -147,8 +147,8 @@ build: configure ## Build <BOARD>
 	fi
 	$(call buildroot,BR2_CCACHE=y)
 
-burn: ## Write <BOARD>.img to DEVICE
-	./scripts/burn.sh "$(BOARD_DIR)/images/$(BOARD).img" "$(DEVICE)"
+burn: ## Write <BOARD>.iso to DEVICE
+	./scripts/burn.sh "$(BOARD_DIR)/images/$(BOARD).iso" "$(DEVICE)"
 
 clean: ## Remove build artifacts
 	rm -rf "$(abspath $(OUTPUT_DIR))"

@@ -59,6 +59,11 @@ sudo systemctl restart puu-k3s-addons.service
     make BOARD=puu_amd64 burn DEVICE=/dev/sdX
     make lint
 
+The primary installer artifact is `build/<board>/images/<board>.iso`. The same
+hybrid ISO can be burned to optical media, attached as a virtual CD/DVD (including
+PiKVM), or written directly to a USB stick with `make burn`. UEFI boot is required.
+Do not extract the ISO or modify its partition table after writing it.
+
 ### Releasing
 
     make release VERSION=N

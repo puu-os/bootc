@@ -5,12 +5,17 @@
 set -euo pipefail
 
 if (($# != 2)); then
-  echo "usage: $0 <image_path> <device>" >&2
+  echo "usage: $0 <image.iso> <device>" >&2
   exit 1
 fi
 
 image_path=$1
 device=$2
+
+if [[ "$image_path" != *.iso ]]; then
+  echo "error: only *.iso images are supported: $image_path" >&2
+  exit 1
+fi
 
 if [[ ! -f "$image_path" ]]; then
   echo "error: image not found: $image_path" >&2
@@ -27,10 +32,5 @@ if [[ $(uname -s) == Darwin ]]; then
   sudo dd if="$image_path" of="$device" bs=1m
   sync
 else
-  if ! command -v sgdisk >/dev/null; then
-    echo "error: sgdisk is required to relocate the GPT backup header" >&2
-    exit 1
-  fi
   sudo dd if="$image_path" of="$device" bs=1M status=progress oflag=sync
-  sudo sgdisk --move-second-header "$device"
 fi
