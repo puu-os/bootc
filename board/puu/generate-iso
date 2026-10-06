@@ -10,40 +10,58 @@ import re
 import uuid
 
 
+FAT_CONFIG = '''image efi.img {
+    vfat {
+        extraargs = "-F 32 -i @EFI_VOLUME_ID@"
+        file EFI {
+            image = "efi-part/EFI"
+        }
+        file loader {
+            image = "efi-part/loader"
+        }
+    }
+    size = 256M
+}
+'''
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
     parser.add_argument("--epoch", type=int, required=True)
-    parser.add_argument("--template", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cmdline", required=True)
     parser.add_argument("--cmdline-output", type=Path, required=True)
+    parser.add_argument("--metadata-output", type=Path, required=True)
     parser.add_argument("inputs", type=Path, nargs="+")
     args = parser.parse_args()
     if not 0 <= args.epoch <= 0xFFFFFFFF:
         parser.error("epoch must fit an unsigned 32-bit filesystem timestamp")
 
-    template = args.template.read_text()
     digest = hashlib.sha256(json.dumps(
-        [args.arch, args.epoch, template, args.cmdline], separators=(",", ":")
+        [args.arch, args.epoch, FAT_CONFIG, args.cmdline], separators=(",", ":")
     ).encode())
     for path in args.inputs:
         with path.open("rb") as source:
             digest.update(hashlib.file_digest(source, "sha256").digest())
     identity = uuid.uuid5(uuid.NAMESPACE_URL,
-                          f"https://gitlab.com/puu-os/bootc/live-image/{digest.hexdigest()}")
-    values = {name: str(uuid.uuid5(identity, name.lower())) for name in (
-        "DISK_UUID", "BOOT_PARTUUID", "LIVE_PARTUUID", "PAYLOAD_PARTUUID",
-        "LIVE_UUID", "PAYLOAD_UUID", "LIVE_HASH_SEED", "PAYLOAD_HASH_SEED",
-    )}
-    values["EFI_VOLUME_ID"] = uuid.uuid5(identity, "efi-volume-id").hex[:8]
-    values["OUTPUT_IMG"] = f"puu_{args.arch}.img"
-    for output, text in ((args.output, template), (args.cmdline_output, args.cmdline)):
+                          f"https://gitlab.com/puu-os/bootc/live-iso/{digest.hexdigest()}")
+    disk_guid = uuid.uuid5(identity, "disk-uuid")
+    esp_guid = bytearray(disk_guid.bytes_le)
+    esp_guid[9] ^= 2
+    label = f"PUU_{digest.hexdigest()[:24].upper()}"
+    values = {
+        "ISO_VOLUME_ID": label,
+        "BOOT_PARTUUID": str(uuid.UUID(bytes_le=bytes(esp_guid))),
+        "EFI_VOLUME_ID": uuid.uuid5(identity, "efi-volume-id").hex[:8],
+    }
+    for output, text in ((args.output, FAT_CONFIG), (args.cmdline_output, args.cmdline)):
         for name, value in values.items():
             text = text.replace(f"@{name}@", value)
         if re.search(r"@[A-Z_]+@", text):
-            parser.error(f"unresolved image placeholder in {output}")
+            parser.error(f"unresolved ISO placeholder in {output}")
         output.write_text(text)
+    args.metadata_output.write_text(f"{label} {disk_guid} {esp_guid.hex()}\n")
 
 
 if __name__ == "__main__":

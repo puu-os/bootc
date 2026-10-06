@@ -22,7 +22,6 @@ bootc_ldso="${TARGET_DIR}/lib/${PUU_LDSO_NAME}"
 stub="${TARGET_DIR}/usr/lib/systemd/boot/efi/${PUU_EFI_STUB_NAME}"
 sdboot="${TARGET_DIR}/usr/lib/systemd/boot/efi/${PUU_EFI_SDBOOT_NAME}"
 kernel="${BINARIES_DIR}/${PUU_KERNEL_IMAGE}"
-output_img="puu_${PUU_ARCH}.img"
 
 puu_variant="${PUU_VARIANT:-gnome}"
 puu_version="${PUU_VERSION:-1}"
@@ -178,47 +177,60 @@ uki="${efi_part}/EFI/Linux/${uki_name}"
 rm -rf "${efi_part}"
 mkdir -p "${efi_part}"/{EFI/{BOOT,Linux,systemd},loader}
 
-genimage_tmp=$(mktemp -d "${BINARIES_DIR}/genimage.XXXXXX")
-cleanup_paths+=("${genimage_tmp}")
-genimage_config="${genimage_tmp}/genimage.cfg"
-cmdline="puu.live SYSTEMD_SULOGIN_FORCE=1 root=live:PARTUUID=@LIVE_PARTUUID@ puu.boot-partuuid=@BOOT_PARTUUID@ puu.payload-partuuid=@PAYLOAD_PARTUUID@ ro rd.live.image rd.overlay systemd.gpt_auto=0${PUU_CMDLINE_EXTRA} quiet splash plymouth.ignore-serial-consoles vt.global_cursor_default=0 console=tty0"
-"${HOST_DIR}/bin/python3" "${BASH_SOURCE%/*}/generate-image-config" \
+iso_tmp=$(mktemp -d "${BINARIES_DIR}/iso.XXXXXX")
+cleanup_paths+=("${iso_tmp}")
+mkdir -p "${iso_tmp}/empty" "${iso_tmp}/root"/{LiveOS,payload,boot}
+ln "${rootfs_squashfs}" "${iso_tmp}/root/LiveOS/squashfs.img"
+ln "${oci_archive}" "${iso_tmp}/root/payload/image.tar"
+ln "${BINARIES_DIR}/image.manifest" "${iso_tmp}/root/payload/image.manifest"
+cmdline="puu.live SYSTEMD_SULOGIN_FORCE=1 root=live:LABEL=@ISO_VOLUME_ID@ puu.iso=@ISO_VOLUME_ID@ puu.boot-partuuid=@BOOT_PARTUUID@ ro rd.live.image rd.overlay systemd.gpt_auto=0${PUU_CMDLINE_EXTRA} quiet splash plymouth.ignore-serial-consoles vt.global_cursor_default=0 console=tty0"
+"${HOST_DIR}/bin/python3" "${BASH_SOURCE%/*}/generate-iso" \
   --arch "${PUU_ARCH}" --epoch "${SOURCE_DATE_EPOCH}" \
-  --template "${BASH_SOURCE%/*}/genimage.cfg" --output "${genimage_config}" \
-  --cmdline "${cmdline}" --cmdline-output "${genimage_tmp}/cmdline" \
+  --output "${iso_tmp}/genimage.cfg" \
+  --cmdline "${cmdline}" --cmdline-output "${iso_tmp}/cmdline" \
+  --metadata-output "${iso_tmp}/metadata" \
   "${rootfs_squashfs}" "${oci_archive}" "${BINARIES_DIR}/image.manifest" \
   "${kernel}" "${initrd}" "${osrel}" "${stub}" "${sdboot}" \
-  "${BASH_SOURCE[0]}" "${BASH_SOURCE%/*}/lib.sh"
+  "${BASH_SOURCE[0]}" "${BASH_SOURCE%/*}/lib.sh" "${BASH_SOURCE%/*}/generate-iso"
 "${HOST_DIR}/bin/ukify" build \
   --stub="${stub}" \
   --linux="${kernel}" \
   --initrd="${initrd}" \
-  --cmdline=@"${genimage_tmp}/cmdline" \
+  --cmdline=@"${iso_tmp}/cmdline" \
   --os-release=@"${osrel}" \
   --uname="${kver}" \
   --output="${uki}"
 
 cp "${sdboot}" "${efi_part}/EFI/BOOT/${PUU_EFI_BOOT_NAME}"
 cp "${sdboot}" "${efi_part}/EFI/systemd/${PUU_EFI_SDBOOT_NAME}"
-
 cat > "${efi_part}/loader/loader.conf" <<EOF
 timeout 5
 default ${uki_name}
 EOF
-
-mkdir -p "${genimage_tmp}/root"/{live/LiveOS,payload}
-ln "${rootfs_squashfs}" "${genimage_tmp}/root/live/LiveOS/squashfs.img"
-ln "${oci_archive}" "${genimage_tmp}/root/payload/image.tar"
-ln "${BINARIES_DIR}/image.manifest" "${genimage_tmp}/root/payload/image.manifest"
-export E2FSCK_TIME="${SOURCE_DATE_EPOCH}"
 find "${efi_part}" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 "${HOST_DIR}/bin/genimage" \
-  --rootpath "${genimage_tmp}/root" \
-  --tmppath "${genimage_tmp}/work" \
+  --rootpath "${iso_tmp}/empty" \
+  --tmppath "${iso_tmp}/work" \
   --inputpath "${BINARIES_DIR}" \
-  --outputpath "${BINARIES_DIR}" \
-  --config "${genimage_config}"
+  --outputpath "${iso_tmp}/root/boot" \
+  --config "${iso_tmp}/genimage.cfg"
+read -r iso_volume_id iso_disk_guid iso_esp_guid_hex < "${iso_tmp}/metadata"
+iso_date=$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%d%H%M%S00)
+output_iso="puu_${PUU_ARCH}.iso"
+"${HOST_DIR}/bin/xorriso" -as mkisofs \
+  -iso-level 3 -R -J -V "${iso_volume_id}" -uid 0 -gid 0 -dir-mode 0755 -file-mode 0644 \
+  --modification-date="${iso_date}" --set_all_file_dates "${iso_date}" \
+  --gpt_disk_guid "${iso_disk_guid}" \
+  -efi-boot-part --efi-boot-image -e boot/efi.img -no-emul-boot \
+  -o "${iso_tmp}/${output_iso}" "${iso_tmp}/root"
+"${HOST_DIR}/bin/xorriso" -indev "${iso_tmp}/${output_iso}" \
+  -report_system_area plain > "${iso_tmp}/layout"
+if ! grep -Eq "^GPT partition GUID : +2 +${iso_esp_guid_hex}$" "${iso_tmp}/layout"; then
+  echo "ISO ESP GUID does not match the UKI boot identity" >&2
+  exit 1
+fi
+mv "${iso_tmp}/${output_iso}" "${BINARIES_DIR}/${output_iso}"
+ln -sf "${output_iso}" "${BINARIES_DIR}/${output_iso%.iso}-${puu_version}.iso"
 
 ln -sf image.tar "${BINARIES_DIR}/image-${puu_version}.tar"
 ln -sf image.manifest "${BINARIES_DIR}/image-${puu_version}.manifest"
-ln -sf "${output_img}" "${BINARIES_DIR}/${output_img%.img}-${puu_version}.img"
