@@ -1,0 +1,147 @@
+#!/usr/bin/python3 -S
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import binascii
+import sys
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def number(data, offset, size):
+    return int.from_bytes(data[offset:offset + size], "little")
+
+
+def read_at(source, offset, size, medium_size):
+    require(0 <= offset <= medium_size and 0 <= size <= medium_size - offset,
+            "metadata lies outside the medium")
+    source.seek(offset)
+    data = source.read(size)
+    require(len(data) == size, "truncated medium metadata")
+    return data
+
+
+def guid_bytes(text):
+    parts = text.split("-")
+    require([len(part) for part in parts] == [8, 4, 4, 4, 12], "invalid ESP GUID")
+    raw = bytes.fromhex("".join(parts))
+    return raw[:4][::-1] + raw[4:6][::-1] + raw[6:8][::-1] + raw[8:]
+
+
+def read_gpt(source, lba, medium_size):
+    header = read_at(source, lba * 512, 512, medium_size)
+    require(header[:8] == b"EFI PART" and number(header, 8, 4) == 0x10000,
+            "invalid GPT signature or revision")
+    length = number(header, 12, 4)
+    require(92 <= length <= 512 and header[20:24] == bytes(4), "invalid GPT header")
+    checksum_header = bytearray(header[:length])
+    checksum_header[16:20] = bytes(4)
+    require(binascii.crc32(checksum_header) == number(header, 16, 4),
+            "GPT header checksum mismatch")
+    require(number(header, 24, 8) == lba, "GPT header position mismatch")
+    count, entry_size = number(header, 80, 4), number(header, 84, 4)
+    require(0 < count <= 4096 and entry_size in (128, 256, 512, 1024)
+            and count * entry_size <= 1048576, "invalid GPT partition array size")
+    entries_lba = number(header, 72, 8)
+    entries = read_at(source, entries_lba * 512, count * entry_size, medium_size)
+    require(binascii.crc32(entries) == number(header, 88, 4),
+            "GPT partition checksum mismatch")
+    return header, entries, entry_size
+
+
+def validate(source, expected_guid, label):
+    source.seek(0, 2)
+    medium_size = source.tell()
+    header, entries, entry_size = read_gpt(source, 1, medium_size)
+    backup_lba = number(header, 32, 8)
+    first, last = number(header, 40, 8), number(header, 48, 8)
+    require(2 <= number(header, 72, 8)
+            and number(header, 72, 8) * 512 + len(entries) <= first * 512
+            and first <= last < backup_lba, "invalid primary GPT geometry")
+    backup, backup_entries, backup_entry_size = read_gpt(source, backup_lba, medium_size)
+    require(number(backup, 32, 8) == 1 and backup[40:72] == header[40:72]
+            and backup[80:92] == header[80:92] and backup_entry_size == entry_size
+            and backup_entries == entries, "inconsistent backup GPT")
+    require(last < number(backup, 72, 8)
+            and number(backup, 72, 8) * 512 + len(entries) <= backup_lba * 512,
+            "invalid backup GPT geometry")
+    expected = guid_bytes(expected_guid)
+    esp_type = guid_bytes("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+    esp = None
+    ranges, identifiers = [], set()
+    for offset in range(0, len(entries), entry_size):
+        entry = entries[offset:offset + entry_size]
+        if entry[:16] == bytes(16):
+            continue
+        identifier = entry[16:32]
+        start, end = number(entry, 32, 8), number(entry, 40, 8)
+        require(identifier != bytes(16) and identifier not in identifiers,
+                "duplicate or empty GPT partition GUID")
+        identifiers.add(identifier)
+        require(first <= start <= end <= last, "GPT partition outside usable range")
+        ranges.append((start, end))
+        if identifier == expected:
+            require(entry[:16] == esp_type, "boot GUID is not an EFI system partition")
+            esp = (start * 512, (end - start + 1) * 512)
+    ranges.sort()
+    require(all(left[1] < right[0] for left, right in zip(ranges, ranges[1:])),
+            "overlapping GPT partitions")
+    require(esp is not None, "expected boot ESP is absent")
+    catalog_lba, volume_size = None, None
+    terminated = False
+    for lba in range(16, 48):
+        descriptor = read_at(source, lba * 2048, 2048, medium_size)
+        require(descriptor[1:6] == b"CD001" and descriptor[6] == 1,
+                "invalid ISO volume descriptor")
+        if descriptor[0] == 1:
+            require(volume_size is None, "duplicate primary ISO descriptor")
+            require(descriptor[40:72].rstrip(b" ") == label.encode("ascii"),
+                    "ISO volume identity mismatch")
+            blocks = number(descriptor, 80, 4)
+            require(blocks == int.from_bytes(descriptor[84:88], "big")
+                    and number(descriptor, 128, 2) == 2048
+                    and int.from_bytes(descriptor[130:132], "big") == 2048,
+                    "invalid ISO volume geometry")
+            volume_size = blocks * 2048
+        elif descriptor[0] == 0:
+            require(catalog_lba is None
+                    and descriptor[7:39].rstrip(b"\0 ") == b"EL TORITO SPECIFICATION",
+                    "invalid El Torito descriptor")
+            catalog_lba = number(descriptor, 71, 4)
+        elif descriptor[0] == 255:
+            terminated = True
+            break
+    require(terminated and volume_size is not None and catalog_lba is not None,
+            "missing ISO or El Torito metadata")
+    require(0 < volume_size <= medium_size and (backup_lba + 1) * 512 <= volume_size
+            and (lba + 1) * 2048 <= esp[0] and esp[0] + esp[1] <= volume_size,
+            "ISO and GPT geometry disagree")
+    catalog = read_at(source, catalog_lba * 2048, 2048, volume_size)
+    require(catalog[0] == 1 and catalog[1] == 0xEF and catalog[30:32] == b"\x55\xaa"
+            and sum(number(catalog, offset, 2) for offset in range(0, 32, 2)) % 65536 == 0,
+            "invalid EFI boot catalog")
+    require(catalog[32] == 0x88 and catalog[33] == 0
+            and number(catalog, 40, 4) * 2048 == esp[0]
+            and number(catalog, 38, 2) * 512 <= esp[1],
+            "El Torito image does not match the boot ESP")
+    fat = read_at(source, esp[0], 512, volume_size)
+    require(fat[510:512] == b"\x55\xaa" and fat[82:90] == b"FAT32   "
+            and number(fat, 11, 2) == 512 and number(fat, 19, 2) == 0
+            and number(fat, 32, 4) * 512 == esp[1], "invalid EFI FAT image geometry")
+
+
+def main():
+    require(len(sys.argv) == 4, "usage: validate-live-iso <medium> <ESP GUID> <ISO label>")
+    with open(sys.argv[1], "rb") as source:
+        validate(source, sys.argv[2], sys.argv[3])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        print(f"puu-live-iso: {error}", file=sys.stderr)
+        sys.exit(1)
