@@ -12,7 +12,7 @@ import uuid
 
 FAT_CONFIG = '''image efi.img {
     vfat {
-        extraargs = "-F 32 -i @EFI_VOLUME_ID@"
+        extraargs = "-F 32 -g 64/32 -i @EFI_VOLUME_ID@"
         file EFI {
             image = "efi-part/EFI"
         }
@@ -20,7 +20,7 @@ FAT_CONFIG = '''image efi.img {
             image = "efi-part/loader"
         }
     }
-    size = 256M
+    size = 2G
 }
 '''
 
