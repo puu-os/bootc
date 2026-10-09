@@ -43,4 +43,11 @@ GNOME_SETTINGS_DAEMON_CONF_OPTS = \
 	-Dwwan=false \
 	-Dcolord=false
 
+define GNOME_SETTINGS_DAEMON_INSTALL_PUU_POWER_DEFAULTS
+	$(INSTALL) -D -m 0644 $(GNOME_SETTINGS_DAEMON_PKGDIR)/10-puu-power.gschema.override \
+		$(STAGING_DIR)/usr/share/glib-2.0/schemas/10-puu-power.gschema.override
+endef
+GNOME_SETTINGS_DAEMON_POST_INSTALL_STAGING_HOOKS += \
+	GNOME_SETTINGS_DAEMON_INSTALL_PUU_POWER_DEFAULTS
+
 $(eval $(meson-package))

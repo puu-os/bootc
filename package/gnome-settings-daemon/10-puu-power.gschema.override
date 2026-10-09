@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[org.gnome.settings-daemon.plugins.power]
+sleep-inactive-ac-timeout=0
