@@ -132,6 +132,10 @@ if [ -f "$bluez_main_conf" ]; then
     "$bluez_main_conf"
 fi
 
+sshd_config="${TARGET_DIR}/etc/ssh/sshd_config"
+sed -i '\|^Include /etc/ssh/sshd_config\.d/\*\.conf$|d' "${sshd_config}"
+sed -i '1iInclude /etc/ssh/sshd_config.d/*.conf' "${sshd_config}"
+
 
 DRACUT_ARCH="${PUU_TARGET_ARCH}" "${HOST_DIR}/bin/dracut" \
   --sysroot "${TARGET_DIR}" --force \
