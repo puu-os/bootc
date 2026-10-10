@@ -1,0 +1,271 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import os
+from pathlib import Path
+import socket
+import stat
+import sys
+import unicodedata
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gio, GLib, Gtk
+
+BACKEND = None
+BACKEND_ERROR = ""
+try:
+    module = Path("/usr/libexec/puu/firstboot_state.py")
+    for path in (module, *module.parents):
+        info = path.lstat()
+        expected_type = stat.S_ISREG if path == module else stat.S_ISDIR
+        if not expected_type(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("Unsafe first-boot backend module")
+    sys.path.insert(0, str(module.parent))
+    import firstboot_state as BACKEND
+    if not all(callable(getattr(BACKEND, name, None))
+               for name in ("read_status", "completion_valid")):
+        raise ValueError("Invalid first-boot backend contract")
+except (ImportError, OSError, ValueError, SyntaxError) as error:
+    BACKEND = None
+    BACKEND_ERROR = str(error)
+
+
+def plain(value):
+    return "".join(c for c in str(value)[:32768]
+                   if c in "\n\t" or not unicodedata.category(c).startswith("C"))
+
+
+class Wizard(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="org.puu.Firstboot", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.window = None
+        self.ready = False
+        self.complete = False
+        self.logout_pending = False
+        self.status_text = None
+        self.connect("activate", self.activate_window)
+
+    def label(self, text):
+        return Gtk.Label(label=text, wrap=True, xalign=0, selectable=True)
+
+    def button(self, box, text, callback):
+        button = Gtk.Button(label=text)
+        button.connect("clicked", callback)
+        box.append(button)
+        return button
+
+    def activate_window(self, _app):
+        if self.window is not None:
+            self.window.present()
+            return
+        self.window = Gtk.ApplicationWindow(application=self, title="Puu first-boot setup")
+        self.window.set_default_size(760, 640)
+        self.window.set_deletable(False)
+        self.window.connect("close-request", lambda _window: True)
+        self.window.connect("map", self.window_mapped)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        for setter in (content.set_margin_start, content.set_margin_end,
+                       content.set_margin_top, content.set_margin_bottom):
+            setter(24)
+        outer_scroll = Gtk.ScrolledWindow()
+        outer_scroll.set_child(content)
+        self.window.set_child(outer_scroll)
+        title = self.label("Preparing your Puu system")
+        title.add_css_class("title-1")
+        content.append(title)
+        content.append(self.label("The desktop is locked until system setup is verified. "
+                                  "Downloads and model startup may take a while."))
+        self.message = self.label("Waiting for setup status…")
+        content.append(self.message)
+        self.spinner = Gtk.Spinner(halign=Gtk.Align.START)
+        content.append(self.spinner)
+        scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=180)
+        self.steps = self.label("")
+        self.steps.set_valign(Gtk.Align.START)
+        scroll.set_child(self.steps)
+        content.append(scroll)
+        self.recovery = self.label(
+            "Recovery: open Network or Wi-Fi settings to configure a connection, then Retry. "
+            "Offline or unsupported hardware does not complete setup.\n"
+            "For diagnostics press Ctrl+Alt+F3 and sign in with your existing account, "
+            "or SSH to this machine using an authorized account. Inspect "
+            "journalctl -b -u puu-firstboot-monitor.service and "
+            "/run/puu-firstboot/status.json. Do not create a completion marker manually.")
+        content.append(self.recovery)
+        self.action_message = self.label("")
+        content.append(self.action_message)
+        actions = Gtk.Box(spacing=8)
+        content.append(actions)
+        self.retry_button = self.button(actions, "Retry", self.retry)
+        self.button(actions, "Network settings", self.network)
+        self.button(actions, "Wi-Fi settings", lambda button: self.network(button, "wifi"))
+        self.button(actions, "Log out", self.logout)
+        self.button(actions, "Shut down", self.shutdown)
+        self.continue_button = self.button(content, "Continue — sign in again", self.continue_login)
+        self.continue_button.set_sensitive(False)
+        content.append(self.label("Continue logs you out. Authenticate again at the login screen "
+                                  "to enter the desktop; setup does not replace your account."))
+        self.refresh()
+        GLib.timeout_add_seconds(2, self.refresh)
+        self.window.present()
+
+    def window_mapped(self, _window):
+        GLib.idle_add(self.notify_ready)
+
+    def notify_ready(self):
+        if self.ready:
+            return GLib.SOURCE_REMOVE
+        if not self.get_is_registered() or self.get_dbus_connection() is None:
+            self.action_message.set_text("Application D-Bus registration failed; use TTY/SSH recovery.")
+            return GLib.SOURCE_REMOVE
+        address = os.environ.get("NOTIFY_SOCKET")
+        if address:
+            if address.startswith("@"):
+                address = "\0" + address[1:]
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as connection:
+                    connection.connect(address)
+                    connection.sendall(b"READY=1")
+            except OSError as error:
+                self.action_message.set_text(plain(f"Cannot notify session readiness: {error}"))
+                print(f"Cannot notify session readiness: {error}", file=sys.stderr)
+                return GLib.SOURCE_REMOVE
+        self.ready = True
+        return GLib.SOURCE_REMOVE
+
+    def completion_valid(self):
+        if BACKEND is None:
+            return False
+        try:
+            return BACKEND.completion_valid() is True
+        except (OSError, ValueError) as error:
+            self.action_message.set_text(plain(f"Cannot verify completion: {error}"))
+            return False
+
+    def refresh(self):
+        self.complete = self.completion_valid()
+        self.continue_button.set_sensitive(self.complete and not self.logout_pending)
+        try:
+            if BACKEND is None:
+                raise ValueError(f"Backend unavailable: {BACKEND_ERROR}")
+            status = BACKEND.read_status()
+        except (OSError, ValueError) as error:
+            self.spinner.stop()
+            self.message.set_text("Setup recovery — no current, trusted status is available.")
+            self.steps.set_text(plain(error))
+            self.status_text = None
+            if self.complete:
+                self.message.set_text("Setup completion is verified. Continue to sign in again.")
+            return GLib.SOURCE_CONTINUE
+        self.message.set_text(plain(f"{status['stage']}: {status['message']}"))
+        running = any(step["state"] == "running" for step in status["steps"])
+        self.spinner.set_spinning(running and not self.complete)
+        lines = []
+        states = {"pending": "Waiting", "running": "In progress", "done": "Done", "error": "Needs attention"}
+        for step in status["steps"]:
+            lines.append(f"{step['label']}: {states[step['state']]}\n{step['detail']}")
+        lines.extend(status["details"])
+        text = plain("\n\n".join(lines))
+        if text != self.status_text:
+            self.steps.set_text(text)
+            self.status_text = text
+        if self.complete:
+            self.message.set_text("Setup completion is verified. Continue to sign in again.")
+        elif status["complete"]:
+            self.message.set_text("The backend reports completion, but trusted completion is not verified. "
+                                  "The desktop remains locked.")
+        return GLib.SOURCE_CONTINUE
+
+    def call(self, bus, destination, path, interface, method, parameters, callback):
+        def connected(_source, result):
+            try:
+                connection = Gio.bus_get_finish(result)
+            except GLib.Error as error:
+                callback(error)
+                return
+
+            def finished(source, response):
+                try:
+                    source.call_finish(response)
+                except GLib.Error as error:
+                    callback(error)
+                    return
+                callback(None)
+
+            connection.call(destination, path, interface, method, parameters, None,
+                            Gio.DBusCallFlags.ALLOW_INTERACTIVE_AUTHORIZATION,
+                            15000, None, finished)
+
+        Gio.bus_get(bus, None, connected)
+
+    def retry(self, _button):
+        self.retry_button.set_sensitive(False)
+        self.action_message.set_text("Requesting setup retry…")
+
+        def finished(error):
+            self.retry_button.set_sensitive(True)
+            self.action_message.set_text(plain(f"Retry failed: {error}") if error else
+                                         "Retry requested. Waiting for the backend to update status.")
+
+        self.call(Gio.BusType.SYSTEM, "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+                  "org.freedesktop.systemd1.Manager", "StartUnit",
+                  GLib.Variant("(ss)", ("puu-firstboot-retry.service", "replace")), finished)
+
+    def network(self, _button, panel_id="network"):
+        self.action_message.set_text("Opening the Network recovery panel…")
+
+        def finished(error):
+            self.action_message.set_text(plain(f"Cannot open Network settings: {error}") if error else
+                                         "Network settings requested. Help may open an external viewer; "
+                                         "this does not unlock the GNOME desktop.")
+
+        panel = GLib.Variant("(sav)", (panel_id, []))
+        self.call(Gio.BusType.SESSION, "org.gnome.Settings", "/org/gnome/Settings",
+                  "org.gtk.Actions", "Activate",
+                  GLib.Variant("(sava{sv})", ("launch-single-panel-mode", [panel], {})), finished)
+
+    def continue_login(self, button):
+        if not self.completion_valid():
+            self.continue_button.set_sensitive(False)
+            self.action_message.set_text("Completion is not verified. The desktop remains locked.")
+            return
+        self.logout(button)
+
+    def logout(self, _button):
+        if self.logout_pending:
+            return
+        self.logout_pending = True
+        self.continue_button.set_sensitive(False)
+        self.action_message.set_text("Logging out. Sign in again at the login screen.")
+
+        def finished(error):
+            if error:
+                self.logout_pending = False
+                self.action_message.set_text(plain(f"Log out failed; try again: {error}"))
+                self.refresh()
+            else:
+                GLib.timeout_add_seconds(15, self.logout_timeout)
+
+        self.call(Gio.BusType.SESSION, "org.gnome.SessionManager", "/org/gnome/SessionManager",
+                  "org.gnome.SessionManager", "Logout", GLib.Variant("(u)", (1,)), finished)
+
+    def logout_timeout(self):
+        self.logout_pending = False
+        self.action_message.set_text("The session has not ended. Retry Log out or use TTY/SSH recovery.")
+        self.refresh()
+        return GLib.SOURCE_REMOVE
+
+    def shutdown(self, _button):
+        def finished(error):
+            self.action_message.set_text(plain(f"Shutdown failed: {error}") if error else
+                                         "Shutdown requested.")
+
+        self.call(Gio.BusType.SYSTEM, "org.freedesktop.login1", "/org/freedesktop/login1",
+                  "org.freedesktop.login1.Manager", "PowerOff", GLib.Variant("(b)", (True,)), finished)
+
+
+if __name__ == "__main__":
+    sys.exit(Wizard().run(sys.argv))

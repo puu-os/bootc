@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[Unit]
+Description=Puu first-boot setup wizard
+PartOf=gnome-session@puu-firstboot.target gnome-session-initialized.target
+Requisite=gnome-session-initialized.target
+After=gnome-session-initialized.target org.gnome.Shell@initial-setup.service
+Before=gnome-session@puu-firstboot.target
+Conflicts=gnome-session-shutdown.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/libexec/puu/firstboot-wizard
+Restart=always
+RestartSec=2
+TimeoutStartSec=0
+TimeoutStopSec=5
+Slice=session.slice
+NoNewPrivileges=yes

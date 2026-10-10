@@ -8,6 +8,7 @@ source "$BR2_EXTERNAL_PUU_PATH/package/k3s/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/oksa-crds/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/oksa-services/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/puu-installer/Config.in"
+source "$BR2_EXTERNAL_PUU_PATH/package/puu-firstboot/Config.in"
 
 source "$BR2_EXTERNAL_PUU_PATH/package/libfyaml/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/appstream/Config.in"
