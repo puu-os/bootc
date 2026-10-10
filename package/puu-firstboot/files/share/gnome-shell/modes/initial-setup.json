@@ -1,0 +1,13 @@
+{
+    "parentMode": "restrictive",
+    "hasWindows": true,
+    "hasOverview": false,
+    "hasRunDialog": false,
+    "hasWorkspaces": false,
+    "hasWmMenus": false,
+    "allowSettings": false,
+    "allowScreencast": false,
+    "enabledExtensions": [],
+    "components": ["networkAgent", "polkitAgent"],
+    "panel": {"left": [], "center": [], "right": ["a11y", "keyboard"]}
+}

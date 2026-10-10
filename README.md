@@ -46,6 +46,14 @@ sudo systemd-creds encrypt --with-key=host - /etc/credstore.encrypted/litellm-ma
 sudo systemctl restart puu-k3s-addons.service
 ```
 
+## First boot
+
+After the first login, a new GNOME installation opens a setup session that
+shows service startup, model downloads and readiness. Network settings are
+available, and TTY/SSH can be used for recovery. Setup does not complete until
+the Bonsai model serves requests. When setup completes, Continue returns to the
+login screen and the next login opens GNOME.
+
 ## Development
 
 ### Listing the available boards

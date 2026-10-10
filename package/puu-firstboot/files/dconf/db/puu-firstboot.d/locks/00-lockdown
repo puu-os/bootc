@@ -1,0 +1,8 @@
+/org/gnome/shell/allow-extension-installation
+/org/gnome/shell/disable-user-extensions
+/org/gnome/shell/enabled-extensions
+/org/gnome/shell/development-tools
+/org/gnome/desktop/lockdown/disable-command-line
+/org/gnome/desktop/wm/keybindings/panel-main-menu
+/org/gnome/desktop/wm/keybindings/panel-run-dialog
+/org/gnome/shell/keybindings/toggle-overview

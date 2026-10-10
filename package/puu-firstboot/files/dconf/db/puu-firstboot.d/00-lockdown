@@ -1,0 +1,15 @@
+[org/gnome/shell]
+allow-extension-installation=false
+disable-user-extensions=true
+enabled-extensions=@as []
+development-tools=false
+
+[org/gnome/desktop/lockdown]
+disable-command-line=true
+
+[org/gnome/desktop/wm/keybindings]
+panel-main-menu=@as []
+panel-run-dialog=@as []
+
+[org/gnome/shell/keybindings]
+toggle-overview=@as []
