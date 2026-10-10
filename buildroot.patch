@@ -400,10 +400,10 @@ index d4645c59..97e22e11 100644
 +# Hash for license file
  sha256  b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c  COPYING
 diff --git a/package/libostree/libostree.mk b/package/libostree/libostree.mk
-index a737dc04..8024b3f0 100644
+index a737dc04..166c35e5 100644
 --- a/package/libostree/libostree.mk
 +++ b/package/libostree/libostree.mk
-@@ -4,24 +4,51 @@
+@@ -4,24 +4,49 @@
  #
  ################################################################################
  
@@ -440,14 +440,12 @@ index a737dc04..8024b3f0 100644
 +	--without-curl \
 +	--with-crypto=glib \
 +	--without-ed25519-libsodium \
-+	--without-ed25519-openssl \
 +	--with-gpgme \
  	--with-gpgme-prefix=$(STAGING_DIR)/usr \
 -	--without-soup \
 +	--with-libarchive \
 +	--with-libmount \
 +	--with-libsystemd \
-+	--without-rofiles-fuse \
 +	--with-soup3 \
 +	--with-dracut=yes \
  	--disable-gtk-doc \
@@ -459,7 +457,7 @@ index a737dc04..8024b3f0 100644
  
  ifeq ($(BR2_PACKAGE_GOBJECT_INTROSPECTION),y)
  LIBOSTREE_DEPENDENCIES += gobject-introspection
-@@ -31,48 +58,6 @@ else
+@@ -31,48 +56,6 @@ else
  LIBOSTREE_CONF_OPTS += --disable-introspection
  endif
  
@@ -508,7 +506,7 @@ index a737dc04..8024b3f0 100644
  ifeq ($(BR2_PACKAGE_LIBSELINUX),y)
  LIBOSTREE_CONF_OPTS += --with-selinux
  LIBOSTREE_DEPENDENCIES += libselinux
-@@ -80,13 +65,11 @@ else
+@@ -80,13 +63,5 @@ else
  LIBOSTREE_CONF_OPTS += --without-selinux
  endif
  
@@ -520,12 +518,6 @@ index a737dc04..8024b3f0 100644
 -else
 -LIBOSTREE_CONF_OPTS += --without-libsystemd
 -endif
-+define LIBOSTREE_INSTALL_DRACUT_MODULE
-+	$(INSTALL) -D -m 0755 \
-+		$(@D)/src/boot/dracut/module-setup.sh \
-+		$(TARGET_DIR)/usr/lib/dracut/modules.d/50ostree/module-setup.sh
-+endef
-+LIBOSTREE_POST_INSTALL_TARGET_HOOKS += LIBOSTREE_INSTALL_DRACUT_MODULE
  
  $(eval $(autotools-package))
 diff --git a/package/librsvg/librsvg.mk b/package/librsvg/librsvg.mk
@@ -1294,7 +1286,7 @@ index e96d3ba7..2b05207c 100644
 -sha256  bce1d2e9bad517b493168b37604c5d02a7fb638b4d1b9fc730adafa06c603456  LICENSES/README.md
 +sha256  a817486a61df66ef79f96032763c861abd0edf4199cf39a7b1515a7e29f6e6d0  LICENSES/README.md
 diff --git a/package/systemd/systemd.mk b/package/systemd/systemd.mk
-index 3223915d..2fdd79da 100644
+index 3223915d..07f8f700 100644
 --- a/package/systemd/systemd.mk
 +++ b/package/systemd/systemd.mk
 @@ -19,7 +19,7 @@
@@ -1306,20 +1298,7 @@ index 3223915d..2fdd79da 100644
  SYSTEMD_SITE = $(call github,systemd,systemd,v$(SYSTEMD_VERSION))
  SYSTEMD_LICENSE = \
  	LGPL-2.1+, \
-@@ -65,6 +65,12 @@
- SYSTEMD_PROVIDES = libudev udev
- 
- SYSTEMD_CONF_OPTS += \
-+	-Dsystemd-multicall-binary=false \
-+	-Dstandalone-binaries= \
-+	-Dbuild-static=false \
-+	-Dfallback-default-target=graphical.target \
-+	-Dvar-log-mode=0755 \
-+	-Ddlopen-tests=false \
- 	-Dcreate-log-dirs=false \
- 	-Ddbus=disabled \
- 	-Ddbus-interfaces-dir=no \
-@@ -95,8 +101,6 @@
+@@ -95,8 +95,6 @@
  	-Dsulogin-path=/usr/sbin/sulogin \
  	-Dsystem-gid-max=999 \
  	-Dsystem-uid-max=999 \
@@ -1328,7 +1307,7 @@ index 3223915d..2fdd79da 100644
  	-Dtests=false \
  	-Dfuzz-tests=false \
  	-Dinstall-tests=false \
-@@ -174,22 +178,11 @@
+@@ -174,22 +172,11 @@
  SYSTEMD_CONF_OPTS += -Delfutils=disabled
  endif
  
@@ -1354,7 +1333,7 @@ index 3223915d..2fdd79da 100644
  endif
  
  ifeq ($(BR2_PACKAGE_LIBSECCOMP),y)
-@@ -538,7 +531,6 @@
+@@ -538,7 +525,6 @@
  
  ifeq ($(BR2_PACKAGE_SYSTEMD_POLKIT),y)
  SYSTEMD_CONF_OPTS += -Dpolkit=enabled
@@ -1362,7 +1341,7 @@ index 3223915d..2fdd79da 100644
  else
  SYSTEMD_CONF_OPTS += -Dpolkit=disabled
  endif
-@@ -774,9 +766,9 @@
+@@ -774,9 +760,9 @@
  	fi; \
  	if [ $(call qstrip,$(BR2_TARGET_GENERIC_GETTY_BAUDRATE)) -gt 0 ] ; \
  	then \
@@ -1375,20 +1354,7 @@ index 3223915d..2fdd79da 100644
  		$(SED) 's/115200/$(BR2_TARGET_GENERIC_GETTY_BAUDRATE),115200/' $(TARGET_DIR)/lib/systemd/system/container-getty@.service; \
  	fi
  endef
-@@ -892,6 +884,12 @@
- 
- # We need a very minimal host variant, so we disable as much as possible.
- HOST_SYSTEMD_CONF_OPTS = \
-+	-Dsystemd-multicall-binary=false \
-+	-Dstandalone-binaries= \
-+	-Dbuild-static=false \
-+	-Dfallback-default-target=graphical.target \
-+	-Dvar-log-mode=0755 \
-+	-Ddlopen-tests=false \
- 	-Dsplit-bin=true \
- 	--prefix=/usr \
- 	--libdir=lib \
-@@ -967,7 +965,6 @@
+@@ -967,7 +953,6 @@
  	-Dglib=disabled \
  	-Dlibarchive=disabled \
  	-Dacl=disabled \
@@ -1396,7 +1362,7 @@ index 3223915d..2fdd79da 100644
  	-Dinitrd=false \
  	-Dxdg-autostart=false \
  	-Dkernel-install=false \
-@@ -982,12 +979,10 @@
+@@ -982,12 +967,10 @@
  	-Dlibcryptsetup=disabled \
  	-Dlibcryptsetup-plugins=disabled \
  	-Delfutils=disabled \
