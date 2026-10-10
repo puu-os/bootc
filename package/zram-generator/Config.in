@@ -1,0 +1,15 @@
+config BR2_PACKAGE_ZRAM_GENERATOR
+	bool "zram-generator"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_HOST_RUSTC
+	select BR2_PACKAGE_UTIL_LINUX_BINARIES
+	help
+	  A systemd generator that configures compressed RAM block
+	  devices as swap devices or file systems.
+
+	  https://github.com/systemd/zram-generator
+
+comment "zram-generator needs a systemd init"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on !BR2_INIT_SYSTEMD

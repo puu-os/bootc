@@ -59,3 +59,4 @@ source "$BR2_EXTERNAL_PUU_PATH/package/plymouth/Config.in"
 
 source "$BR2_EXTERNAL_PUU_PATH/package/nvidia-container-toolkit/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/toolbx/Config.in"
+source "$BR2_EXTERNAL_PUU_PATH/package/zram-generator/Config.in"
