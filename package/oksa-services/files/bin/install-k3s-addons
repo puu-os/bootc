@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 from pathlib import Path
+import ipaddress
 import json
 import os
 import secrets
@@ -117,12 +118,13 @@ def node_internal_ip() -> str:
     node = ms.resolve_k3s_node_name()
     if not ms.wait_for_node(node):
         sys.exit(f"node {node} did not register")
-    address = ms.run_kubectl(
+    output = ms.run_kubectl(
         "get", "node", node, "-o", 'jsonpath={.status.addresses[?(@.type=="InternalIP")].address}'
-    ).stdout.strip()
-    if not address:
+    ).stdout
+    addresses = [ipaddress.ip_address(value) for value in output.split()]
+    if not addresses:
         sys.exit(f"node {node} has no internal address")
-    return address
+    return str(next((address for address in addresses if address.version == 4), addresses[0]))
 
 
 def read_litellm_db_password() -> str:
