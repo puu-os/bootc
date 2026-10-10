@@ -11,7 +11,6 @@ PUU_INSTALLER_DEPENDENCIES = \
 	e2fsprogs \
 	fmt \
 	ftxui \
-	host-pkgconf \
 	json-for-modern-cpp \
 	libabseil-cpp \
 	openssl \

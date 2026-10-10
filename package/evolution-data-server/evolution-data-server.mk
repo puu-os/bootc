@@ -8,7 +8,6 @@ EVOLUTION_DATA_SERVER_INSTALL_STAGING = YES
 # Keep msgmerge output separate from the source translations read by msgfmt.
 EVOLUTION_DATA_SERVER_SUPPORTS_IN_SOURCE_BUILD = NO
 EVOLUTION_DATA_SERVER_DEPENDENCIES = \
-	host-pkgconf \
 	icu \
 	json-glib \
 	libglib2 \
