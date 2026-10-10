@@ -1,14 +1,3 @@
-From: Jarkko Sakkinen <jarkko.sakkinen@opinsys.fi>
-Subject: [PATCH] block: mark devices without media unavailable
-
-An empty removable-media device can return ENOMEDIUM when DiskBusy opens
-it exclusively. Propagating that error aborts ListDisks, hiding usable
-target drives as well.
-
-Treat missing media as a per-device unavailable reason. The TUI can keep
-listing other disks, while installation-time validation still rejects the
-empty device. Other open errors continue to propagate.
-
 --- a/src/engine/block.cc
 +++ b/src/engine/block.cc
 @@ -287,6 +287,8 @@ std::string_view BusyReasonText(BusyReason reason) {
