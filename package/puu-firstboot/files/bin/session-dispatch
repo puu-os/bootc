@@ -1,0 +1,110 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import configparser
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+
+LIBEXEC = Path("/usr/libexec/puu")
+MODE = Path("/usr/share/gnome-shell/modes/initial-setup.json")
+PROFILE = "puu-firstboot"
+GATE_ENV = ("GNOME_SHELL_SESSION_MODE", "DCONF_PROFILE", "XDG_CONFIG_HOME",
+            "XDG_CONFIG_DIRS", "XDG_DATA_DIRS")
+EXPECTED_MODE = {
+    "parentMode": "restrictive",
+    "hasWindows": True,
+    "hasOverview": False,
+    "hasRunDialog": False,
+    "hasWorkspaces": False,
+    "hasWmMenus": False,
+    "allowSettings": False,
+    "allowScreencast": False,
+    "enabledExtensions": [],
+    "components": ["networkAgent", "polkitAgent"],
+    "panel": {"left": [], "center": [], "right": ["a11y", "keyboard"]},
+}
+
+
+def trusted_file(path):
+    for directory in path.parents:
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError(f"Unsafe system directory: {directory}")
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError(f"Unsafe system file: {path}")
+    if info.st_size > 65536:
+        raise ValueError(f"Oversized system file: {path}")
+
+
+def restricted_artifacts():
+    trusted_file(MODE)
+    with MODE.open(encoding="utf-8") as stream:
+        mode = json.load(stream)
+    if json.dumps(mode, sort_keys=True) != json.dumps(EXPECTED_MODE, sort_keys=True):
+        raise ValueError("Missing or invalid restricted GNOME Shell mode")
+    session = Path("/usr/share/gnome-session/sessions/puu-firstboot.session")
+    trusted_file(session)
+    config = configparser.ConfigParser()
+    config.read(session, encoding="utf-8")
+    if not config.getboolean("GNOME Session", "Kiosk", fallback=False):
+        raise ValueError("First-boot session is not a kiosk")
+    for path in (
+        LIBEXEC / "firstboot-wizard",
+        Path("/etc/dconf/profile/puu-firstboot"),
+        Path("/etc/dconf/db/puu-firstboot"),
+        Path("/usr/lib/systemd/user/puu-firstboot.service"),
+        Path("/usr/lib/systemd/user/gnome-session@puu-firstboot.target.d/puu-firstboot.conf"),
+    ):
+        trusted_file(path)
+
+
+def main():
+    normal = False
+    try:
+        trusted_file(LIBEXEC / "firstboot_state.py")
+        sys.path.insert(0, str(LIBEXEC))
+        import firstboot_state
+        if not all(callable(getattr(firstboot_state, name, None))
+                   for name in ("is_live", "setup_required", "completion_valid")):
+            raise ValueError("Invalid first-boot backend contract")
+        normal = (firstboot_state.is_live() is True
+                  or firstboot_state.setup_required() is False
+                  or firstboot_state.completion_valid() is True)
+    except (ImportError, OSError, ValueError, SyntaxError) as error:
+        print(f"First-boot backend unavailable; starting restricted recovery: {error}", file=sys.stderr)
+
+    try:
+        subprocess.run(["/usr/bin/systemctl", "--user", "unset-environment", *GATE_ENV],
+                       check=True, timeout=15)
+        if normal:
+            os.environ["GNOME_SHELL_SESSION_MODE"] = "user"
+            os.environ["DCONF_PROFILE"] = "user"
+            os.environ["XDG_CONFIG_HOME"] = str(Path.home() / ".config")
+            os.environ["XDG_CONFIG_DIRS"] = "/etc/xdg"
+            os.environ["XDG_DATA_DIRS"] = "/usr/local/share:/usr/share"
+            session = "gnome"
+        else:
+            restricted_artifacts()
+            os.environ["GNOME_SHELL_SESSION_MODE"] = "initial-setup"
+            os.environ["DCONF_PROFILE"] = PROFILE
+            os.environ["XDG_CONFIG_HOME"] = "/etc/puu-firstboot"
+            os.environ["XDG_CONFIG_DIRS"] = "/etc/puu-firstboot"
+            os.environ["XDG_DATA_DIRS"] = "/usr/share"
+            session = "puu-firstboot"
+        subprocess.run(["/usr/bin/dbus-update-activation-environment", "--systemd", *GATE_ENV],
+                       check=True, timeout=15)
+        os.execv("/usr/bin/gnome-session", ["gnome-session", f"--session={session}"])
+    except (OSError, ValueError, configparser.Error, subprocess.SubprocessError) as error:
+        print(f"Cannot safely start GNOME: {error}. Use Ctrl+Alt+F3 or SSH for recovery.",
+              file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
