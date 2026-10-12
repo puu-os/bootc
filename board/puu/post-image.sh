@@ -207,6 +207,12 @@ cat > "${efi_part}/loader/loader.conf" <<EOF
 timeout 5
 default ${uki_name}
 EOF
+# The live ESP is immutable. Read-only placeholders stop systemd-boot and
+# systemd-stub from creating these files, which breaks some firmware.
+esp_ro_files=(loader/random-seed loader/boot-secret-mixin)
+for file in "${esp_ro_files[@]}"; do
+  : > "${efi_part}/${file}"
+done
 find "${efi_part}" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 "${HOST_DIR}/bin/genimage" \
   --rootpath "${iso_tmp}/empty" \
@@ -214,6 +220,8 @@ find "${efi_part}" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
   --inputpath "${BINARIES_DIR}" \
   --outputpath "${iso_tmp}/root/boot" \
   --config "${iso_tmp}/genimage.cfg"
+"${HOST_DIR}/bin/mattrib" -i "${iso_tmp}/root/boot/efi.img" +r \
+  "${esp_ro_files[@]/#/::/}"
 read -r iso_volume_id iso_disk_guid iso_esp_guid_hex < "${iso_tmp}/metadata"
 iso_date=$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%d%H%M%S00)
 output_iso="puu_${PUU_ARCH}.iso"
