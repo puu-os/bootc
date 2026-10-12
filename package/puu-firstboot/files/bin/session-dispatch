@@ -87,7 +87,11 @@ def main():
             os.environ["DCONF_PROFILE"] = "user"
             os.environ["XDG_CONFIG_HOME"] = str(Path.home() / ".config")
             os.environ["XDG_CONFIG_DIRS"] = "/etc/xdg"
-            os.environ["XDG_DATA_DIRS"] = "/usr/local/share:/usr/share"
+            data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+            os.environ["XDG_DATA_DIRS"] = (
+                f"{data_home}/flatpak/exports/share:/var/lib/flatpak/exports/share:"
+                "/usr/local/share:/usr/share"
+            )
             session = "gnome"
         else:
             restricted_artifacts()
