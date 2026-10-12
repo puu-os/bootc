@@ -89,3 +89,8 @@ define PUU_FIRSTBOOT_INSTALL_INIT_SYSTEMD
 endef
 
 $(eval $(generic-package))
+
+# Local packages otherwise keep their cached scripts across incremental builds.
+$(PUU_FIRSTBOOT_TARGET_RSYNC): $(shell find $(PUU_FIRSTBOOT_SITE) -type f) \
+	$(PUU_FIRSTBOOT_PKGDIR)/puu-firstboot.mk
+$(PUU_FIRSTBOOT_TARGET_CONFIGURE): $(PUU_FIRSTBOOT_TARGET_RSYNC)
