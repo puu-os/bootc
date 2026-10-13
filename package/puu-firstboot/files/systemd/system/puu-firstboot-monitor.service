@@ -2,7 +2,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 [Unit]
-Description=Verify initial Puu AI setup
+Description=Initial system setup monitor
 ConditionKernelCommandLine=!puu.live
 Wants=k3s.service puu-k3s-addons.service puu-vllm-preseed.service
 After=puu-firstboot-homectl.service

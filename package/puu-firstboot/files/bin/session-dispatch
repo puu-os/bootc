@@ -22,11 +22,11 @@ EXPECTED_MODE = {
     "hasRunDialog": False,
     "hasWorkspaces": False,
     "hasWmMenus": False,
-    "allowSettings": False,
+    "allowSettings": True,
     "allowScreencast": False,
     "enabledExtensions": [],
     "components": ["networkAgent", "polkitAgent"],
-    "panel": {"left": [], "center": [], "right": ["a11y", "keyboard"]},
+    "panel": {"left": [], "center": [], "right": ["quickSettings", "a11y", "keyboard"]},
 }
 
 
