@@ -17,14 +17,14 @@ import firstboot_state as fs
 
 NAMESPACE = "puu-ai"
 STEP_LABELS = (
-    ("identity", "Account provisioning and enrollment"),
+    ("identity", "User account"),
     ("services", "System services"),
-    ("addons", "Cluster add-ons"),
-    ("downloads", "Images and model files"),
-    ("model", "Bonsai model"),
-    ("gateway", "Public API routes"),
-    ("webui", "AI desktop service"),
-    ("verification", "Real model response"),
+    ("addons", "Base components"),
+    ("downloads", "System downloads"),
+    ("model", "AI model runtime"),
+    ("gateway", "API gateway"),
+    ("webui", "Desktop services"),
+    ("verification", "System verification"),
 )
 
 
@@ -45,6 +45,9 @@ class Progress:
         self.steps = [{"id": key, "label": label, "state": "pending", "detail": ""} for key, label in STEP_LABELS]
         self.details = []
         self.stage = "services"
+
+    def reset_cycle(self):
+        self.details = []
 
     def publish(self, stage, message, state="running", complete=False):
         self.stage = stage
@@ -186,7 +189,7 @@ def resource(resources, kind, name):
     for item in resources:
         if item.get("kind") == kind and item.get("metadata", {}).get("name") == name:
             return item
-    raise Pending("addons", "Cluster components are still being installed.")
+    raise Pending("addons", "Base system components are still being installed.")
 
 
 def ip_literal(value):
@@ -351,7 +354,7 @@ def static_model_mapping(response):
 
 
 def unit_checks(progress):
-    states = {unit: fs.unit_state(unit) for unit in fs.RETRY_UNITS if unit != "puu-firstboot-monitor.service"}
+    states = {unit: fs.unit_state(unit) for unit in fs.CORE_UNITS}
     for unit in ("k3s.service", "postgresql.service", "avahi-daemon.service"):
         value = states[unit]
         if value.get("ActiveState") != "active" or value.get("SubState") != "running":
@@ -367,7 +370,7 @@ def unit_checks(progress):
     if preseed.get("ActiveState") == "activating":
         progress.details.append("Catalog model downloads are in progress; existing download files are reused.")
     elif preseed.get("ActiveState") == "failed":
-        progress.details.append("Catalog downloads need attention; retry resumes the normal download service.")
+        progress.details.append("Catalog downloads need attention; checking network connection.")
     return states
 
 
@@ -393,8 +396,8 @@ def referenced_configmaps(deployments):
 
 
 def snapshot(progress):
-    progress.publish("addons", "Checking installed workloads and current public routes.")
     unit_checks(progress)
+    progress.publish("addons", "Configuring base components.")
     jobs = items(kube_json("get", "jobs,pods", "-n", "kube-system"))
     progress.details.extend(pod_details(jobs))
     for job in jobs:
@@ -402,10 +405,10 @@ def snapshot(progress):
             continue
         if not any(c.get("type") == "Complete" and c.get("status") == "True" for c in job.get("status", {}).get("conditions", [])):
             failed = any(c.get("type") == "Failed" and c.get("status") == "True" for c in job.get("status", {}).get("conditions", []))
-            raise Pending("addons", "Cluster installation jobs are still running or need connectivity to download images.", failed)
+            raise Pending("addons", "Downloading and installing base components.", failed)
     resources = items(kube_json("get", "deployments,replicasets,pods,services,endpointslices,gateways,httproutes,configmaps", "-n", NAMESPACE))
     progress.details.extend(pod_details(resources))
-    progress.publish("addons", "Cluster add-on installation completed.", "done")
+    progress.publish("addons", "Base components installed.", "done")
     nodes = items(kube_json("get", "nodes"))
     if not any(
         node.get("metadata", {}).get("labels", {}).get("puu.ai/cuda-ready") == "true"
@@ -414,7 +417,7 @@ def snapshot(progress):
         and int(node.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu", "0")) > 0
         for node in nodes
     ):
-        raise Pending("model", "Bonsai requires a supported NVIDIA GPU. No ready GPU is available; check hardware and drivers.", True)
+        raise Pending("model", "Supported NVIDIA GPU not detected. Check hardware and driver configuration.", True)
     deployments = {}
     services = {}
     for name, stage in ((fs.MODEL, "model"), ("litellm", "gateway"), ("open-webui", "webui")):
@@ -423,14 +426,19 @@ def snapshot(progress):
         deployments[name] = deployment
         services[name] = service
         if not deployment_ready(deployment) or not ready_endpoint(resources, service, current_pods(resources, deployment)):
-            message = "Bonsai is waiting for image/model downloads or loading; no download percentage is available." if name == fs.MODEL else name + " is starting or downloading its image."
+            if name == fs.MODEL:
+                message = "Downloading and loading AI model…"
+            elif name == "litellm":
+                message = "Starting API gateway…"
+            else:
+                message = "Starting desktop services…"
             raise Pending(stage, message)
     containers = deployments["open-webui"]["spec"]["template"]["spec"]["containers"]
     if not any(container.get("name") == "open-webui" and any(
         env.get("name") == "DEFAULT_MODELS" and env.get("value") == fs.MODEL
         for env in container.get("env", [])
     ) for container in containers):
-        raise Pending("model", "Waiting for the configured Bonsai desktop default.", True)
+        raise Pending("model", "Configuring AI model defaults…", True)
     gateway_class = kube_json("get", "gatewayclass", "agentgateway")
     controller = gateway_class.get("spec", {}).get("controllerName")
     if not isinstance(controller, str) or not controller or "envoy" in controller.lower():
@@ -450,7 +458,7 @@ def snapshot(progress):
     config_names = referenced_configmaps(deployments)
     configs = [r for r in resources if r.get("kind") == "ConfigMap" and r["metadata"]["name"] in config_names]
     if {r["metadata"]["name"] for r in configs} != config_names:
-        raise Pending("addons", "Waiting for current workload configuration records.")
+        raise Pending("addons", "Configuring service components…")
     fingerprint = hashlib.sha256(json.dumps([
         [(r["kind"], r["metadata"]["uid"], r["metadata"].get("generation"), r.get("spec")) for r in critical],
         [(p["metadata"]["uid"], p.get("spec"), p.get("status", {}).get("containerStatuses"))
@@ -466,40 +474,40 @@ def snapshot(progress):
 
 def verify(progress):
     if fs.pending_identity():
-        raise Pending("identity", "Initial account provisioning is still pending. Retry after checking the account service.", True)
+        raise Pending("identity", "User account preparation is in progress.", True)
     enrollment = fs.read_enrollment()
     if enrollment is None:
-        raise Pending("identity", "Initial setup has not been durably enrolled. Account provisioning needs recovery.", True)
-    progress.publish("identity", "Initial account provisioning and enrollment are complete.", "done")
+        raise Pending("identity", "User account setup is not complete.", True)
+    progress.publish("identity", "User account setup complete.", "done")
     address, key, services, fingerprint = snapshot(progress)
-    progress.publish("downloads", "Required workload images and model are ready; catalog downloads may continue independently.", "done")
-    progress.publish("model", "Checking Bonsai health and its served model identity.")
+    progress.publish("downloads", "System downloads complete.", "done")
+    progress.publish("model", "Verifying AI runtime health.")
     model_address = service_address(services[fs.MODEL], 8000)
     http_request(model_address, 8000, "/health")
-    progress.publish("model", "Checking the Bonsai served model listing.")
+    progress.publish("model", "Verifying AI model availability.")
     models = http_request(model_address, 8000, "/v1/models")
     if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
         isinstance(model, dict) and model.get("id") == fs.SERVED_MODEL for model in models["data"]
     ):
-        raise Pending("model", "Bonsai is not yet exposing the required served model.")
-    progress.publish("model", "Bonsai is ready and exposes the required model.", "done")
-    progress.publish("gateway", "Checking the configured static Bonsai backend mapping.")
+        raise Pending("model", "AI runtime is initializing.")
+    progress.publish("model", "AI model runtime is ready.", "done")
+    progress.publish("gateway", "Checking API gateway configuration.")
     mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
     if not static_model_mapping(mapping):
-        raise Pending("gateway", "Waiting for the configured static Bonsai API mapping.", True)
-    progress.publish("gateway", "Checking the public API model listing through api.puu.local.")
+        raise Pending("gateway", "Waiting for API gateway configuration.", True)
+    progress.publish("gateway", "Checking API route.")
     models = http_request(address, 80, "/v1/models", "api.puu.local", key)
     if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
         isinstance(model, dict) and model.get("id") == fs.MODEL for model in models["data"]
     ):
-        raise Pending("gateway", "The public API has not exposed the configured Bonsai model yet.")
-    progress.publish("gateway", "Current public gateway and API route are ready.", "done")
-    progress.publish("webui", "Checking desktop health through puu.local.")
+        raise Pending("gateway", "Waiting for API routes to become active.")
+    progress.publish("gateway", "API gateway and routes are ready.", "done")
+    progress.publish("webui", "Checking desktop services.")
     health = http_request(address, 80, "/health", "puu.local")
     if not isinstance(health, dict) or health.get("status") is not True:
-        raise Pending("webui", "The AI desktop service is not healthy yet.")
-    progress.publish("webui", "The AI desktop service is healthy through its public route.", "done")
-    progress.publish("verification", "Requesting one real Bonsai token through api.puu.local. This can take a moment.")
+        raise Pending("webui", "Desktop services are starting.")
+    progress.publish("webui", "Desktop services are ready.", "done")
+    progress.publish("verification", "Verifying system response.")
     response = http_request(address, 80, "/v1/chat/completions", "api.puu.local", key, {
         "model": fs.MODEL,
         "messages": [{"role": "user", "content": "Say hello."}],
@@ -507,15 +515,15 @@ def verify(progress):
         "stream": False,
     })
     if not chat_valid(response):
-        raise Pending("verification", "Waiting for a valid response from the actual Bonsai model through the public API.")
-    progress.publish("verification", "Rechecking the static Bonsai backend mapping after its public response.")
+        raise Pending("verification", "Waiting for verification response.")
+    progress.publish("verification", "Verifying configuration.")
     mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
     if not static_model_mapping(mapping):
-        raise Pending("verification", "The Bonsai backend mapping changed. Checking the current configuration again.")
-    progress.publish("verification", "Bonsai responded. Rechecking workload and route identities before saving completion.")
+        raise Pending("verification", "Verifying configuration changes.")
+    progress.publish("verification", "Rechecking configuration.")
     if snapshot(progress)[3] != fingerprint:
-        raise Pending("verification", "Workloads or routes changed during verification. Checking the current configuration again.")
-    progress.publish("verification", "Saving verified initial setup completion.")
+        raise Pending("verification", "System state changed during verification. Rechecking.")
+    progress.publish("verification", "Saving setup completion status.")
     fs.atomic_record(fs.COMPLETION_PATH, {
         "schema": 1,
         "machine_id": fs.machine_id(),
@@ -547,9 +555,9 @@ def main():
     if fs.completion_valid():
         progress.publish("complete", "Initial setup complete.", complete=True)
         return 0
-    progress.publish("services", "Preparing initial setup. Downloads and model loading may take a while.")
+    progress.publish("services", "Preparing initial setup…")
     while True:
-        progress = Progress()
+        progress.reset_cycle()
         try:
             if not fs.setup_required():
                 return 0
@@ -558,7 +566,7 @@ def main():
         except Pending as pending:
             progress.publish(pending.stage, pending.message, "error" if pending.error else "running")
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.TimeoutExpired, http.client.HTTPException):
-            progress.publish(progress.stage, "A service is unavailable or returned invalid data. Check connectivity; setup will keep retrying.", "error")
+            progress.publish(progress.stage, "Waiting for connectivity and service availability.", "error")
         time.sleep(5)
 
 
