@@ -23,7 +23,7 @@ MODEL = "bonsai-2-27b"
 SERVED_MODEL = "Bonsai-2-27B"
 MAX_BYTES = 1024 * 1024
 STATUS_TTL = 180
-RETRY_UNITS = (
+CORE_UNITS = (
     "puu-firstboot-homectl.service",
     "k3s.service",
     "postgresql.service",
@@ -33,7 +33,6 @@ RETRY_UNITS = (
     "puu-model-serving-labeler.service",
     "avahi-daemon.service",
     "puu-mdns-alias.service",
-    "puu-firstboot-monitor.service",
 )
 
 
