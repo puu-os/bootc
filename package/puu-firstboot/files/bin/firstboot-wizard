@@ -12,7 +12,8 @@ import unicodedata
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gio, GLib, Gtk
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk
 
 BACKEND = None
 BACKEND_ERROR = ""
@@ -38,76 +39,108 @@ def plain(value):
                    if c in "\n\t" or not unicodedata.category(c).startswith("C"))
 
 
-class Wizard(Gtk.Application):
+class Wizard(Adw.Application):
     def __init__(self):
         super().__init__(application_id="org.puu.Firstboot", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.window = None
         self.ready = False
         self.complete = False
-        self.logout_pending = False
-        self.status_text = None
+        self.finishing = False
+        self.status_start_time = GLib.get_monotonic_time()
         self.connect("activate", self.activate_window)
-
-    def label(self, text):
-        return Gtk.Label(label=text, wrap=True, xalign=0, selectable=True)
-
-    def button(self, box, text, callback):
-        button = Gtk.Button(label=text)
-        button.connect("clicked", callback)
-        box.append(button)
-        return button
 
     def activate_window(self, _app):
         if self.window is not None:
             self.window.present()
             return
-        self.window = Gtk.ApplicationWindow(application=self, title="Puu first-boot setup")
-        self.window.set_default_size(760, 640)
+
+        self.window = Adw.ApplicationWindow(application=self, title="System Setup")
+        self.window.set_default_size(680, 560)
+        self.window.set_resizable(False)
         self.window.set_deletable(False)
         self.window.connect("close-request", lambda _window: True)
         self.window.connect("map", self.window_mapped)
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        for setter in (content.set_margin_start, content.set_margin_end,
-                       content.set_margin_top, content.set_margin_bottom):
-            setter(24)
-        outer_scroll = Gtk.ScrolledWindow()
-        outer_scroll.set_child(content)
-        self.window.set_child(outer_scroll)
-        title = self.label("Preparing your Puu system")
-        title.add_css_class("title-1")
-        content.append(title)
-        content.append(self.label("The desktop is locked until system setup is verified. "
-                                  "Downloads and model startup may take a while."))
-        self.message = self.label("Waiting for setup status…")
-        content.append(self.message)
-        self.spinner = Gtk.Spinner(halign=Gtk.Align.START)
-        content.append(self.spinner)
-        scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=180)
-        self.steps = self.label("")
-        self.steps.set_valign(Gtk.Align.START)
-        scroll.set_child(self.steps)
-        content.append(scroll)
-        self.recovery = self.label(
-            "Recovery: open Network or Wi-Fi settings to configure a connection, then Retry. "
-            "Offline or unsupported hardware does not complete setup.\n"
-            "For diagnostics press Ctrl+Alt+F3 and sign in with your existing account, "
-            "or SSH to this machine using an authorized account. Inspect "
-            "journalctl -b -u puu-firstboot-monitor.service and "
-            "/run/puu-firstboot/status.json. Do not create a completion marker manually.")
-        content.append(self.recovery)
-        self.action_message = self.label("")
-        content.append(self.action_message)
-        actions = Gtk.Box(spacing=8)
-        content.append(actions)
-        self.retry_button = self.button(actions, "Retry", self.retry)
-        self.button(actions, "Network settings", self.network)
-        self.button(actions, "Wi-Fi settings", lambda button: self.network(button, "wifi"))
-        self.button(actions, "Log out", self.logout)
-        self.button(actions, "Shut down", self.shutdown)
-        self.continue_button = self.button(content, "Continue — sign in again", self.continue_login)
-        self.continue_button.set_sensitive(False)
-        content.append(self.label("Continue logs you out. Authenticate again at the login screen "
-                                  "to enter the desktop; setup does not replace your account."))
+
+        header_bar = Adw.HeaderBar()
+        header_bar.set_show_title(False)
+        header_bar.set_decoration_layout("")
+
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_top_bar(header_bar)
+
+        self.stack = Adw.ViewStack()
+
+        self.progress_page = Adw.StatusPage(
+            icon_name="system-run-symbolic",
+            title="Setting Up Your Computer",
+            description="Please wait while initial setup completes.",
+        )
+        progress_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.progress_bar = Gtk.ProgressBar(show_text=False)
+        self.progress_bar.set_fraction(0.05)
+        self.status_label = Gtk.Label(label="Initializing…", wrap=True, justify=Gtk.Justification.CENTER)
+        self.status_label.add_css_class("dim-label")
+        progress_box.append(self.progress_bar)
+        progress_box.append(self.status_label)
+        clamp_progress = Adw.Clamp(maximum_size=420)
+        clamp_progress.set_child(progress_box)
+        self.progress_page.set_child(clamp_progress)
+        self.stack.add_named(self.progress_page, "progress")
+
+        self.complete_page = Adw.StatusPage(
+            icon_name="emblem-ok-symbolic",
+            title="Setup Complete",
+            description="Your computer is configured and ready to use. Select Get Started to begin.",
+        )
+        complete_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.finish_button = Gtk.Button(label="Get Started")
+        self.finish_button.add_css_class("suggested-action")
+        self.finish_button.add_css_class("pill")
+        self.finish_button.connect("clicked", self.finish_setup)
+        complete_box.append(self.finish_button)
+        clamp_complete = Adw.Clamp(maximum_size=280)
+        clamp_complete.set_child(complete_box)
+        self.complete_page.set_child(clamp_complete)
+        self.stack.add_named(self.complete_page, "complete")
+
+        self.error_page = Adw.StatusPage(
+            icon_name="network-offline-symbolic",
+            title="Setup Paused",
+            description="An internet connection or check is required to continue.",
+        )
+        error_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.network_button = Gtk.Button(label="Open Network Settings")
+        self.network_button.add_css_class("suggested-action")
+        self.network_button.add_css_class("pill")
+        self.network_button.connect("clicked", self.open_network)
+        error_box.append(self.network_button)
+
+        topbar_hint = Gtk.Label(
+            label="You can also connect to Wi-Fi or configure network settings from the top bar menu.",
+            wrap=True,
+            justify=Gtk.Justification.CENTER,
+        )
+        topbar_hint.add_css_class("dim-label")
+        topbar_hint.add_css_class("caption")
+        error_box.append(topbar_hint)
+
+        self.details_expander = Gtk.Expander(label="Technical Details")
+        self.details_label = Gtk.Label(label="", wrap=True, selectable=True, xalign=0)
+        self.details_label.add_css_class("dim-label")
+        self.details_label.add_css_class("monospace")
+        details_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=100)
+        details_scroll.set_child(self.details_label)
+        self.details_expander.set_child(details_scroll)
+        error_box.append(self.details_expander)
+
+        clamp_error = Adw.Clamp(maximum_size=520)
+        clamp_error.set_child(error_box)
+        self.error_page.set_child(clamp_error)
+        self.stack.add_named(self.error_page, "error")
+
+        toolbar_view.set_content(self.stack)
+        self.window.set_content(toolbar_view)
+        self.stack.set_visible_child_name("progress")
         self.refresh()
         GLib.timeout_add_seconds(2, self.refresh)
         self.window.present()
@@ -119,7 +152,6 @@ class Wizard(Gtk.Application):
         if self.ready:
             return GLib.SOURCE_REMOVE
         if not self.get_is_registered() or self.get_dbus_connection() is None:
-            self.action_message.set_text("Application D-Bus registration failed; use TTY/SSH recovery.")
             return GLib.SOURCE_REMOVE
         address = os.environ.get("NOTIFY_SOCKET")
         if address:
@@ -130,7 +162,6 @@ class Wizard(Gtk.Application):
                     connection.connect(address)
                     connection.sendall(b"READY=1")
             except OSError as error:
-                self.action_message.set_text(plain(f"Cannot notify session readiness: {error}"))
                 print(f"Cannot notify session readiness: {error}", file=sys.stderr)
                 return GLib.SOURCE_REMOVE
         self.ready = True
@@ -141,42 +172,76 @@ class Wizard(Gtk.Application):
             return False
         try:
             return BACKEND.completion_valid() is True
-        except (OSError, ValueError) as error:
-            self.action_message.set_text(plain(f"Cannot verify completion: {error}"))
+        except (OSError, ValueError):
             return False
 
     def refresh(self):
         self.complete = self.completion_valid()
-        self.continue_button.set_sensitive(self.complete and not self.logout_pending)
+        if self.complete:
+            self.stack.set_visible_child_name("complete")
+            return GLib.SOURCE_CONTINUE
+
         try:
             if BACKEND is None:
-                raise ValueError(f"Backend unavailable: {BACKEND_ERROR}")
+                raise ValueError(f"Backend module unavailable: {BACKEND_ERROR}")
             status = BACKEND.read_status()
+            self.status_start_time = None
         except (OSError, ValueError) as error:
-            self.spinner.stop()
-            self.message.set_text("Setup recovery — no current, trusted status is available.")
-            self.steps.set_text(plain(error))
-            self.status_text = None
-            if self.complete:
-                self.message.set_text("Setup completion is verified. Continue to sign in again.")
+            now = GLib.get_monotonic_time()
+            if self.status_start_time is None:
+                self.status_start_time = now
+            elapsed = (now - self.status_start_time) / 1_000_000
+
+            if BACKEND is None or elapsed > 10:
+                self.stack.set_visible_child_name("error")
+                self.error_page.set_icon_name("dialog-warning-symbolic")
+                self.error_page.set_title("Setup Service Unresponsive" if BACKEND is not None else "Setup Unavailable")
+                self.error_page.set_description(
+                    "Waiting for the background setup service to report status." if BACKEND is not None
+                    else "The first-boot setup backend could not be initialized."
+                )
+                self.network_button.set_visible(False)
+                self.details_label.set_text(plain(error))
+            else:
+                self.stack.set_visible_child_name("progress")
+                self.status_label.set_text("Starting setup…")
+                self.details_label.set_text(plain(error))
             return GLib.SOURCE_CONTINUE
-        self.message.set_text(plain(f"{status['stage']}: {status['message']}"))
-        running = any(step["state"] == "running" for step in status["steps"])
-        self.spinner.set_spinning(running and not self.complete)
-        lines = []
-        states = {"pending": "Waiting", "running": "In progress", "done": "Done", "error": "Needs attention"}
-        for step in status["steps"]:
-            lines.append(f"{step['label']}: {states[step['state']]}\n{step['detail']}")
-        lines.extend(status["details"])
-        text = plain("\n\n".join(lines))
-        if text != self.status_text:
-            self.steps.set_text(text)
-            self.status_text = text
-        if self.complete:
-            self.message.set_text("Setup completion is verified. Continue to sign in again.")
-        elif status["complete"]:
-            self.message.set_text("The backend reports completion, but trusted completion is not verified. "
-                                  "The desktop remains locked.")
+
+        steps = status.get("steps", [])
+        has_error = any(step.get("state") == "error" for step in steps)
+        if has_error:
+            self.stack.set_visible_child_name("error")
+            msg = status.get("message", "")
+            if any(term in msg.lower() for term in ("network", "connect", "download", "offline", "image")):
+                self.error_page.set_icon_name("network-offline-symbolic")
+                self.error_page.set_title("Network Connection Required")
+                self.error_page.set_description("An internet connection is required to download components.")
+                self.network_button.set_visible(True)
+            else:
+                self.error_page.set_icon_name("dialog-warning-symbolic")
+                self.error_page.set_title("Setup Needs Attention")
+                self.error_page.set_description(plain(msg) or "Initial system setup encountered an issue.")
+                self.network_button.set_visible(False)
+            details = [msg] if msg else []
+            details.extend(status.get("details", []))
+            self.details_label.set_text(plain("\n".join(details)))
+            return GLib.SOURCE_CONTINUE
+
+        self.stack.set_visible_child_name("progress")
+        done_count = sum(1 for step in steps if step.get("state") == "done")
+        total_count = max(len(steps), 1)
+        fraction = max(done_count / total_count, 0.05)
+        self.progress_bar.set_fraction(fraction)
+
+        active_step = next((step for step in steps if step.get("state") == "running"), None)
+        if active_step:
+            self.status_label.set_text(plain(active_step.get("label", "")) + "…")
+        elif status.get("message"):
+            self.status_label.set_text(plain(status["message"]))
+        else:
+            self.status_label.set_text("Configuring system…")
+
         return GLib.SOURCE_CONTINUE
 
     def call(self, bus, destination, path, interface, method, parameters, callback):
@@ -201,70 +266,33 @@ class Wizard(Gtk.Application):
 
         Gio.bus_get(bus, None, connected)
 
-    def retry(self, _button):
-        self.retry_button.set_sensitive(False)
-        self.action_message.set_text("Requesting setup retry…")
-
-        def finished(error):
-            self.retry_button.set_sensitive(True)
-            self.action_message.set_text(plain(f"Retry failed: {error}") if error else
-                                         "Retry requested. Waiting for the backend to update status.")
-
-        self.call(Gio.BusType.SYSTEM, "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
-                  "org.freedesktop.systemd1.Manager", "StartUnit",
-                  GLib.Variant("(ss)", ("puu-firstboot-retry.service", "replace")), finished)
-
-    def network(self, _button, panel_id="network"):
-        self.action_message.set_text("Opening the Network recovery panel…")
-
-        def finished(error):
-            self.action_message.set_text(plain(f"Cannot open Network settings: {error}") if error else
-                                         "Network settings requested. Help may open an external viewer; "
-                                         "this does not unlock the GNOME desktop.")
-
-        panel = GLib.Variant("(sav)", (panel_id, []))
+    def open_network(self, _button):
+        panel = GLib.Variant("(sav)", ("network", []))
         self.call(Gio.BusType.SESSION, "org.gnome.Settings", "/org/gnome/Settings",
                   "org.gtk.Actions", "Activate",
-                  GLib.Variant("(sava{sv})", ("launch-single-panel-mode", [panel], {})), finished)
+                  GLib.Variant("(sava{sv})", ("launch-single-panel-mode", [panel], {})),
+                  lambda _error: None)
 
-    def continue_login(self, button):
-        if not self.completion_valid():
-            self.continue_button.set_sensitive(False)
-            self.action_message.set_text("Completion is not verified. The desktop remains locked.")
+    def finish_setup(self, button):
+        if not self.completion_valid() or self.finishing:
             return
-        self.logout(button)
+        self.finishing = True
+        button.set_sensitive(False)
 
-    def logout(self, _button):
-        if self.logout_pending:
-            return
-        self.logout_pending = True
-        self.continue_button.set_sensitive(False)
-        self.action_message.set_text("Logging out. Sign in again at the login screen.")
+        def timeout_reset():
+            self.finishing = False
+            button.set_sensitive(True)
+            return GLib.SOURCE_REMOVE
 
         def finished(error):
             if error:
-                self.logout_pending = False
-                self.action_message.set_text(plain(f"Log out failed; try again: {error}"))
-                self.refresh()
+                self.finishing = False
+                button.set_sensitive(True)
             else:
-                GLib.timeout_add_seconds(15, self.logout_timeout)
+                GLib.timeout_add_seconds(10, timeout_reset)
 
         self.call(Gio.BusType.SESSION, "org.gnome.SessionManager", "/org/gnome/SessionManager",
                   "org.gnome.SessionManager", "Logout", GLib.Variant("(u)", (1,)), finished)
-
-    def logout_timeout(self):
-        self.logout_pending = False
-        self.action_message.set_text("The session has not ended. Retry Log out or use TTY/SSH recovery.")
-        self.refresh()
-        return GLib.SOURCE_REMOVE
-
-    def shutdown(self, _button):
-        def finished(error):
-            self.action_message.set_text(plain(f"Shutdown failed: {error}") if error else
-                                         "Shutdown requested.")
-
-        self.call(Gio.BusType.SYSTEM, "org.freedesktop.login1", "/org/freedesktop/login1",
-                  "org.freedesktop.login1.Manager", "PowerOff", GLib.Variant("(b)", (True,)), finished)
 
 
 if __name__ == "__main__":
