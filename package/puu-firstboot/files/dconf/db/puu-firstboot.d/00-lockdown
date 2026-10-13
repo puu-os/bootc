@@ -13,3 +13,6 @@ panel-run-dialog=@as []
 
 [org/gnome/shell/keybindings]
 toggle-overview=@as []
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0

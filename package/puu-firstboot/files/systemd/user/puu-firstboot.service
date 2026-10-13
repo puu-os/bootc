@@ -2,7 +2,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 [Unit]
-Description=Puu first-boot setup wizard
+Description=Initial system setup wizard
 PartOf=gnome-session@puu-firstboot.target gnome-session-initialized.target
 Requisite=gnome-session-initialized.target
 After=gnome-session-initialized.target org.gnome.Shell@initial-setup.service
