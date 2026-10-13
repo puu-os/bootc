@@ -14,6 +14,7 @@ PUU_FIRSTBOOT_DEPENDENCIES = \
 	gnome-settings-daemon \
 	gnome-shell \
 	host-dconf \
+	libadwaita \
 	libgtk4 \
 	oksa-services \
 	python3 \
@@ -21,10 +22,9 @@ PUU_FIRSTBOOT_DEPENDENCIES = \
 	systemd
 
 PUU_FIRSTBOOT_GUI_SCRIPTS = session-dispatch firstboot-wizard
-PUU_FIRSTBOOT_BACKEND_SCRIPTS = firstboot-enroll firstboot-monitor firstboot-retry
+PUU_FIRSTBOOT_BACKEND_SCRIPTS = firstboot-enroll firstboot-monitor
 PUU_FIRSTBOOT_SYSTEM_UNITS = \
 	puu-firstboot-monitor.service \
-	puu-firstboot-retry.service \
 	puu-firstboot-homectl.service.d/puu-firstboot.conf
 PUU_FIRSTBOOT_USER_FILES = \
 	puu-firstboot.service \
@@ -38,7 +38,6 @@ PUU_FIRSTBOOT_DCONF_FILES = \
 	profile/puu-firstboot \
 	db/puu-firstboot.d/00-lockdown \
 	db/puu-firstboot.d/locks/00-lockdown
-PUU_FIRSTBOOT_POLKIT_FILES = 50-puu-firstboot.rules
 
 define PUU_FIRSTBOOT_INSTALL_TARGET_CMDS
 	$(foreach script,$(PUU_FIRSTBOOT_GUI_SCRIPTS) $(PUU_FIRSTBOOT_BACKEND_SCRIPTS),\
@@ -72,10 +71,6 @@ define PUU_FIRSTBOOT_INSTALL_TARGET_CMDS
 	$(HOST_DIR)/bin/dconf compile $(TARGET_DIR)/etc/dconf/db/puu-firstboot \
 		$(@D)/dconf/db/puu-firstboot.d
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/puu-firstboot
-	for file in $(PUU_FIRSTBOOT_POLKIT_FILES); do \
-		$(INSTALL) -D -m 0644 $(@D)/polkit-1/rules.d/$$file \
-			$(TARGET_DIR)/usr/share/polkit-1/rules.d/$$file || exit $$?; \
-	done
 endef
 
 define PUU_FIRSTBOOT_INSTALL_INIT_SYSTEMD
