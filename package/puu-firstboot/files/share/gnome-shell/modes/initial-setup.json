@@ -5,9 +5,9 @@
     "hasRunDialog": false,
     "hasWorkspaces": false,
     "hasWmMenus": false,
-    "allowSettings": false,
+    "allowSettings": true,
     "allowScreencast": false,
     "enabledExtensions": [],
     "components": ["networkAgent", "polkitAgent"],
-    "panel": {"left": [], "center": [], "right": ["a11y", "keyboard"]}
+    "panel": {"left": [], "center": [], "right": ["quickSettings", "a11y", "keyboard"]}
 }

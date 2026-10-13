@@ -6,3 +6,4 @@
 /org/gnome/desktop/wm/keybindings/panel-main-menu
 /org/gnome/desktop/wm/keybindings/panel-run-dialog
 /org/gnome/shell/keybindings/toggle-overview
+/org/gnome/desktop/session/idle-delay
