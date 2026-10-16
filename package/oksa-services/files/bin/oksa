@@ -502,6 +502,10 @@ def main() -> None:
     krevoke = key_sub.add_parser("revoke", help="Revoke an AI key")
     krevoke.add_argument("key", help="Key token or alias to revoke")
 
+    web_parser = subparsers.add_parser("web", help="Start the Oksa web management dashboard")
+    web_parser.add_argument("--host", default="0.0.0.0", help="Listen host address (default: 0.0.0.0)")
+    web_parser.add_argument("--port", type=int, default=8088, help="Listen port (default: 8088)")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -544,5 +548,10 @@ def main() -> None:
         elif args.key_command == "revoke":
             cmd_key_revoke(args.key)
 
+    elif args.command == "web":
+        web_bin = resolve_helper("oksa-web")
+        if not web_bin.is_file() or not os.access(web_bin, os.X_OK):
+            die(f"web helper not found: {web_bin}")
+        os.execv(str(web_bin), [str(web_bin), "--host", args.host, "--port", str(args.port)])
 if __name__ == "__main__":
     main()
