@@ -16,9 +16,6 @@ flatpak:
   syncHelper: /usr/libexec/puu/puu-flatpak-sync
   liveStore: /var/lib/flatpak
 
-k3s:
-  helper: /usr/libexec/puu/configure-k3s-cluster
-
 serialConsole:
   x86_64: console=ttyS0,115200
   aarch64: console=tty0
