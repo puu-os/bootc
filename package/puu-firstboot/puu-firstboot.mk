@@ -21,8 +21,8 @@ PUU_FIRSTBOOT_DEPENDENCIES = \
 	python-gobject \
 	systemd
 
-PUU_FIRSTBOOT_GUI_SCRIPTS = session-dispatch firstboot-wizard
-PUU_FIRSTBOOT_BACKEND_SCRIPTS = firstboot-enroll firstboot-monitor
+PUU_FIRSTBOOT_GUI_SCRIPTS = puu-firstboot-session-dispatch puu-firstboot-wizard
+PUU_FIRSTBOOT_BACKEND_SCRIPTS = puu-firstboot-enroll puu-firstboot-monitor
 PUU_FIRSTBOOT_SYSTEM_UNITS = \
 	puu-firstboot-monitor.service \
 	puu-firstboot-homectl.service.d/puu-firstboot.conf
@@ -43,8 +43,8 @@ define PUU_FIRSTBOOT_INSTALL_TARGET_CMDS
 	$(foreach script,$(PUU_FIRSTBOOT_GUI_SCRIPTS) $(PUU_FIRSTBOOT_BACKEND_SCRIPTS),\
 		$(INSTALL) -D -m 0755 $(@D)/bin/$(script) \
 			$(TARGET_DIR)/usr/libexec/puu/$(script)$(sep))
-	$(INSTALL) -D -m 0644 $(@D)/bin/firstboot_state.py \
-		$(TARGET_DIR)/usr/libexec/puu/firstboot_state.py
+	$(INSTALL) -D -m 0644 $(@D)/bin/puu_firstboot_state.py \
+		$(TARGET_DIR)/usr/libexec/puu/puu_firstboot_state.py
 	$(foreach file,$(PUU_FIRSTBOOT_SHARE_FILES),\
 		$(INSTALL) -D -m 0644 $(@D)/share/$(file) \
 			$(TARGET_DIR)/usr/share/$(file)$(sep))

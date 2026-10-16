@@ -55,7 +55,7 @@ def restricted_artifacts():
     if not config.getboolean("GNOME Session", "Kiosk", fallback=False):
         raise ValueError("First-boot session is not a kiosk")
     for path in (
-        LIBEXEC / "firstboot-wizard",
+        LIBEXEC / "puu-firstboot-wizard",
         Path("/etc/dconf/profile/puu-firstboot"),
         Path("/etc/dconf/db/puu-firstboot"),
         Path("/usr/lib/systemd/user/puu-firstboot.service"),
@@ -67,15 +67,15 @@ def restricted_artifacts():
 def main():
     normal = False
     try:
-        trusted_file(LIBEXEC / "firstboot_state.py")
+        trusted_file(LIBEXEC / "puu_firstboot_state.py")
         sys.path.insert(0, str(LIBEXEC))
-        import firstboot_state
-        if not all(callable(getattr(firstboot_state, name, None))
+        import puu_firstboot_state
+        if not all(callable(getattr(puu_firstboot_state, name, None))
                    for name in ("is_live", "setup_required", "completion_valid")):
             raise ValueError("Invalid first-boot backend contract")
-        normal = (firstboot_state.is_live() is True
-                  or firstboot_state.setup_required() is False
-                  or firstboot_state.completion_valid() is True)
+        normal = (puu_firstboot_state.is_live() is True
+                  or puu_firstboot_state.setup_required() is False
+                  or puu_firstboot_state.completion_valid() is True)
     except (ImportError, OSError, ValueError, SyntaxError) as error:
         print(f"First-boot backend unavailable; starting restricted recovery: {error}", file=sys.stderr)
 

@@ -13,7 +13,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/libexec/puu/firstboot-wizard
+ExecStart=/usr/libexec/puu/puu-firstboot-wizard
 Restart=always
 RestartSec=2
 TimeoutStartSec=0

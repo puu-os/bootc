@@ -18,14 +18,14 @@ from gi.repository import Adw, Gio, GLib, Gtk
 BACKEND = None
 BACKEND_ERROR = ""
 try:
-    module = Path("/usr/libexec/puu/firstboot_state.py")
+    module = Path("/usr/libexec/puu/puu_firstboot_state.py")
     for path in (module, *module.parents):
         info = path.lstat()
         expected_type = stat.S_ISREG if path == module else stat.S_ISDIR
         if not expected_type(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise ValueError("Unsafe first-boot backend module")
     sys.path.insert(0, str(module.parent))
-    import firstboot_state as BACKEND
+    import puu_firstboot_state as BACKEND
     if not all(callable(getattr(BACKEND, name, None))
                for name in ("read_status", "completion_valid")):
         raise ValueError("Invalid first-boot backend contract")

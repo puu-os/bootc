@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-import firstboot_state as fs
+import puu_firstboot_state as fs
 
 NAMESPACE = "puu-ai"
 STEP_LABELS = (
