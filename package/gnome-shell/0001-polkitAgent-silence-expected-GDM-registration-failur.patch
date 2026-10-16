@@ -1,6 +1,6 @@
 --- a/js/ui/components/polkitAgent.js
 +++ b/js/ui/components/polkitAgent.js
-@@ -425,7 +425,8 @@ class AuthenticationAgent extends Shell.PolkitAuthenticationAgent {
+@@ -424,7 +424,8 @@ class AuthenticationAgent extends Shell.PolkitAuthenticationAgent {
          try {
              this.register();
          } catch {
@@ -9,4 +9,3 @@
 +                log('Failed to register AuthenticationAgent');
          }
      }
- 
