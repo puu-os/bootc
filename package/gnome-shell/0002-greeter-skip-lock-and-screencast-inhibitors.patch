@@ -1,6 +1,6 @@
 --- a/js/ui/main.js
 +++ b/js/ui/main.js
-@@ -255,30 +255,31 @@
+@@ -256,26 +256,27 @@
  
      introspectService = new Introspect.IntrospectService();
  
@@ -16,7 +16,16 @@
 +        screenTimeDBus = new ShellDBus.ScreenTimeDBus(breakManager);
 +        breakManagerDispatcher = new BreakManager.BreakDispatcher(breakManager);
 +        timeLimitsDispatcher = new TimeLimitsManager.TimeLimitsDispatcher(timeLimitsManager);
-+
+ 
+-    global.connect('shutdown', () => {
+-        // Block shutdown until the session history file has been written
+-        const loop = new GLib.MainLoop(null, false);
+-        const source = GLib.idle_source_new();
+-        source.set_callback(() => {
+-            timeLimitsManager.shutdown()
+-                .catch(e => console.warn(`Failed to stop time limits manager: ${e.message}`))
+-                .finally(() => loop.quit());
+-            return GLib.SOURCE_REMOVE;
 +        global.connect('shutdown', () => {
 +            // Block shutdown until the session history file has been written
 +            const loop = new GLib.MainLoop(null, false);
@@ -29,32 +38,17 @@
 +            });
 +            source.attach(loop.get_context());
 +            loop.run();
-+        });
-+    }
- 
-     brightnessManager = new BrightnessManager.BrightnessManager();
-     brightnessDBus = new ShellDBus.BrightnessDBus(brightnessManager);
- 
--    global.connect('shutdown', () => {
--        // Block shutdown until the session history file has been written
--        const loop = new GLib.MainLoop(null, false);
--        const source = GLib.idle_source_new();
--        source.set_callback(() => {
--            timeLimitsManager.shutdown()
--                .catch(e => console.warn(`Failed to stop time limits manager: ${e.message}`))
--                .finally(() => loop.quit());
--            return GLib.SOURCE_REMOVE;
--        });
+         });
 -        source.attach(loop.get_context());
 -        loop.run();
 -    });
--
++    }
+ 
      layoutManager.init();
      overview.init();
- 
 --- a/js/ui/screenShield.js
 +++ b/js/ui/screenShield.js
-@@ -209,7 +209,8 @@
+@@ -202,7 +202,8 @@
      async _syncInhibitor() {
          const lockEnabled = this._settings.get_boolean(LOCK_ENABLED_KEY);
          const lockLocked = this._lockSettings.get_boolean(DISABLE_LOCK_KEY);
@@ -66,7 +60,7 @@
  
 --- a/js/ui/screenshot.js
 +++ b/js/ui/screenshot.js
-@@ -1143,40 +1143,44 @@
+@@ -1142,40 +1142,44 @@
          this._screencastSupported = false;
          this._currentMode = UIMode.SCREENSHOT;
  
@@ -141,4 +135,3 @@
 +        }
  
          this._lockdownSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.lockdown'});
- 
