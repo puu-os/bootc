@@ -1,9 +1,8 @@
 [Unit]
 Description=Lightweight Kubernetes
 Documentation=https://k3s.io
-Wants=network-online.target nvidia-cdi-refresh.service
-After=network-online.target nvidia-cdi-refresh.service
-ConditionKernelCommandLine=!puu.live
+Wants=network-online.target
+After=network-online.target
 
 [Install]
 WantedBy=multi-user.target
@@ -23,5 +22,4 @@ Restart=always
 RestartSec=5s
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-ExecStartPre=/usr/libexec/puu/wait-default-route
 ExecStart=/usr/bin/k3s $K3S_EXEC
