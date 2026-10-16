@@ -10,6 +10,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import time
 
 libexec_dir = Path("/usr/libexec/puu")
 for directory in (Path(__file__).resolve().parent, libexec_dir):
