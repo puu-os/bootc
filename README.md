@@ -49,9 +49,22 @@ sudo systemctl restart puu-k3s-addons.service
 ## First boot
 
 New GNOME installations open a restricted setup session after the first login.
-It shows service startup, downloads and model readiness, with network settings,
-retry and TTY/SSH recovery available. Setup stays incomplete if the required
-Bonsai model cannot serve requests, including on unsupported GPU hardware.
+It shows service startup, downloads and measured Bonsai capacity, with network
+settings and TTY/SSH recovery available. Bonsai is the only automatic model
+download. Calibration probes increasing context and concurrency, narrows memory
+boundaries, and confirms the selected limits together with real inference.
+The search is bounded to 40 trials/four hours, 262,144 context tokens and eight
+simultaneous requests, while reserving host memory. Throughput and memory
+measurements are saved in `/var/lib/puu/calibration/bonsai.json` and reused when
+the model, runtime and hardware identity match.
+
+No NVIDIA GPU or confirmed insufficient memory completes calibration with zero
+limits and leaves local inference disabled; setup still verifies the gateway
+and desktop services. Driver, network and runtime failures remain setup errors.
+Mixed local GPU models currently require explicit placement support and are
+reported as a calibration error rather than using unverified limits.
+To measure again, run `sudo /usr/libexec/puu/oksa-calibrate --force`;
+`journalctl -u puu-bonsai-calibration.service` shows automatic calibration errors.
 
 Verified completion is saved across reboots. Continue returns to the login
 screen; signing in again opens GNOME. Live installers and existing installations

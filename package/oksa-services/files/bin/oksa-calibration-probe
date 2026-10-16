@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import http.client
+import json
+import math
+import os
+import queue
+import re
+import select
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+LOG_LIMIT = 16 * 1024 * 1024
+RESPONSE_LIMIT = 2 * 1024 * 1024
+MEMORY_ERRORS = re.compile(
+    r"CUDA out of memory|torch(?:\.cuda)?\.OutOfMemoryError|"
+    r"No available memory for the cache blocks|"
+    r"max seq len[^\n]*larger than[^\n]*KV cache|"
+    r"Free memory on device[^\n]*less than desired GPU memory utilization", re.IGNORECASE
+)
+KV_CACHE = re.compile(r"GPU KV cache size:\s*([\d,]+)\s+tokens")
+PREEMPTIONS = re.compile(r'^vllm:num_preemptions_total(\{[^\n]*\})?\s+(\S+)', re.MULTILINE)
+
+
+class CapacityError(Exception):
+    pass
+
+
+def candidate_command(command, context, sequences, utilization):
+    replacements = {
+        "--max-model-len": str(context),
+        "--max-num-seqs": str(sequences),
+        "--gpu-memory-utilization": str(utilization),
+        "--max-num-batched-tokens": str(min(8192, context * sequences)),
+    }
+    result = []
+    index = 0
+    while index < len(command):
+        arg = command[index]
+        option = arg.split("=", 1)[0]
+        if option in replacements or option in ("--enable-prefix-caching", "--no-enable-prefix-caching"):
+            if option in replacements and "=" not in arg:
+                if index + 1 >= len(command) or command[index + 1].startswith("--"):
+                    raise ValueError(f"missing value for {option}")
+                index += 1
+        else:
+            result.append(arg)
+        index += 1
+    for option, value in replacements.items():
+        result.extend((option, value))
+    return result + ["--no-enable-prefix-caching"]
+
+
+def http_request(path, payload=None, timeout=300):
+    connection = http.client.HTTPConnection("127.0.0.1", 8000, timeout=timeout)
+    try:
+        body = json.dumps(payload).encode() if payload is not None else None
+        connection.request("POST" if body is not None else "GET", path, body,
+                           {"Content-Type": "application/json"} if body is not None else {})
+        response = connection.getresponse()
+        data = response.read(RESPONSE_LIMIT + 1)
+        if len(data) > RESPONSE_LIMIT:
+            raise RuntimeError(f"oversized HTTP response from {path}")
+        return response.status, data
+    finally:
+        connection.close()
+
+
+def start_request(results, path, payload=None, barrier=None, timeout=300):
+    def request():
+        try:
+            if barrier is not None:
+                barrier.wait(timeout=timeout)
+            results.put((http_request(path, payload, timeout), None))
+        except Exception as error:
+            results.put((None, error))
+    threading.Thread(target=request, daemon=True).start()
+
+
+def log_text(log):
+    return os.pread(log.fileno(), LOG_LIMIT, 0).decode("utf-8", errors="replace")
+
+
+def stop_child(child):
+    handlers = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            child.poll()
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait(timeout=5)
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
+def probe(command, context, sequences, utilization, reserve, metrics, log):
+    import torch
+
+    child = None
+    pump = None
+    pump_stop = threading.Event()
+    log_errors = []
+
+    def drain_output():
+        written = 0
+        try:
+            fd = child.stdout.fileno()
+            while not pump_stop.is_set():
+                if not select.select([fd], [], [], 0.2)[0]:
+                    continue
+                data = os.read(fd, 65536)
+                if not data:
+                    return
+                data = data[:LOG_LIMIT - written]
+                if log.write(data) != len(data):
+                    raise OSError("short candidate log write")
+                log.flush()
+                written += len(data)
+                if written >= LOG_LIMIT:
+                    log_errors.append("candidate output reached 16 MiB limit")
+                    return
+        except Exception as error:
+            log_errors.append(f"candidate log drain failed: {type(error).__name__}: {error}")
+
+    def monitor():
+        if log_errors:
+            raise RuntimeError(log_errors[0])
+        with open("/calibration-host-meminfo", encoding="ascii") as meminfo:
+            match = re.search(r"^MemAvailable:\s+(\d+)\s+kB$", meminfo.read(65536), re.MULTILINE)
+        if match is None:
+            raise RuntimeError("host MemAvailable missing")
+        available = int(match[1]) * 1024
+        previous = metrics["minimum_host_available_bytes"]
+        metrics["minimum_host_available_bytes"] = available if previous is None else min(previous, available)
+        if available < reserve:
+            raise CapacityError("host MemAvailable below reserve")
+        try:
+            free, total = torch.cuda.mem_get_info()
+        except torch.OutOfMemoryError as error:
+            raise CapacityError(str(error)) from error
+        metrics["peak_gpu_memory_bytes"] = max(metrics["peak_gpu_memory_bytes"], total - free)
+        if child is not None:
+            if child.poll() is not None:
+                pump.join(timeout=1)
+                if log_errors:
+                    raise RuntimeError(log_errors[0])
+                text = log_text(log)
+                if child.returncode >= 0 and MEMORY_ERRORS.search(text):
+                    raise CapacityError("candidate reported memory capacity exhaustion")
+                raise RuntimeError(f"candidate exited with code {child.returncode}")
+        return free, total
+
+    def receive(results, deadline):
+        while True:
+            monitor()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("startup/request deadline exceeded")
+            try:
+                value, error = results.get(timeout=min(0.2, remaining))
+            except queue.Empty:
+                continue
+            if error is not None:
+                raise error
+            return value
+
+    def fetch(path, deadline):
+        results = queue.Queue()
+        start_request(results, path, timeout=max(0.001, deadline - time.monotonic()))
+        status, data = receive(results, deadline)
+        if status != 200:
+            raise RuntimeError(f"{path} returned HTTP {status}: {data[:256]!r}")
+        return data
+
+    def preemptions(deadline):
+        values = {labels: float(value) for labels, value in
+                  PREEMPTIONS.findall(fetch("/metrics", deadline).decode())}
+        if not values or any(not math.isfinite(value) or value < 0 for value in values.values()):
+            raise RuntimeError("missing or invalid vLLM preemption counters")
+        return values
+
+    free, total = monitor()
+    if free < utilization * total + min(1024 ** 3, total * 0.1):
+        raise CapacityError("CUDA free memory cannot cover utilization and headroom")
+    startup_deadline = time.monotonic() + 1800
+    try:
+        child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 start_new_session=True, bufsize=0)
+        pump = threading.Thread(target=drain_output, daemon=True)
+        pump.start()
+        while True:
+            results = queue.Queue()
+            start_request(results, "/health", timeout=2)
+            try:
+                status, _ = receive(results, min(startup_deadline, time.monotonic() + 3))
+            except ConnectionRefusedError:
+                status = 503
+            if status == 200:
+                break
+            if status != 503:
+                raise RuntimeError(f"health returned HTTP {status}")
+            monitor()
+            if time.monotonic() >= startup_deadline:
+                raise TimeoutError("startup deadline exceeded")
+            time.sleep(0.2)
+        log_deadline = min(startup_deadline, time.monotonic() + 2)
+        while True:
+            monitor()
+            matches = KV_CACHE.findall(log_text(log))
+            if matches:
+                break
+            if time.monotonic() >= log_deadline:
+                raise RuntimeError("GPU KV cache token budget missing from logs")
+            time.sleep(0.1)
+        metrics["kv_cache_tokens"] = min(int(value.replace(",", "")) for value in matches)
+        if context * sequences > metrics["kv_cache_tokens"]:
+            raise CapacityError("context * sequences exceeds GPU KV cache token budget")
+        deadline = time.monotonic() + 300
+        models = json.loads(fetch("/v1/models", deadline))["data"]
+        if not models or not isinstance(models[0]["id"], str):
+            raise RuntimeError("no served model ID")
+        before = preemptions(deadline)
+        inference_log_offset = os.fstat(log.fileno()).st_size
+        barrier = threading.Barrier(sequences + 1)
+        results = queue.Queue()
+        for index in range(sequences):
+            monitor()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("inference setup deadline exceeded")
+            payload = {"model": models[0]["id"], "prompt": [100 + index] * (context - 32),
+                       "max_tokens": 32, "ignore_eos": True, "temperature": 0}
+            start_request(results, "/v1/completions", payload, barrier,
+                          max(0.001, deadline - time.monotonic()))
+        started = time.monotonic()
+        barrier.wait(timeout=min(1, max(0.001, deadline - started)))
+        for _ in range(sequences):
+            status, data = receive(results, deadline)
+            if status != 200:
+                failure_log = os.pread(log.fileno(), LOG_LIMIT, inference_log_offset).decode(errors="replace")
+                if status == 500 and MEMORY_ERRORS.search(failure_log + data.decode(errors="replace")):
+                    raise CapacityError("completion reported memory capacity exhaustion")
+                raise RuntimeError(f"completion returned HTTP {status}: {data[:256]!r}")
+            response = json.loads(data)
+            choices = response.get("choices")
+            usage = response.get("usage", {})
+            if (not isinstance(choices, list) or len(choices) != 1 or
+                    not isinstance(choices[0], dict) or not isinstance(choices[0].get("text"), str) or
+                    usage.get("prompt_tokens") != context - 32 or usage.get("completion_tokens") != 32):
+                raise RuntimeError("completion choices or token usage failed validation")
+        elapsed = time.monotonic() - started
+        after = preemptions(deadline)
+        if any(value > before.get(labels, 0) for labels, value in after.items()):
+            raise CapacityError("vLLM preemptions increased during concurrent inference")
+        if any(labels not in after or after[labels] < value for labels, value in before.items()):
+            raise RuntimeError("vLLM preemption counters disappeared or reset")
+        monitor()
+        metrics["tokens_per_second"] = sequences * 32 / elapsed
+    finally:
+        if child is not None:
+            try:
+                stop_child(child)
+            finally:
+                try:
+                    if pump is not None and pump.ident is not None:
+                        pump.join(timeout=1)
+                finally:
+                    pump_stop.set()
+                    try:
+                        if pump is not None and pump.ident is not None:
+                            pump.join()
+                    finally:
+                        child.stdout.close()
+            if log_errors:
+                raise RuntimeError(log_errors[0])
+
+
+def run():
+    record = {"status": "error", "reason": "", "context": None, "sequences": None, "utilization": None,
+              "metrics": {"tokens_per_second": 0, "peak_gpu_memory_bytes": 0,
+                          "minimum_host_available_bytes": None, "kv_cache_tokens": None}}
+
+    def interrupted(signum, _frame):
+        raise InterruptedError(f"probe interrupted by signal {signum}")
+
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
+    try:
+        command = json.loads(os.environ["PUU_PROBE_COMMAND"])
+        context = record["context"] = int(os.environ["PUU_PROBE_CONTEXT"])
+        sequences = record["sequences"] = int(os.environ["PUU_PROBE_SEQUENCES"])
+        utilization = record["utilization"] = float(os.environ["PUU_PROBE_UTILIZATION"])
+        reserve = int(os.environ["PUU_PROBE_HOST_RESERVE"])
+        if (not isinstance(command, list) or not command or
+                any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)):
+            raise ValueError("PUU_PROBE_COMMAND must be a nonempty JSON command list")
+        if context <= 32 or sequences <= 0 or not 0 < utilization <= 1 or reserve < 0:
+            raise ValueError("invalid context, sequences, utilization, or host reserve")
+        command = candidate_command(command, context, sequences, utilization)
+        with tempfile.TemporaryFile() as log:
+            try:
+                probe(command, context, sequences, utilization, reserve, record["metrics"], log)
+            finally:
+                if sys.exc_info()[0] is not None:
+                    print(log_text(log)[-8192:], file=sys.stderr)
+        record.update(status="passed", reason="concurrent full-context inference completed without preemptions")
+    except CapacityError as error:
+        record.update(status="capacity", reason=str(error)[:400])
+    except Exception as error:
+        record.update(status="error", reason=f"{type(error).__name__}: {error}"[:400])
+    if record["utilization"] is not None and not math.isfinite(record["utilization"]):
+        record["utilization"] = None
+    summary = json.dumps(record, ensure_ascii=True, allow_nan=False)
+    if len(summary.encode()) > 4096:
+        record.update(status="error", reason="result exceeds termination log size limit", context=None, sequences=None)
+        record["metrics"] = dict.fromkeys(record["metrics"], None)
+        summary = json.dumps(record, ensure_ascii=True, allow_nan=False)
+    try:
+        with open("/dev/termination-log", "w", encoding="utf-8") as output:
+            output.write(summary)
+    except OSError as error:
+        record.update(status="error", reason=f"cannot publish termination log: {error}"[:400])
+        summary = json.dumps(record, ensure_ascii=True, allow_nan=False)
+    print(summary, flush=True)
+    return 1 if record["status"] == "error" else 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())
