@@ -10,6 +10,6 @@ StartLimitBurst=3
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/puu/bootc-upgrade
+ExecStart=/usr/libexec/puu/puu-bootc-upgrade
 Restart=on-failure
 RestartSec=5min

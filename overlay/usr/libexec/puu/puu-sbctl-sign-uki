@@ -24,7 +24,7 @@ def main() -> None:
         {path for pattern in ALLOWLIST_PATTERNS for path in efi_dir.glob(pattern) if path.is_file()}
     )
     if not files:
-        sys.exit("sbctl-sign-uki: no files matched any allowlist pattern under /efi")
+        sys.exit("puu-sbctl-sign-uki: no files matched any allowlist pattern under /efi")
 
     for path in files:
         subprocess.run([sbctl_bin, "sign", "-s", str(path)], check=True)

@@ -134,7 +134,7 @@ def validate(source, expected_guid, label):
 
 
 def main():
-    require(len(sys.argv) == 4, "usage: validate-live-iso <medium> <ESP GUID> <ISO label>")
+    require(len(sys.argv) == 4, "usage: puu-live-iso <medium> <ESP GUID> <ISO label>")
     with open(sys.argv[1], "rb") as source:
         validate(source, sys.argv[2], sys.argv[3])
 
