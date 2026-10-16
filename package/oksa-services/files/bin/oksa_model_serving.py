@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -839,3 +840,176 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
         return True, f"Key {key_or_alias} revoked"
     err = resp.get("error") or resp.get("message") or f"HTTP {status}"
     return False, str(err)
+
+
+
+def collect_gpu_telemetry() -> list[dict]:
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                nvidia_smi,
+                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if proc.returncode != 0:
+            return []
+        gpus = []
+        for line in proc.stdout.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 7:
+                try:
+                    gpus.append({
+                        "index": int(parts[0]),
+                        "name": parts[1],
+                        "gpu_util_pct": float(parts[2]),
+                        "memory_used_mib": float(parts[3]),
+                        "memory_total_mib": float(parts[4]),
+                        "temperature_c": float(parts[5]),
+                        "power_w": float(parts[6]),
+                    })
+                except ValueError:
+                    pass
+        return gpus
+    except (subprocess.SubprocessError, OSError):
+        return []
+
+
+def collect_host_memory() -> dict:
+    total_kb = 0
+    avail_kb = 0
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemTotal:"):
+                total_kb = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                avail_kb = int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    total_mib = total_kb // 1024
+    avail_mib = avail_kb // 1024
+    used_mib = max(0, total_mib - avail_mib)
+    return {
+        "total_mib": total_mib,
+        "used_mib": used_mib,
+        "available_mib": avail_mib,
+        "used_pct": round((used_mib / total_mib * 100.0), 1) if total_mib > 0 else 0.0,
+    }
+
+
+def collect_k8s_workloads() -> list[dict]:
+    try:
+        proc = run_kubectl("get", "pods", "-n", "puu-ai", "-o", "json", check=False)
+        if proc.returncode != 0:
+            return []
+        data = json.loads(proc.stdout)
+        items = data.get("items", [])
+        workloads = []
+        for item in items:
+            meta = item.get("metadata", {})
+            name = meta.get("name", "")
+            status = item.get("status", {})
+            phase = status.get("phase", "Unknown")
+            conditions = status.get("conditions", [])
+            ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+            container_statuses = status.get("containerStatuses", [])
+            restarts = sum(c.get("restartCount", 0) for c in container_statuses)
+            start_time = status.get("startTime", "")
+            workloads.append({
+                "name": name,
+                "phase": phase,
+                "ready": ready,
+                "restarts": restarts,
+                "start_time": start_time,
+            })
+        return workloads
+    except Exception:
+        return []
+
+
+def collect_vllm_metrics(active_model: str) -> dict:
+    if not active_model or active_model == "-":
+        return {}
+    model_label = re.sub(r"[^a-z0-9]+", "-", active_model.lower()).strip("-")
+    service_name = f"puu-vllm-{model_label}"
+    try:
+        proc = run_kubectl("get", "service", service_name, "-n", "puu-ai", "-o", "jsonpath={.spec.clusterIP}", check=False)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return {}
+        cluster_ip = proc.stdout.strip()
+        metrics_url = f"http://{cluster_ip}:8000/metrics"
+        req = urllib.request.Request(metrics_url, headers={"User-Agent": "puu-oksa/1.0"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        parsed = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                key, val_str = parts[0], parts[1]
+                try:
+                    val = float(val_str)
+                    if "num_requests_running" in key:
+                        parsed["running_requests"] = int(val)
+                    elif "num_requests_waiting" in key:
+                        parsed["waiting_requests"] = int(val)
+                    elif "gpu_cache_usage_factor" in key:
+                        parsed["kv_cache_usage_pct"] = round(val * 100.0, 1)
+                    elif "num_requests_swapped" in key:
+                        parsed["swapped_requests"] = int(val)
+                except ValueError:
+                    pass
+        return parsed
+    except Exception:
+        return {}
+
+
+def collect_litellm_status() -> str:
+    status, _ = litellm_api_call("GET", "/health/readiness", timeout_sec=3)
+    if status == 200:
+        return "ready"
+    if status in (401, 403):
+        return "ready (authenticated)"
+    status_models, _ = litellm_api_call("GET", "/v1/models", timeout_sec=3)
+    if status_models == 200:
+        return "ready"
+    if status_models in (401, 403):
+        return "ready (authenticated)"
+    return "unreachable"
+
+
+def collect_serving_status() -> dict:
+    selected_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(STATE_DIR / "selected-model")))
+    disabled_file = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(STATE_DIR / "serving.disabled")))
+    active_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(STATE_DIR / "active-model")))
+
+    serving_enabled = not disabled_file.exists()
+    selected_model = read_first_line(selected_file) or "-"
+    active_model = read_first_line(active_file) or "-"
+
+    gpus = collect_gpu_telemetry()
+    host_mem = collect_host_memory()
+    workloads = collect_k8s_workloads()
+    metrics = collect_vllm_metrics(active_model)
+    gateway_status = collect_litellm_status()
+
+    return {
+        "serving_enabled": serving_enabled,
+        "selected_model": selected_model,
+        "active_model": active_model,
+        "host_memory": host_mem,
+        "gpus": gpus,
+        "workloads": workloads,
+        "metrics": metrics,
+        "gateway_status": gateway_status,
+    }
