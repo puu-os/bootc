@@ -15,7 +15,7 @@ indent_size = 2
 tab_width = 2
 
 # Extensionless shell scripts (shebang only).
-[{overlay/usr/libexec/puu/*,overlay/usr/lib/puu/*,package/*/files/bin/*,package/*/files/wait-default-route}]
+[{overlay/usr/libexec/puu/*,overlay/usr/lib/puu/*,package/*/files/bin/*}]
 indent_style = space
 indent_size = 2
 tab_width = 2
