@@ -362,6 +362,80 @@ def cmd_key_revoke(key_or_alias: str) -> None:
 
 
 
+def format_status_text(data: dict) -> str:
+    lines = []
+    lines.append("=== Puu OS Model Serving Status ===")
+    serving_str = "ENABLED" if data.get("serving_enabled") else "DISABLED"
+    selected = data.get("selected_model", "-")
+    active = data.get("active_model", "-")
+    gateway = data.get("gateway_status", "unknown")
+    lines.append(f"Serving:      {serving_str}")
+    lines.append(f"Active Model: {active}")
+    lines.append(f"Selected:     {selected}")
+    lines.append(f"Gateway:      {gateway}")
+    lines.append("")
+
+    mem = data.get("host_memory", {})
+    if mem:
+        lines.append(f"Host Memory:  {mem.get('used_mib', 0)} / {mem.get('total_mib', 0)} MiB ({mem.get('used_pct', 0)}% used)")
+
+    gpus = data.get("gpus", [])
+    if gpus:
+        lines.append("")
+        lines.append("Accelerators:")
+        lines.append(f"  {'GPU':<5} {'NAME':<24} {'UTIL':<8} {'VRAM USED':<16} {'TEMP':<8} POWER")
+        for g in gpus:
+            vram_str = f"{g.get('memory_used_mib', 0):.0f} / {g.get('memory_total_mib', 0):.0f} MiB"
+            lines.append(
+                f"  [{g.get('index')}]  {g.get('name', 'NVIDIA')[:22]:<24} "
+                f"{g.get('gpu_util_pct', 0):.0f}%     "
+                f"{vram_str:<16} "
+                f"{g.get('temperature_c', 0):.0f}°C    "
+                f"{g.get('power_w', 0):.1f}W"
+            )
+
+    workloads = data.get("workloads", [])
+    if workloads:
+        lines.append("")
+        lines.append("Cluster Workloads:")
+        lines.append(f"  {'NAME':<36} {'STATUS':<12} {'READY':<8} RESTARTS")
+        for w in workloads:
+            ready_str = "yes" if w.get("ready") else "no"
+            lines.append(f"  {w.get('name', '-')[:34]:<36} {w.get('phase', '-'):<12} {ready_str:<8} {w.get('restarts', 0)}")
+
+    metrics = data.get("metrics", {})
+    if metrics:
+        lines.append("")
+        lines.append("Inference Telemetry:")
+        lines.append(f"  Running Requests:  {metrics.get('running_requests', 0)}")
+        lines.append(f"  Waiting Requests:  {metrics.get('waiting_requests', 0)}")
+        lines.append(f"  KV Cache Usage:    {metrics.get('kv_cache_usage_pct', 0.0)}%")
+        if "swapped_requests" in metrics:
+            lines.append(f"  Swapped Requests:  {metrics.get('swapped_requests', 0)}")
+
+    return "\n".join(lines)
+
+
+def cmd_status(as_json: bool = False) -> None:
+    data = ms.collect_serving_status()
+    if as_json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(format_status_text(data))
+
+
+def cmd_monitor(interval_sec: float = 2.0) -> None:
+    try:
+        while True:
+            data = ms.collect_serving_status()
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            output = f"\033[H\033[2J[{now_str}] (Press Ctrl+C to exit)\n\n" + format_status_text(data) + "\n"
+            sys.stdout.write(output)
+            sys.stdout.flush()
+            time.sleep(interval_sec)
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped.")
+
 def main() -> None:
     state_dir = ms.STATE_DIR
     discover_bin = resolve_helper("oksa-discover-vllm-models")
@@ -376,6 +450,10 @@ def main() -> None:
     start_parser.add_argument("name", help="Model name")
     subparsers.add_parser("stop", help="Stop model serving")
 
+    status_parser = subparsers.add_parser("status", help="Show model serving and workload status")
+    status_parser.add_argument("--json", action="store_true", help="Output status as JSON")
+    monitor_parser = subparsers.add_parser("monitor", help="Continuously monitor running model tasks")
+    monitor_parser.add_argument("--interval", type=float, default=2.0, help="Refresh interval in seconds (default: 2.0)")
     pull_parser = subparsers.add_parser("pull", help="Download a model from the catalog or Hugging Face")
     pull_parser.add_argument("name", help="Model name or repository ID")
     pull_parser.add_argument("--force", action="store_true", help="Download even if exceeding host capacity (for QSFP clustering)")
@@ -433,6 +511,10 @@ def main() -> None:
     elif args.command == "stop":
         cmd_stop(state_dir, planner_bin)
 
+    elif args.command == "status":
+        cmd_status(as_json=args.json)
+    elif args.command == "monitor":
+        cmd_monitor(interval_sec=args.interval)
     elif args.command == "pull":
         cmd_pull(preseed_bin, discover_bin, args.name, force=args.force)
     elif args.command == "model":
