@@ -20,6 +20,7 @@ from typing import Any, Dict
 STATE_DIR = Path("/var/lib/puu/vllm")
 MODELS_DIR = Path("/var/lib/vllm/models")
 PRESEED_MANIFEST = ".puu-preseed.json"
+CALIBRATION_RESULT_PATH = Path(os.environ.get("PUU_CALIBRATION_FILE", "/var/lib/puu/calibration/bonsai.json"))
 
 
 @contextmanager
@@ -445,3 +446,18 @@ def read_first_line(path: Path | str) -> str:
         return path.read_text(encoding="utf-8", errors="replace").splitlines()[0].strip()
     except (IndexError, OSError):
         return ""
+
+
+def read_calibration_limits(path: Path | str | None = None) -> tuple[dict, bool]:
+    cal_path = Path(path) if path is not None else CALIBRATION_RESULT_PATH
+    if not cal_path.is_file():
+        return {}, False
+    try:
+        data = json.loads(cal_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("schema") == 1 and data.get("state") == "complete":
+            limits = data.get("limits")
+            if isinstance(limits, dict):
+                return limits, True
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}, False

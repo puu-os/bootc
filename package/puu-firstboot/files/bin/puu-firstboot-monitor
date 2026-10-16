@@ -8,12 +8,18 @@ import http.client
 import ipaddress
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
 
+for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3] / "oksa-services" / "files" / "bin"):
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+
 import puu_firstboot_state as fs
+import oksa_calibration_state as cs
 
 NAMESPACE = "puu-ai"
 STEP_LABELS = (
@@ -21,6 +27,7 @@ STEP_LABELS = (
     ("services", "System services"),
     ("addons", "Base components"),
     ("downloads", "System downloads"),
+    ("calibration", "AI capacity calibration"),
     ("model", "AI model runtime"),
     ("gateway", "API gateway"),
     ("webui", "Desktop services"),
@@ -371,6 +378,23 @@ def unit_checks(progress):
         progress.details.append("Catalog model downloads are in progress; existing download files are reused.")
     elif preseed.get("ActiveState") == "failed":
         progress.details.append("Catalog downloads need attention; checking network connection.")
+    calibration = states["puu-bonsai-calibration.service"]
+    if not fs.unit_completed(calibration):
+        message = "Preparing measured AI capacity calibration."
+        failed = calibration.get("ActiveState") == "failed"
+        try:
+            status = cs.read_record(cs.STATUS_PATH)
+            if status.get("boot_id") == fs.boot_id():
+                message = clean(status.get("message", message), 512)
+                failed = failed or status.get("state") == "error"
+        except FileNotFoundError:
+            pass
+        raise Pending("calibration", message, failed)
+    result = cs.applied_result()
+    limits = result["limits"]
+    message = (f"Measured {limits['max_model_len']} context tokens and {limits['max_num_seqs']} simultaneous requests."
+               if limits["max_num_seqs"] else "Calibration complete: no local AI capacity; limits are zero.")
+    progress.publish("calibration", message, "done")
     return states
 
 
@@ -397,6 +421,8 @@ def referenced_configmaps(deployments):
 
 def snapshot(progress):
     unit_checks(progress)
+    calibration = cs.applied_result()
+    zero_capacity = calibration["limits"] == cs.ZERO_LIMITS
     progress.publish("addons", "Configuring base components.")
     jobs = items(kube_json("get", "jobs,pods", "-n", "kube-system"))
     progress.details.extend(pod_details(jobs))
@@ -410,7 +436,7 @@ def snapshot(progress):
     progress.details.extend(pod_details(resources))
     progress.publish("addons", "Base components installed.", "done")
     nodes = items(kube_json("get", "nodes"))
-    if not any(
+    if not zero_capacity and not any(
         node.get("metadata", {}).get("labels", {}).get("puu.ai/cuda-ready") == "true"
         and node.get("metadata", {}).get("labels", {}).get("puu.ai/cdi-ready") == "true"
         and any(c.get("type") == "Ready" and c.get("status") == "True" for c in node.get("status", {}).get("conditions", []))
@@ -425,6 +451,14 @@ def snapshot(progress):
         service = resource(resources, "Service", name)
         deployments[name] = deployment
         services[name] = service
+        if name == fs.MODEL and zero_capacity:
+            if (deployment.get("spec", {}).get("replicas") != 0
+                    or deployment.get("status", {}).get("replicas", 0) != 0
+                    or deployment.get("status", {}).get("observedGeneration") != identity(deployment)[1]
+                    or any(r.get("kind") == "Pod" and r.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name") == fs.MODEL
+                           for r in resources)):
+                raise Pending("model", "Stopping inference after zero-capacity calibration.")
+            continue
         if not deployment_ready(deployment) or not ready_endpoint(resources, service, current_pods(resources, deployment)):
             if name == fs.MODEL:
                 message = "Downloading and loading AI model…"
@@ -467,9 +501,9 @@ def snapshot(progress):
         [(r["metadata"]["uid"], r.get("addressType"), r.get("ports"), r.get("endpoints"))
          for r in resources if r.get("kind") == "EndpointSlice"
          and r.get("metadata", {}).get("labels", {}).get("kubernetes.io/service-name") in service_names],
-        address, key_identity, fs.machine_id(), fs.read_enrollment(),
+        address, key_identity, fs.machine_id(), fs.read_enrollment(), calibration,
     ], sort_keys=True).encode("utf-8")).hexdigest()
-    return address, key, services, fingerprint
+    return address, key, services, fingerprint, calibration
 
 
 def verify(progress):
@@ -479,18 +513,22 @@ def verify(progress):
     if enrollment is None:
         raise Pending("identity", "User account setup is not complete.", True)
     progress.publish("identity", "User account setup complete.", "done")
-    address, key, services, fingerprint = snapshot(progress)
+    address, key, services, fingerprint, calibration = snapshot(progress)
+    zero_capacity = calibration["limits"] == cs.ZERO_LIMITS
     progress.publish("downloads", "System downloads complete.", "done")
-    progress.publish("model", "Verifying AI runtime health.")
-    model_address = service_address(services[fs.MODEL], 8000)
-    http_request(model_address, 8000, "/health")
-    progress.publish("model", "Verifying AI model availability.")
-    models = http_request(model_address, 8000, "/v1/models")
-    if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
-        isinstance(model, dict) and model.get("id") == fs.SERVED_MODEL for model in models["data"]
-    ):
-        raise Pending("model", "AI runtime is initializing.")
-    progress.publish("model", "AI model runtime is ready.", "done")
+    if zero_capacity:
+        progress.publish("model", "Local inference disabled: calibrated limits are zero.", "done")
+    else:
+        progress.publish("model", "Verifying AI runtime health.")
+        model_address = service_address(services[fs.MODEL], 8000)
+        http_request(model_address, 8000, "/health")
+        progress.publish("model", "Verifying AI model availability.")
+        models = http_request(model_address, 8000, "/v1/models")
+        if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
+            isinstance(model, dict) and model.get("id") == fs.SERVED_MODEL for model in models["data"]
+        ):
+            raise Pending("model", "AI runtime is initializing.")
+        progress.publish("model", "AI model runtime is ready.", "done")
     progress.publish("gateway", "Checking API gateway configuration.")
     mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
     if not static_model_mapping(mapping):
@@ -508,14 +546,15 @@ def verify(progress):
         raise Pending("webui", "Desktop services are starting.")
     progress.publish("webui", "Desktop services are ready.", "done")
     progress.publish("verification", "Verifying system response.")
-    response = http_request(address, 80, "/v1/chat/completions", "api.puu.local", key, {
-        "model": fs.MODEL,
-        "messages": [{"role": "user", "content": "Say hello."}],
-        "max_tokens": 1,
-        "stream": False,
-    })
-    if not chat_valid(response):
-        raise Pending("verification", "Waiting for verification response.")
+    if not zero_capacity:
+        response = http_request(address, 80, "/v1/chat/completions", "api.puu.local", key, {
+            "model": fs.MODEL,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 1,
+            "stream": False,
+        })
+        if not chat_valid(response):
+            raise Pending("verification", "Waiting for verification response.")
     progress.publish("verification", "Verifying configuration.")
     mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
     if not static_model_mapping(mapping):
@@ -529,14 +568,16 @@ def verify(progress):
         "machine_id": fs.machine_id(),
         "model": fs.MODEL,
         "served_model": fs.SERVED_MODEL,
-        "verification": "public-chat-completion",
+        "verification": "zero-capacity-calibration" if zero_capacity else "public-chat-completion",
+        "calibration_fingerprint": calibration["fingerprint"],
         "completed_at": time.time(),
         "enrolled_at": enrollment["enrolled_at"],
     })
     if not fs.completion_valid():
         raise OSError("Completion could not be validated")
     progress.details = []
-    progress.publish("complete", "Initial setup complete.", complete=True)
+    message = "Initial setup complete. Local AI capacity is zero." if zero_capacity else "Initial setup complete."
+    progress.publish("complete", message, complete=True)
 
 
 def main():
