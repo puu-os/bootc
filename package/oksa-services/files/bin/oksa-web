@@ -1,0 +1,1305 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import argparse
+import http.server
+import json
+import os
+from pathlib import Path
+import shutil
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+
+libexec_dir = Path("/usr/libexec/puu")
+for directory in (Path(__file__).resolve().parent, libexec_dir):
+    if directory.is_dir() and str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+import oksa_model_serving as ms
+
+state_dir = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
+
+
+def resolve_helper(name: str) -> Path:
+    installed = libexec_dir / name
+    if installed.is_file():
+        return installed
+    sibling = Path(__file__).resolve().parent / name
+    if sibling.is_file():
+        return sibling
+    return installed
+
+
+discover_bin = resolve_helper("oksa-discover-vllm-models")
+planner_bin = resolve_helper("oksa-plan-vllm-workloads")
+preseed_bin = resolve_helper("oksa-preseed-vllm-models")
+
+pull_lock = threading.Lock()
+pull_state = {
+    "running": False,
+    "repo_id": None,
+    "model_name": None,
+    "progress": "",
+    "error": None,
+    "complete": False,
+    "started_at": 0,
+    "ended_at": 0,
+}
+
+
+def control_files() -> tuple[Path, Path]:
+    selected = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
+    disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
+    return selected, disabled
+
+
+def run_discover() -> None:
+    if os.geteuid() == 0 and discover_bin.is_file() and os.access(discover_bin, os.X_OK):
+        subprocess.run([str(discover_bin)], check=False)
+
+
+def check_capabilities(model_name: str) -> bool:
+    if not planner_bin.is_file() or not os.access(planner_bin, os.X_OK):
+        return False
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        check_dir = Path(tmp_dir)
+        manifests_dir = check_dir / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(
+            os.environ,
+            PUU_K3S_MANIFEST_DIR=str(manifests_dir),
+            PUU_VLLM_SELECTED_MODEL=model_name,
+            PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
+            PUU_VLLM_IGNORE_SERVING_DISABLED="true",
+            PUU_VLLM_ACTIVE_MODEL_FILE=str(check_dir / "active-model"),
+        )
+        res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
+        return res.returncode == 0
+
+
+def get_models_metadata() -> dict[str, dict]:
+    models_json_path = state_dir / "models.json"
+    meta = {}
+    if models_json_path.is_file():
+        try:
+            data = json.loads(models_json_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "name" in item:
+                        meta[item["name"]] = item
+        except (OSError, ValueError):
+            pass
+    return meta
+
+
+def collect_models_list() -> dict:
+    run_discover()
+    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+    active_model = ms.read_first_line(active_model_file)
+    selected_file, disabled_file = control_files()
+    serving_enabled = not disabled_file.exists()
+    selected_model = ms.read_first_line(selected_file)
+
+    meta_map = get_models_metadata()
+    models = []
+    for name, path, env_path in ms.read_models_list(state_dir / "models.list"):
+        meta = meta_map.get(name, {})
+        cap = "ok" if check_capabilities(name) else "insufficient"
+        models.append({
+            "name": name,
+            "repo_id": meta.get("repo_id") or "-",
+            "storage_mib": meta.get("storage_mib") or 0,
+            "quantization": meta.get("quantization") or "none",
+            "capabilities": cap,
+            "active": (name == active_model),
+            "selected": (name == selected_model),
+        })
+
+    return {
+        "ok": True,
+        "active_model": active_model,
+        "selected_model": selected_model,
+        "serving_enabled": serving_enabled,
+        "models": models,
+    }
+
+
+def background_pull_worker(repo_id: str, name: str | None, revision: str, force: bool) -> None:
+    global pull_state
+    with pull_lock:
+        pull_state["running"] = True
+        pull_state["repo_id"] = repo_id
+        pull_state["model_name"] = name
+        pull_state["progress"] = "Starting download..."
+        pull_state["error"] = None
+        pull_state["complete"] = False
+        pull_state["started_at"] = time.time()
+        pull_state["ended_at"] = 0
+
+    cmd = [str(preseed_bin), "--repo-id", repo_id, "--revision", revision]
+    if name:
+        cmd.extend(["--name", name])
+    if force:
+        cmd.append("--force")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        output_lines = []
+        if proc.stdout:
+            for line in iter(proc.stdout.readline, ""):
+                output_lines.append(line.strip())
+                if len(output_lines) > 20:
+                    output_lines.pop(0)
+                with pull_lock:
+                    pull_state["progress"] = line.strip()
+            proc.stdout.close()
+        proc.wait()
+
+        with pull_lock:
+            pull_state["running"] = False
+            pull_state["ended_at"] = time.time()
+            if proc.returncode == 0:
+                pull_state["complete"] = True
+                pull_state["progress"] = "Model download completed successfully."
+            else:
+                pull_state["complete"] = False
+                pull_state["error"] = f"Download process exited with code {proc.returncode}"
+    except Exception as exc:
+        with pull_lock:
+            pull_state["running"] = False
+            pull_state["ended_at"] = time.time()
+            pull_state["error"] = str(exc)
+
+    run_discover()
+
+
+class OksaWebHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "OksaWeb/1.0"
+
+    def send_json(self, status: int, data: dict) -> None:
+        payload = json.dumps(data).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def read_json_body(self) -> dict | None:
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length <= 0:
+                return {}
+            raw_data = self.rfile.read(content_length).decode("utf-8")
+            return json.loads(raw_data)
+        except Exception:
+            return None
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+
+        if path in ("/", "/index.html"):
+            payload = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if path == "/api/status":
+            status_data = ms.collect_serving_status()
+            self.send_json(200, {"ok": True, "status": status_data})
+            return
+
+        if path == "/api/users":
+            ok, users = ms.litellm_user_list()
+            self.send_json(200 if ok else 500, {
+                "ok": ok,
+                "users": users if ok else [],
+                "error": None if ok else str(users)
+            })
+            return
+
+        if path.startswith("/api/users/"):
+            user_id = urllib.parse.unquote(path[len("/api/users/"):])
+            ok, user_info = ms.litellm_user_info(user_id)
+            self.send_json(200 if ok else 404, {
+                "ok": ok,
+                "user": user_info if ok else None,
+                "error": None if ok else str(user_info)
+            })
+            return
+
+        if path == "/api/keys":
+            user_id = query.get("user_id", [None])[0]
+            ok, keys = ms.litellm_key_list(user_id=user_id)
+            self.send_json(200 if ok else 500, {
+                "ok": ok,
+                "keys": keys if ok else [],
+                "error": None if ok else str(keys)
+            })
+            return
+
+        if path == "/api/models":
+            self.send_json(200, collect_models_list())
+            return
+
+        if path == "/api/models/pull/status":
+            with pull_lock:
+                state_copy = dict(pull_state)
+            self.send_json(200, {"ok": True, "pull": state_copy})
+            return
+
+        self.send_json(404, {"ok": False, "error": "Not Found"})
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        body = self.read_json_body()
+        if body is None:
+            self.send_json(400, {"ok": False, "error": "Invalid JSON body"})
+            return
+
+        if path == "/api/users":
+            user_id = body.get("user_id")
+            if not user_id:
+                self.send_json(400, {"ok": False, "error": "user_id is required"})
+                return
+            email = body.get("email")
+            budget = body.get("budget")
+            if budget is not None:
+                try:
+                    budget = float(budget)
+                except ValueError:
+                    self.send_json(400, {"ok": False, "error": "budget must be a number"})
+                    return
+            ok, res = ms.litellm_user_create(user_id, email=email, max_budget=budget)
+            self.send_json(200 if ok else 400, {
+                "ok": ok,
+                "result": res if ok else None,
+                "error": None if ok else str(res)
+            })
+            return
+
+        if path == "/api/keys":
+            user_id = body.get("user_id")
+            if not user_id:
+                self.send_json(400, {"ok": False, "error": "user_id is required"})
+                return
+            alias = body.get("alias")
+            models = body.get("models")
+            if isinstance(models, str):
+                models = [m.strip() for m in models.split(",") if m.strip()]
+            spend = body.get("spend")
+            if spend is not None:
+                try:
+                    spend = float(spend)
+                except ValueError:
+                    self.send_json(400, {"ok": False, "error": "spend must be a number"})
+                    return
+            duration = body.get("duration")
+            ok, res = ms.litellm_key_create(
+                user_id,
+                alias=alias,
+                models=models,
+                max_budget=spend,
+                duration=duration,
+            )
+            self.send_json(200 if ok else 400, {
+                "ok": ok,
+                "key": res if ok else None,
+                "error": None if ok else str(res)
+            })
+            return
+
+        if path == "/api/models/inspect":
+            repo_id = body.get("repo_id")
+            if not repo_id:
+                self.send_json(400, {"ok": False, "error": "repo_id is required"})
+                return
+            revision = body.get("revision", "main")
+            meta = ms.inspect_hf_model(repo_id, revision)
+            if not meta:
+                self.send_json(404, {"ok": False, "error": f"Failed to fetch metadata for {repo_id}"})
+                return
+            mem_mib = meta.get("estimated_memory_mib", 0)
+            fits, reason = ms.check_model_capacity(mem_mib)
+            self.send_json(200, {
+                "ok": True,
+                "metadata": meta,
+                "fits": fits,
+                "reason": reason
+            })
+            return
+
+        if path == "/api/models/pull":
+            repo_id = body.get("repo_id")
+            if not repo_id:
+                self.send_json(400, {"ok": False, "error": "repo_id is required"})
+                return
+            name = body.get("name")
+            revision = body.get("revision", "main")
+            force = bool(body.get("force", False))
+
+            with pull_lock:
+                if pull_state["running"]:
+                    self.send_json(409, {"ok": False, "error": "Another model download is currently running"})
+                    return
+
+            thread = threading.Thread(
+                target=background_pull_worker,
+                args=(repo_id, name, revision, force),
+                daemon=True,
+            )
+            thread.start()
+            self.send_json(200, {"ok": True, "message": f"Download started for {repo_id}"})
+            return
+
+        if path == "/api/models/start":
+            model_name = body.get("name")
+            if not model_name:
+                self.send_json(400, {"ok": False, "error": "name is required"})
+                return
+            if not check_capabilities(model_name):
+                self.send_json(400, {"ok": False, "error": "Model has insufficient host capabilities"})
+                return
+            state_dir.mkdir(parents=True, exist_ok=True)
+            selected_model_file, serving_disabled_file = control_files()
+            ms.atomic_write_text(selected_model_file, f"{model_name}\n")
+            serving_disabled_file.unlink(missing_ok=True)
+            env = dict(os.environ, PUU_VLLM_SELECTED_MODEL=model_name, PUU_VLLM_REQUIRE_SELECTED_MODEL="true")
+            res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
+            if res.returncode != 0:
+                self.send_json(500, {"ok": False, "error": "Failed to activate model workload"})
+                return
+            self.send_json(200, {"ok": True, "message": f"Model {model_name} activated"})
+            return
+
+        if path == "/api/models/stop":
+            state_dir.mkdir(parents=True, exist_ok=True)
+            selected_model_file, serving_disabled_file = control_files()
+            selected_model_file.unlink(missing_ok=True)
+            ms.atomic_write_text(serving_disabled_file, "")
+            res = subprocess.run([str(planner_bin)], capture_output=True)
+            if res.returncode != 0:
+                self.send_json(500, {"ok": False, "error": "Failed to stop model workload"})
+                return
+            self.send_json(200, {"ok": True, "message": "Model serving stopped"})
+            return
+
+        self.send_json(404, {"ok": False, "error": "Not Found"})
+
+    def do_DELETE(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        if path.startswith("/api/users/"):
+            user_id = urllib.parse.unquote(path[len("/api/users/"):])
+            ok, res = ms.litellm_user_delete(user_id)
+            self.send_json(200 if ok else 400, {
+                "ok": ok,
+                "message": res if ok else None,
+                "error": None if ok else str(res)
+            })
+            return
+
+        if path.startswith("/api/keys/"):
+            key_or_alias = urllib.parse.unquote(path[len("/api/keys/"):])
+            ok, res = ms.litellm_key_delete(key_or_alias)
+            self.send_json(200 if ok else 400, {
+                "ok": ok,
+                "message": res if ok else None,
+                "error": None if ok else str(res)
+            })
+            return
+
+        if path.startswith("/api/models/"):
+            model_name = urllib.parse.unquote(path[len("/api/models/"):])
+            active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+            if ms.read_first_line(active_model_file) == model_name:
+                selected_model_file, serving_disabled_file = control_files()
+                selected_model_file.unlink(missing_ok=True)
+                ms.atomic_write_text(serving_disabled_file, "")
+                subprocess.run([str(planner_bin)], capture_output=True)
+
+            model_dir = ms.MODELS_DIR / model_name
+            if model_dir.exists():
+                shutil.rmtree(model_dir)
+            env_file = state_dir / "models.d" / f"{model_name}.env"
+            env_file.unlink(missing_ok=True)
+            run_discover()
+            subprocess.run([str(planner_bin)], capture_output=True)
+            self.send_json(200, {"ok": True, "message": f"Model {model_name} deleted"})
+            return
+
+        self.send_json(404, {"ok": False, "error": "Not Found"})
+
+
+HTML_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Puu OS — Oksa Management</title>
+<style>
+:root {
+  --bg-base: #181825;
+  --bg-surface: #1e1e2e;
+  --bg-card: #252538;
+  --border: #363a4f;
+  --text: #cdd6f4;
+  --text-muted: #a6adc8;
+  --primary: #89b4fa;
+  --primary-hover: #b4befe;
+  --success: #a6e3a1;
+  --warning: #f9e2af;
+  --danger: #f38ba8;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--bg-base);
+  color: var(--text);
+  line-height: 1.5;
+  padding-bottom: 40px;
+}
+header {
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand h1 { font-size: 1.25rem; font-weight: 700; color: #fff; }
+.brand .badge {
+  background: #313244;
+  color: var(--primary);
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+nav {
+  display: flex;
+  gap: 8px;
+  background-color: var(--bg-surface);
+  padding: 8px 28px;
+  border-bottom: 1px solid var(--border);
+}
+.nav-tab {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+.nav-tab:hover { color: var(--text); background: #313244; }
+.nav-tab.active { color: #fff; background: var(--primary); color: #11111b; }
+.container { max-width: 1200px; margin: 24px auto; padding: 0 20px; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.card {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+}
+.card h2 { font-size: 1.05rem; font-weight: 600; margin-bottom: 14px; color: #fff; }
+.metric-value { font-size: 1.75rem; font-weight: 700; color: var(--primary); }
+.metric-sub { font-size: 0.85rem; color: var(--text-muted); margin-top: 4px; }
+.table-container { overflow-x: auto; margin-top: 12px; }
+table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.875rem; }
+th {
+  background-color: var(--bg-card);
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+td { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+tr:hover { background-color: rgba(255,255,255,0.02); }
+.pill {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.pill.ok { background: rgba(166,227,161,0.2); color: var(--success); }
+.pill.insufficient { background: rgba(249,226,175,0.2); color: var(--warning); }
+.pill.active { background: rgba(137,180,250,0.25); color: var(--primary); }
+.pill.error { background: rgba(243,139,168,0.2); color: var(--danger); }
+.btn {
+  background-color: var(--primary);
+  color: #11111b;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.btn:hover { background-color: var(--primary-hover); }
+.btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+.btn-danger { background-color: var(--danger); color: #11111b; }
+.btn-danger:hover { background-color: #eba0ac; }
+.btn-secondary { background-color: #45475a; color: var(--text); }
+.btn-secondary:hover { background-color: #585b70; }
+.action-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.input-group { margin-bottom: 14px; }
+.input-group label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
+.input-group input, .input-group select {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.input-group input:focus, .input-group select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+.modal-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.65);
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  max-width: 520px;
+  padding: 24px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+}
+.modal h3 { font-size: 1.15rem; margin-bottom: 16px; color: #fff; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.key-box {
+  background: var(--bg-card);
+  border: 1px dashed var(--primary);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+  color: var(--primary);
+  margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: #313244;
+  color: #fff;
+  border-left: 4px solid var(--primary);
+  padding: 12px 20px;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  font-size: 0.85rem;
+  display: none;
+  z-index: 2000;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>Puu OS — Oksa</h1>
+    <span class="badge">Model Management & Telemetry</span>
+  </div>
+  <div id="serving-badge" class="pill active">SERVING: CHECKING...</div>
+</header>
+
+<nav>
+  <button class="nav-tab active" onclick="switchTab('monitoring')">Host Monitoring</button>
+  <button class="nav-tab" onclick="switchTab('models')">Hugging Face Models</button>
+  <button class="nav-tab" onclick="switchTab('users')">AI Users & Keys</button>
+</nav>
+
+<div class="container">
+  <div id="tab-monitoring" class="tab-content active">
+    <div class="grid">
+      <div class="card">
+        <h2>Host Memory</h2>
+        <div class="metric-value" id="host-mem-val">-</div>
+        <div class="metric-sub" id="host-mem-sub">Utilization</div>
+      </div>
+      <div class="card">
+        <h2>Active Workload</h2>
+        <div class="metric-value" id="active-model-val">-</div>
+        <div class="metric-sub" id="active-model-sub">Serving state</div>
+      </div>
+      <div class="card">
+        <h2>Inference Requests</h2>
+        <div class="metric-value" id="inf-requests-val">-</div>
+        <div class="metric-sub" id="inf-requests-sub">Running / Waiting</div>
+      </div>
+      <div class="card">
+        <h2>KV Cache Usage</h2>
+        <div class="metric-value" id="kv-cache-val">-</div>
+        <div class="metric-sub">Paged memory cache</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
+      <h2>Hardware Accelerators</h2>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Index</th><th>Accelerator</th><th>GPU Util</th><th>VRAM Used</th><th>VRAM Total</th><th>Temp</th><th>Power</th>
+            </tr>
+          </thead>
+          <tbody id="gpus-body">
+            <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No accelerator data available</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Cluster Workloads (K3s)</h2>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Pod / Service</th><th>Status</th><th>Ready</th><th>Restarts</th>
+            </tr>
+          </thead>
+          <tbody id="workloads-body">
+            <tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Loading workloads...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-models" class="tab-content">
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="action-bar">
+        <h2>Available Models</h2>
+        <div>
+          <button class="btn btn-secondary btn-sm" onclick="stopServing()">Stop Serving</button>
+          <button class="btn btn-sm" onclick="openAddModal()">+ Add Model from Hugging Face</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th><th>Repository ID</th><th>Size</th><th>Quant</th><th>Host Fit</th><th>Active</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="models-body">
+            <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">Loading models...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="pull-status-card" class="card" style="display:none; border-color:var(--primary);">
+      <h2>Download in Progress</h2>
+      <p id="pull-repo-text" style="font-weight:600; margin-bottom:8px;"></p>
+      <div style="background:var(--bg-card); padding:12px; border-radius:6px; font-family:monospace; font-size:0.8rem;" id="pull-log-text"></div>
+    </div>
+  </div>
+
+  <div id="tab-users" class="tab-content">
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="action-bar">
+        <h2>AI Users</h2>
+        <button class="btn btn-sm" onclick="openUserModal()">+ Create User</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>User ID</th><th>Email</th><th>Spend</th><th>Budget Limit</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="users-body">
+            <tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Loading AI users...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="action-bar">
+        <h2>AI API Keys</h2>
+        <button class="btn btn-sm" onclick="openKeyModal()">+ Generate API Key</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Alias</th><th>Token / Key</th><th>User</th><th>Allowed Models</th><th>Spend</th><th>Budget</th><th>Expires</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="keys-body">
+            <tr><td colspan="8" style="text-align:center; color:var(--text-muted);">Loading API keys...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="add-modal" class="modal-overlay">
+  <div class="modal">
+    <h3>Download Hugging Face Model</h3>
+    <div class="input-group">
+      <label>Hugging Face Repo ID (e.g. org/model)</label>
+      <input type="text" id="add-repo" placeholder="mistralai/Mistral-7B-Instruct-v0.3">
+    </div>
+    <div class="input-group">
+      <label>Local Model Alias (Optional)</label>
+      <input type="text" id="add-name" placeholder="mistral-7b">
+    </div>
+    <div class="input-group">
+      <label>Git Revision (Default: main)</label>
+      <input type="text" id="add-rev" value="main">
+    </div>
+
+    <div id="inspect-result" style="display:none; background:var(--bg-card); padding:12px; border-radius:6px; margin-bottom:14px; font-size:0.85rem;">
+      <p id="inspect-arch"></p>
+      <p id="inspect-storage"></p>
+      <p id="inspect-vram"></p>
+      <div id="inspect-fit" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="input-group" id="force-group" style="display:none;">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="add-force" style="width:auto;">
+        Force download for multi-node / QSFP cluster
+      </label>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('add-modal')">Cancel</button>
+      <button class="btn btn-secondary" onclick="runInspect()">Inspect & Check Fit</button>
+      <button class="btn" id="btn-pull" onclick="startPull()" disabled>Download & Ramp</button>
+    </div>
+  </div>
+</div>
+
+<div id="user-modal" class="modal-overlay">
+  <div class="modal">
+    <h3>Create AI User</h3>
+    <div class="input-group">
+      <label>User Identifier</label>
+      <input type="text" id="user-id" placeholder="developer-01">
+    </div>
+    <div class="input-group">
+      <label>Email Address (Optional)</label>
+      <input type="email" id="user-email" placeholder="dev@example.org">
+    </div>
+    <div class="input-group">
+      <label>Spend Budget Limit in USD (Optional)</label>
+      <input type="number" step="0.01" id="user-budget" placeholder="100.00">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('user-modal')">Cancel</button>
+      <button class="btn" onclick="submitCreateUser()">Create User</button>
+    </div>
+  </div>
+</div>
+
+<div id="key-modal" class="modal-overlay">
+  <div class="modal">
+    <h3>Generate AI API Key</h3>
+    <div class="input-group">
+      <label>User ID</label>
+      <input type="text" id="key-user-id" placeholder="developer-01">
+    </div>
+    <div class="input-group">
+      <label>Key Alias</label>
+      <input type="text" id="key-alias" placeholder="dev-key">
+    </div>
+    <div class="input-group">
+      <label>Allowed Models (Comma-separated, blank for all)</label>
+      <input type="text" id="key-models" placeholder="bonsai-2-27b">
+    </div>
+    <div class="input-group">
+      <label>Max Budget in USD (Optional)</label>
+      <input type="number" step="0.01" id="key-spend" placeholder="50.00">
+    </div>
+    <div class="input-group">
+      <label>Validity Duration (e.g. 30d, 24h)</label>
+      <input type="text" id="key-duration" placeholder="30d">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('key-modal')">Cancel</button>
+      <button class="btn" onclick="submitCreateKey()">Generate Key</button>
+    </div>
+  </div>
+</div>
+
+<div id="key-result-modal" class="modal-overlay">
+  <div class="modal">
+    <h3>API Key Generated</h3>
+    <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">Copy this API key now. It will not be shown again.</p>
+    <div class="key-box">
+      <span id="created-key-token"></span>
+      <button class="btn btn-secondary btn-sm" onclick="copyKey()">Copy</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('key-result-modal'); loadKeys();">Done</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+let currentTab = 'monitoring';
+let pollInterval = null;
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  const btn = Array.from(document.querySelectorAll('.nav-tab')).find(b => b.getAttribute('onclick').includes(tab));
+  if (btn) btn.classList.add('active');
+  const panel = document.getElementById('tab-' + tab);
+  if (panel) panel.classList.add('active');
+
+  if (tab === 'monitoring') loadMonitoring();
+  if (tab === 'models') loadModels();
+  if (tab === 'users') { loadUsers(); loadKeys(); }
+}
+
+async function loadMonitoring() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    if (!data.ok) return;
+    const s = data.status;
+
+    const sBadge = document.getElementById('serving-badge');
+    if (s.serving_enabled) {
+      sBadge.textContent = 'SERVING: ENABLED (' + (s.active_model || 'IDLE') + ')';
+      sBadge.className = 'pill ' + (s.active_model ? 'active' : 'ok');
+    } else {
+      sBadge.textContent = 'SERVING: DISABLED';
+      sBadge.className = 'pill insufficient';
+    }
+
+    if (s.host_memory) {
+      document.getElementById('host-mem-val').textContent = s.host_memory.used_mib + ' / ' + s.host_memory.total_mib + ' MiB';
+      document.getElementById('host-mem-sub').textContent = s.host_memory.used_pct + '% memory used';
+    }
+
+    document.getElementById('active-model-val').textContent = s.active_model || 'None';
+    document.getElementById('active-model-sub').textContent = 'Selected: ' + (s.selected_model || 'None');
+
+    const m = s.metrics || {};
+    document.getElementById('inf-requests-val').textContent = (m.running_requests || 0) + ' / ' + (m.waiting_requests || 0);
+    document.getElementById('kv-cache-val').textContent = (m.kv_cache_usage_pct || 0) + '%';
+
+    const gBody = document.getElementById('gpus-body');
+    if (s.gpus && s.gpus.length > 0) {
+      gBody.innerHTML = s.gpus.map(g => `
+        <tr>
+          <td>[${g.index}]</td>
+          <td><strong>${g.name || 'NVIDIA'}</strong></td>
+          <td>${g.gpu_util_pct || 0}%</td>
+          <td>${Math.round(g.memory_used_mib || 0)} MiB</td>
+          <td>${Math.round(g.memory_total_mib || 0)} MiB</td>
+          <td>${g.temperature_c || 0}°C</td>
+          <td>${g.power_w ? g.power_w.toFixed(1) + 'W' : '-'}</td>
+        </tr>
+      `).join('');
+    } else {
+      gBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No accelerator data available</td></tr>';
+    }
+
+    const wBody = document.getElementById('workloads-body');
+    if (s.workloads && s.workloads.length > 0) {
+      wBody.innerHTML = s.workloads.map(w => `
+        <tr>
+          <td>${w.name}</td>
+          <td><span class="pill ${w.phase === 'Running' ? 'ok' : 'insufficient'}">${w.phase}</span></td>
+          <td>${w.ready ? 'Yes' : 'No'}</td>
+          <td>${w.restarts || 0}</td>
+        </tr>
+      `).join('');
+    } else {
+      wBody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No workloads reported</td></tr>';
+    }
+  } catch (err) {}
+}
+
+async function loadModels() {
+  try {
+    const res = await fetch('/api/models');
+    const data = await res.json();
+    if (!data.ok) return;
+
+    const mBody = document.getElementById('models-body');
+    if (data.models && data.models.length > 0) {
+      mBody.innerHTML = data.models.map(m => `
+        <tr>
+          <td><strong>${m.name}</strong></td>
+          <td>${m.repo_id}</td>
+          <td>${m.storage_mib} MiB</td>
+          <td>${m.quantization}</td>
+          <td><span class="pill ${m.capabilities === 'ok' ? 'ok' : 'insufficient'}">${m.capabilities}</span></td>
+          <td>${m.active ? '<span class="pill active">Active</span>' : '-'}</td>
+          <td>
+            ${m.active ?
+              `<button class="btn btn-sm btn-secondary" onclick="stopServing()">Stop</button>` :
+              `<button class="btn btn-sm" onclick="startModel('${m.name}')">Start</button>`}
+            <button class="btn btn-sm btn-danger" style="margin-left:6px;" onclick="removeModel('${m.name}')">Delete</button>
+          </td>
+        </tr>
+      `).join('');
+    } else {
+      mBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No models installed</td></tr>';
+    }
+
+    checkPullStatus();
+  } catch (err) {}
+}
+
+async function checkPullStatus() {
+  try {
+    const res = await fetch('/api/models/pull/status');
+    const data = await res.json();
+    if (!data.ok) return;
+    const p = data.pull;
+    const pCard = document.getElementById('pull-status-card');
+    if (p && p.running) {
+      pCard.style.display = 'block';
+      document.getElementById('pull-repo-text').textContent = 'Downloading ' + p.repo_id + '...';
+      document.getElementById('pull-log-text').textContent = p.progress;
+    } else if (p && p.complete) {
+      pCard.style.display = 'block';
+      document.getElementById('pull-repo-text').textContent = 'Completed ' + p.repo_id;
+      document.getElementById('pull-log-text').textContent = p.progress;
+    } else {
+      pCard.style.display = 'none';
+    }
+  } catch (err) {}
+}
+
+async function startModel(name) {
+  try {
+    const res = await fetch('/api/models/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name})
+    });
+    const d = await res.json();
+    if (d.ok) { showToast(d.message); loadModels(); }
+    else { alert(d.error || 'Failed to start model'); }
+  } catch (err) { alert(err); }
+}
+
+async function stopServing() {
+  try {
+    const res = await fetch('/api/models/stop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    const d = await res.json();
+    if (d.ok) { showToast(d.message); loadModels(); }
+    else { alert(d.error || 'Failed to stop serving'); }
+  } catch (err) { alert(err); }
+}
+
+async function removeModel(name) {
+  if (!confirm('Remove model ' + name + '?')) return;
+  try {
+    const res = await fetch('/api/models/' + encodeURIComponent(name), { method: 'DELETE' });
+    const d = await res.json();
+    if (d.ok) { showToast(d.message); loadModels(); }
+    else { alert(d.error || 'Failed to remove model'); }
+  } catch (err) { alert(err); }
+}
+
+function openAddModal() {
+  document.getElementById('inspect-result').style.display = 'none';
+  document.getElementById('force-group').style.display = 'none';
+  document.getElementById('btn-pull').disabled = true;
+  document.getElementById('add-modal').classList.add('open');
+}
+
+function openUserModal() { document.getElementById('user-modal').classList.add('open'); }
+function openKeyModal() { document.getElementById('key-modal').classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+async function runInspect() {
+  const repo = document.getElementById('add-repo').value.trim();
+  const rev = document.getElementById('add-rev').value.trim() || 'main';
+  if (!repo) { alert('Please enter a repository ID'); return; }
+
+  showToast('Inspecting repository metadata...');
+  try {
+    const res = await fetch('/api/models/inspect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_id: repo, revision: rev})
+    });
+    const d = await res.json();
+    if (!d.ok) { alert(d.error || 'Inspection failed'); return; }
+
+    const m = d.metadata;
+    document.getElementById('inspect-arch').textContent = 'Architecture: ' + (m.architectures ? m.architectures.join(', ') : 'unknown');
+    document.getElementById('inspect-storage').textContent = 'Storage: ~' + m.storage_mib + ' MiB';
+    document.getElementById('inspect-vram').textContent = 'Estimated RAM/VRAM: ~' + m.estimated_memory_mib + ' MiB';
+
+    const fitDiv = document.getElementById('inspect-fit');
+    const forceGroup = document.getElementById('force-group');
+    const btnPull = document.getElementById('btn-pull');
+
+    if (d.fits) {
+      fitDiv.innerHTML = '<span class="pill ok">COMPATIBLE</span> Host capacity is sufficient.';
+      forceGroup.style.display = 'none';
+      btnPull.disabled = false;
+    } else {
+      fitDiv.innerHTML = '<span class="pill insufficient">INSUFFICIENT</span> ' + d.reason;
+      forceGroup.style.display = 'block';
+      const forceCheck = document.getElementById('add-force');
+      forceCheck.checked = false;
+      forceCheck.onchange = () => { btnPull.disabled = !forceCheck.checked; };
+      btnPull.disabled = true;
+    }
+    document.getElementById('inspect-result').style.display = 'block';
+  } catch (err) { alert(err); }
+}
+
+async function startPull() {
+  const repo = document.getElementById('add-repo').value.trim();
+  const name = document.getElementById('add-name').value.trim() || undefined;
+  const rev = document.getElementById('add-rev').value.trim() || 'main';
+  const force = document.getElementById('add-force').checked;
+
+  try {
+    const res = await fetch('/api/models/pull', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_id: repo, name: name, revision: rev, force: force})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      closeModal('add-modal');
+      showToast(d.message);
+      loadModels();
+    } else {
+      alert(d.error || 'Failed to start pull');
+    }
+  } catch (err) { alert(err); }
+}
+
+async function loadUsers() {
+  try {
+    const res = await fetch('/api/users');
+    const d = await res.json();
+    const uBody = document.getElementById('users-body');
+    if (d.ok && d.users && d.users.length > 0) {
+      uBody.innerHTML = d.users.map(u => `
+        <tr>
+          <td><strong>${u.user_id}</strong></td>
+          <td>${u.user_email || '-'}</td>
+          <td>${u.spend ? '$' + u.spend.toFixed(2) : '$0.00'}</td>
+          <td>${u.max_budget != null ? '$' + u.max_budget.toFixed(2) : 'unlimited'}</td>
+          <td><button class="btn btn-sm btn-danger" onclick="deleteUser('${u.user_id}')">Delete</button></td>
+        </tr>
+      `).join('');
+    } else {
+      uBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No AI users found</td></tr>';
+    }
+  } catch (err) {}
+}
+
+async function submitCreateUser() {
+  const uid = document.getElementById('user-id').value.trim();
+  const email = document.getElementById('user-email').value.trim() || undefined;
+  const budget = document.getElementById('user-budget').value.trim() || undefined;
+  if (!uid) { alert('User ID is required'); return; }
+
+  try {
+    const res = await fetch('/api/users', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: uid, email: email, budget: budget})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      closeModal('user-modal');
+      showToast('Created AI user ' + uid);
+      loadUsers();
+    } else {
+      alert(d.error || 'Failed to create user');
+    }
+  } catch (err) { alert(err); }
+}
+
+async function deleteUser(uid) {
+  if (!confirm('Delete user ' + uid + '?')) return;
+  try {
+    const res = await fetch('/api/users/' + encodeURIComponent(uid), { method: 'DELETE' });
+    const d = await res.json();
+    if (d.ok) { showToast(d.message); loadUsers(); }
+    else { alert(d.error || 'Failed to delete user'); }
+  } catch (err) { alert(err); }
+}
+
+async function loadKeys() {
+  try {
+    const res = await fetch('/api/keys');
+    const d = await res.json();
+    const kBody = document.getElementById('keys-body');
+    if (d.ok && d.keys && d.keys.length > 0) {
+      kBody.innerHTML = d.keys.map(k => {
+        const token = k.token || k.key || '-';
+        const masked = token.length > 16 ? token.substring(0, 8) + '...' + token.slice(-4) : token;
+        const models = Array.isArray(k.models) && k.models.length > 0 ? k.models.join(', ') : 'all';
+        return `
+          <tr>
+            <td><strong>${k.key_name || k.key_alias || '-'}</strong></td>
+            <td><code>${masked}</code></td>
+            <td>${k.user_id || '-'}</td>
+            <td>${models}</td>
+            <td>${k.spend ? '$' + k.spend.toFixed(2) : '$0.00'}</td>
+            <td>${k.max_budget != null ? '$' + k.max_budget.toFixed(2) : 'unlimited'}</td>
+            <td>${k.expires || 'never'}</td>
+            <td><button class="btn btn-sm btn-danger" onclick="revokeKey('${token}')">Revoke</button></td>
+          </tr>
+        `;
+      }).join('');
+    } else {
+      kBody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-muted);">No active API keys found</td></tr>';
+    }
+  } catch (err) {}
+}
+
+async function submitCreateKey() {
+  const uid = document.getElementById('key-user-id').value.trim();
+  const alias = document.getElementById('key-alias').value.trim() || undefined;
+  const models = document.getElementById('key-models').value.trim() || undefined;
+  const spend = document.getElementById('key-spend').value.trim() || undefined;
+  const duration = document.getElementById('key-duration').value.trim() || undefined;
+  if (!uid) { alert('User ID is required'); return; }
+
+  try {
+    const res = await fetch('/api/keys', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: uid, alias: alias, models: models, spend: spend, duration: duration})
+    });
+    const d = await res.json();
+    if (d.ok && d.key) {
+      closeModal('key-modal');
+      const token = d.key.token || d.key.key;
+      document.getElementById('created-key-token').textContent = token;
+      document.getElementById('key-result-modal').classList.add('open');
+    } else {
+      alert(d.error || 'Failed to generate key');
+    }
+  } catch (err) { alert(err); }
+}
+
+async function revokeKey(keyToken) {
+  if (!confirm('Revoke API key?')) return;
+  try {
+    const res = await fetch('/api/keys/' + encodeURIComponent(keyToken), { method: 'DELETE' });
+    const d = await res.json();
+    if (d.ok) { showToast(d.message); loadKeys(); }
+    else { alert(d.error || 'Failed to revoke key'); }
+  } catch (err) { alert(err); }
+}
+
+function copyKey() {
+  const text = document.getElementById('created-key-token').textContent;
+  navigator.clipboard.writeText(text);
+  showToast('Copied API key to clipboard');
+}
+
+setInterval(() => {
+  if (currentTab === 'monitoring') loadMonitoring();
+  if (currentTab === 'models') checkPullStatus();
+}, 2500);
+
+loadMonitoring();
+</script>
+</body>
+</html>
+"""
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Puu Oksa Web Management Service")
+    parser.add_argument("--host", default="0.0.0.0", help="Listen host address (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8088, help="Listen port (default: 8088)")
+    args = parser.parse_args()
+
+    class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    server_address = (args.host, args.port)
+    httpd = ThreadedHTTPServer(server_address, OksaWebHandler)
+    print(f"Oksa Web service listening on http://{args.host}:{args.port}")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down Oksa Web service.")
+        httpd.server_close()
+
+
+if __name__ == "__main__":
+    main()

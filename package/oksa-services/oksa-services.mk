@@ -24,10 +24,12 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/bin/oksa
 	for executable in oksa-discover-vllm-models oksa-label-model-serving-node \
 		oksa-collect-nvlink-topology oksa-plan-vllm-workloads oksa-preseed-vllm-models \
-		oksa-init-litellm-db oksa-calibrate oksa-calibration-probe; do \
+		oksa-init-litellm-db oksa-calibrate oksa-calibration-probe oksa-web; do \
 		$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/$$executable \
 			$(TARGET_DIR)/usr/libexec/puu/$$executable || exit $$?; \
 	done
+	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/oksa-web \
+		$(TARGET_DIR)/usr/bin/oksa-web
 	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/oksa-services.conf \
 		$(TARGET_DIR)/usr/lib/tmpfiles.d/oksa-services.conf
 	$(foreach manifest,20-agentgateway.yaml 21-llm-d-gateway.yaml \
@@ -49,7 +51,8 @@ define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
 		puu-model-serving-labeler.timer puu-nvlink-topology.service \
 		puu-nvlink-topology.timer puu-vllm-planner.service \
 		puu-vllm-planner.timer puu-vllm-preseed.service \
-		puu-postgresql.service puu-bonsai-calibration.service; do \
+		puu-postgresql.service puu-bonsai-calibration.service \
+		puu-oksa-web.service; do \
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/systemd/$$unit \
 			$(TARGET_DIR)/usr/lib/systemd/system/$$unit || exit $$?; \
 	done; \
