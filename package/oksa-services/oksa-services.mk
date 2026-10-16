@@ -15,22 +15,22 @@ endif
 
 define OKSA_SERVICES_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
-		-o $(@D)/mdns-alias $(OKSA_SERVICES_FILES)/mdns-alias.c \
+		-o $(@D)/puu-mdns-alias $(OKSA_SERVICES_FILES)/puu-mdns-alias.c \
 		-lavahi-client -lavahi-common
 endef
 
 define OKSA_SERVICES_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(@D)/mdns-alias \
-		$(TARGET_DIR)/usr/libexec/puu/mdns-alias
-	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/model_serving.py \
-		$(TARGET_DIR)/usr/libexec/puu/model_serving.py
-	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/install-k3s-addons \
-		$(TARGET_DIR)/usr/libexec/puu/install-k3s-addons
+	$(INSTALL) -D -m 0755 $(@D)/puu-mdns-alias \
+		$(TARGET_DIR)/usr/libexec/puu/puu-mdns-alias
+	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/bin/oksa_model_serving.py \
+		$(TARGET_DIR)/usr/libexec/puu/oksa_model_serving.py
+	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/oksa-install-k3s-addons \
+		$(TARGET_DIR)/usr/libexec/puu/oksa-install-k3s-addons
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/oksa \
 		$(TARGET_DIR)/usr/bin/oksa
-	for executable in discover-vllm-models label-model-serving-node \
-		collect-nvlink-topology plan-vllm-workloads preseed-vllm-models \
-		init-litellm-db; do \
+	for executable in oksa-discover-vllm-models oksa-label-model-serving-node \
+		oksa-collect-nvlink-topology oksa-plan-vllm-workloads oksa-preseed-vllm-models \
+		oksa-init-litellm-db; do \
 		$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/$$executable \
 			$(TARGET_DIR)/usr/libexec/puu/$$executable || exit $$?; \
 	done

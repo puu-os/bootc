@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import model_serving as ms
+import oksa_model_serving as ms
 
 IGNORE_IFACE_PREFIXES = ("lo", "docker", "veth", "cni", "flannel")
 SMI_BIN = Path("/usr/bin/nvidia-smi")
@@ -107,7 +107,7 @@ def probe_gpus() -> GpuProbe:
 
     if ms.has_nvidia_hardware():
         if not SMI_BIN.is_file() or not os.access(SMI_BIN, os.X_OK):
-            sys.exit(f"label-model-serving-node: NVIDIA hardware found but {SMI_BIN} is missing")
+            sys.exit(f"oksa-label-model-serving-node: NVIDIA hardware found but {SMI_BIN} is missing")
         probe.available = True
 
     if probe.available:
