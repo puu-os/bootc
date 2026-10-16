@@ -23,6 +23,26 @@ for directory in (Path(__file__).resolve().parent, libexec_dir):
 import oksa_model_serving as ms
 
 
+def resolve_helper(name: str) -> Path:
+    installed = libexec_dir / name
+    if installed.is_file():
+        return installed
+    sibling = Path(__file__).resolve().parent / name
+    if sibling.is_file():
+        return sibling
+    return installed
+
+
+def notify_discovery_and_planner() -> None:
+    if os.geteuid() == 0:
+        discover_bin = resolve_helper("oksa-discover-vllm-models")
+        if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
+            subprocess.run([str(discover_bin)], check=False)
+        planner_bin = resolve_helper("oksa-plan-vllm-workloads")
+        if planner_bin.is_file() and os.access(planner_bin, os.X_OK):
+            subprocess.run([str(planner_bin)], check=False)
+
+
 def download_with_cli(repo_id: str, revision: str, dest_dir: Path) -> bool:
     for cli_cmd in ("hf", "huggingface-cli"):
         if shutil.which(cli_cmd):
@@ -78,12 +98,14 @@ def model_files(repo_id: str, revision: str) -> list[dict] | None:
 def file_matches(path: Path, info: dict) -> bool:
     if not path.is_file() or path.stat().st_size != info["size"]:
         return False
-    if info["sha256"] is None:
+    if info.get("sha256"):
+        digest = hashlib.sha256()
+        expected = info["sha256"]
+    elif info.get("blob_id"):
         digest = hashlib.sha1(f"blob {info['size']}\0".encode())
         expected = info["blob_id"]
     else:
-        digest = hashlib.sha256()
-        expected = info["sha256"]
+        return True
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(block)
@@ -123,24 +145,14 @@ def write_manifest(model_dir: Path, manifest: dict) -> None:
     ms.atomic_write_text(model_dir / ms.PRESEED_MANIFEST, json.dumps(data) + "\n")
 
 
-def preseed_model(catalog_file: Path, models_dir: Path) -> bool:
-    meta = ms.parse_env_file(catalog_file)
-    model_name = meta.get("PUU_VLLM_MODEL_NAME") or catalog_file.stem
-    repo_id = meta.get("PUU_VLLM_REPO_ID")
-    revision = meta.get("PUU_VLLM_REVISION", "main") or "main"
-
-    if not repo_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
-        print(f"error: invalid model name or missing repository in {catalog_file}", file=sys.stderr)
-        return False
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = models_dir.parent / f".{model_name}.preseed.lock"
-    with lock_path.open("w") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        return preseed_locked(catalog_file, models_dir, model_name, repo_id, revision)
-
-
-def preseed_locked(catalog_file: Path, models_dir: Path, model_name: str, repo_id: str, revision: str) -> bool:
+def preseed_locked(
+    catalog_file: Path | None,
+    models_dir: Path,
+    model_name: str,
+    repo_id: str,
+    revision: str,
+    hf_meta: dict | None = None,
+) -> bool:
     dest_dir = models_dir / model_name
     backup_dir = models_dir.parent / f".{model_name}.previous"
     if backup_dir.exists():
@@ -150,11 +162,14 @@ def preseed_locked(catalog_file: Path, models_dir: Path, model_name: str, repo_i
             else:
                 backup_dir.rename(dest_dir)
     if ms.verified_preseed(dest_dir, repo_id, revision):
-        shutil.copyfile(catalog_file, dest_dir / "puu-serving.env")
+        if catalog_file is not None:
+            shutil.copyfile(catalog_file, dest_dir / "puu-serving.env")
+        elif hf_meta is not None:
+            ms.atomic_write_text(dest_dir / "puu-serving.env", ms.generate_serving_env_text(hf_meta, dest_dir))
         print(f"Model {model_name} already present at {dest_dir}")
         return True
 
-    files = model_files(repo_id, revision)
+    files = hf_meta["files"] if hf_meta and "files" in hf_meta else model_files(repo_id, revision)
     if files is None:
         return False
     manifest = {"repo_id": repo_id, "revision": revision, "files": files}
@@ -179,7 +194,10 @@ def preseed_locked(catalog_file: Path, models_dir: Path, model_name: str, repo_i
         relative = path.relative_to(stage_dir)
         if path.is_file() and not relative.parts[0].startswith(".") and relative.as_posix() not in expected:
             path.unlink()
-    shutil.copyfile(catalog_file, stage_dir / "puu-serving.env")
+    if catalog_file is not None:
+        shutil.copyfile(catalog_file, stage_dir / "puu-serving.env")
+    elif hf_meta is not None:
+        ms.atomic_write_text(stage_dir / "puu-serving.env", ms.generate_serving_env_text(hf_meta, dest_dir))
     write_manifest(stage_dir, manifest)
     with ms.preseed_publish_lock(models_dir, exclusive=True):
         try:
@@ -197,23 +215,65 @@ def preseed_locked(catalog_file: Path, models_dir: Path, model_name: str, repo_i
     return True
 
 
-def notify_discovery_and_planner() -> None:
-    if os.geteuid() == 0:
-        discover_bin = libexec_dir / "oksa-discover-vllm-models"
-        if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
-            subprocess.run([str(discover_bin)], check=False)
-        planner_bin = libexec_dir / "oksa-plan-vllm-workloads"
-        if planner_bin.is_file() and os.access(planner_bin, os.X_OK):
-            subprocess.run([str(planner_bin)], check=False)
+def preseed_target(
+    models_dir: Path,
+    model_name: str,
+    repo_id: str,
+    revision: str = "main",
+    catalog_file: Path | None = None,
+    force: bool = False,
+) -> bool:
+    if not repo_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
+        print(f"error: invalid model name {model_name!r} or missing repository {repo_id!r}", file=sys.stderr)
+        return False
+
+    hf_meta = None
+    if catalog_file is not None:
+        meta = ms.parse_env_file(catalog_file)
+        estimated_mib = ms.parse_int(meta.get("PUU_VLLM_ESTIMATED_MEMORY_MIB"), 0)
+    else:
+        print(f"Inspecting Hugging Face repository {repo_id} ({revision})...")
+        hf_meta = ms.inspect_hf_model(repo_id, revision)
+        if hf_meta is None:
+            print(f"error: failed to inspect Hugging Face repository {repo_id}", file=sys.stderr)
+            return False
+        estimated_mib = hf_meta.get("estimated_memory_mib", 0)
+
+    if estimated_mib > 0:
+        fits, reason = ms.check_model_capacity(estimated_mib)
+        if not fits:
+            if force:
+                print(f"warning: {reason}. Proceeding due to --force (cluster/QSFP-chaining enabled).", file=sys.stderr)
+            else:
+                print(f"error: {reason}. Pass --force to override for multi-node QSFP clustering.", file=sys.stderr)
+                return False
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = models_dir.parent / f".{model_name}.preseed.lock"
+    with lock_path.open("w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        return preseed_locked(catalog_file, models_dir, model_name, repo_id, revision, hf_meta=hf_meta)
+
+
+def preseed_model(catalog_file: Path, models_dir: Path, force: bool = False) -> bool:
+    meta = ms.parse_env_file(catalog_file)
+    model_name = meta.get("PUU_VLLM_MODEL_NAME") or catalog_file.stem
+    repo_id = meta.get("PUU_VLLM_REPO_ID", "")
+    revision = meta.get("PUU_VLLM_REVISION", "main") or "main"
+    return preseed_target(models_dir, model_name, repo_id, revision, catalog_file=catalog_file, force=force)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Preseed vLLM models from catalog")
+    parser = argparse.ArgumentParser(description="Preseed vLLM models from catalog or Hugging Face")
     parser.add_argument(
         "models",
         nargs="*",
-        help="Specific model names to preseed (default: autostart catalog models)",
+        help="Specific model names or Hugging Face repository IDs to preseed",
     )
+    parser.add_argument("--repo-id", help="Hugging Face repository ID (e.g. org/model)")
+    parser.add_argument("--name", help="Custom model name (default: derived from repo-id)")
+    parser.add_argument("--revision", default="main", help="Model git revision (default: main)")
+    parser.add_argument("--force", action="store_true", help="Download model even if exceeding host capacity (for QSFP clustering)")
     parser.add_argument(
         "--catalog-dir",
         type=Path,
@@ -229,30 +289,50 @@ def main() -> None:
     catalog_dir = args.catalog_dir
     models_dir = args.models_dir
 
+    if args.repo_id:
+        name = args.name or args.repo_id.split("/")[-1].lower()
+        name = re.sub(r"[^a-z0-9._-]+", "-", name).strip("-")
+        success = preseed_target(models_dir, name, args.repo_id, args.revision, force=args.force)
+        if success:
+            notify_discovery_and_planner()
+        sys.exit(0 if success else 1)
+
+    if args.models:
+        success = True
+        for item in args.models:
+            env_file = catalog_dir / f"{item}.env"
+            if env_file.is_file():
+                if not preseed_model(env_file, models_dir, force=args.force):
+                    success = False
+                else:
+                    notify_discovery_and_planner()
+            elif "/" in item:
+                name = args.name or item.split("/")[-1].lower()
+                name = re.sub(r"[^a-z0-9._-]+", "-", name).strip("-")
+                if not preseed_target(models_dir, name, item, args.revision, force=args.force):
+                    success = False
+                else:
+                    notify_discovery_and_planner()
+            else:
+                sys.exit(f"error: catalog model not found: {item}")
+        sys.exit(0 if success else 1)
+
     if not catalog_dir.is_dir():
         print(f"Catalog directory {catalog_dir} does not exist, skipping pre-seeding.")
         sys.exit(0)
 
-    target_files: list[Path] = []
-    if args.models:
-        for name in args.models:
-            env_file = catalog_dir / f"{name}.env"
-            if not env_file.is_file():
-                sys.exit(f"error: catalog model not found: {name}")
-            target_files.append(env_file)
-    else:
-        candidates = []
-        for env_file in sorted(catalog_dir.glob("*.env")):
-            meta = ms.parse_env_file(env_file)
-            if not ms.parse_bool(meta.get("PUU_VLLM_AUTOSTART"), False):
-                continue
-            try:
-                prio = int(meta.get("PUU_VLLM_AUTOSTART_PRIORITY", "0"))
-            except ValueError:
-                prio = 0
-            candidates.append((prio, env_file))
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        target_files = [item[1] for item in candidates]
+    candidates = []
+    for env_file in sorted(catalog_dir.glob("*.env")):
+        meta = ms.parse_env_file(env_file)
+        if not ms.parse_bool(meta.get("PUU_VLLM_AUTOSTART"), False):
+            continue
+        try:
+            prio = int(meta.get("PUU_VLLM_AUTOSTART_PRIORITY", "0"))
+        except ValueError:
+            prio = 0
+        candidates.append((prio, env_file))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    target_files = [item[1] for item in candidates]
 
     if not target_files:
         print("No models to preseed.")
@@ -260,7 +340,7 @@ def main() -> None:
 
     success = True
     for catalog_file in target_files:
-        if not preseed_model(catalog_file, models_dir):
+        if not preseed_model(catalog_file, models_dir, force=args.force):
             success = False
         else:
             notify_discovery_and_planner()

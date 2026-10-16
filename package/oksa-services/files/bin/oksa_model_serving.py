@@ -16,9 +16,12 @@ import subprocess
 import tempfile
 import time
 from typing import Any, Dict
+import urllib.error
+import urllib.parse
+import urllib.request
 
-STATE_DIR = Path("/var/lib/puu/vllm")
-MODELS_DIR = Path("/var/lib/vllm/models")
+STATE_DIR = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
+MODELS_DIR = Path(os.environ.get("PUU_VLLM_MODELS_DIR", "/var/lib/vllm/models"))
 PRESEED_MANIFEST = ".puu-preseed.json"
 CALIBRATION_RESULT_PATH = Path(os.environ.get("PUU_CALIBRATION_FILE", "/var/lib/puu/calibration/bonsai.json"))
 
@@ -36,6 +39,17 @@ def valid_model_file(name: str) -> bool:
         return False
     path = PurePosixPath(name)
     return not path.is_absolute() and all(part not in ("", ".", "..") for part in name.split("/")) and "\\" not in name
+
+
+def is_serving_file(name: str) -> bool:
+    if not valid_model_file(name):
+        return False
+    if name.startswith(".") or "/." in name:
+        return False
+    lower = name.lower()
+    if lower.endswith((".md", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".gitattributes", ".gitignore")):
+        return False
+    return True
 
 
 def verified_preseed(model_dir: Path, repo_id: str | None = None, revision: str | None = None) -> bool:
@@ -478,3 +492,167 @@ def read_calibration_limits(path: Path | str | None = None) -> tuple[dict, bool]
     except (OSError, ValueError, TypeError):
         pass
     return {}, False
+
+
+def host_memory_capacity_mib(calibration_path: Path | str | None = None) -> int:
+    limits, valid = read_calibration_limits(calibration_path)
+    if valid:
+        mem_bytes = limits.get("memory_bytes", 0)
+        if isinstance(mem_bytes, int) and mem_bytes > 0:
+            return mem_bytes // (1024 * 1024)
+        return 0
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemTotal:"):
+                kb = int(line.split()[1])
+                return (kb * 1024) // (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def check_model_capacity(
+    estimated_memory_mib: int,
+    calibration_path: Path | str | None = None,
+) -> tuple[bool, str]:
+    limits, valid = read_calibration_limits(calibration_path)
+    if valid:
+        mem_bytes = limits.get("memory_bytes", 0)
+        if not isinstance(mem_bytes, int) or mem_bytes <= 0:
+            return False, "Host has zero calibrated capacity for standalone execution (requires multi-node QSFP clustering)"
+        host_mib = mem_bytes // (1024 * 1024)
+        if estimated_memory_mib > host_mib:
+            return False, f"Model requires ~{estimated_memory_mib} MiB, exceeding calibrated host limit of {host_mib} MiB"
+        return True, f"Model fits within calibrated host limit ({estimated_memory_mib} MiB <= {host_mib} MiB)"
+    host_mib = host_memory_capacity_mib(calibration_path)
+    if host_mib > 0 and estimated_memory_mib > host_mib:
+        return False, f"Model requires ~{estimated_memory_mib} MiB, exceeding uncalibrated host memory of {host_mib} MiB"
+    return True, f"Model fits within available memory (~{estimated_memory_mib} MiB)"
+
+
+def inspect_hf_model(
+    repo_id: str,
+    revision: str = "main",
+    timeout_sec: int = 30,
+) -> dict | None:
+    rev = urllib.parse.quote(revision, safe="/")
+    api_url = f"https://huggingface.co/api/models/{repo_id}/revision/{rev}?blobs=true"
+    headers = {"User-Agent": "puu-oksa/1.0"}
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(api_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, KeyError):
+        return None
+
+    siblings = data.get("siblings")
+    if not isinstance(siblings, list):
+        return None
+
+    files = []
+    weight_bytes = 0
+    config_entry = None
+    for entry in siblings:
+        if not isinstance(entry, dict):
+            continue
+        rfilename = entry.get("rfilename", "")
+        if not is_serving_file(rfilename):
+            continue
+        size = entry.get("size", 0)
+        if not isinstance(size, int) or size <= 0:
+            continue
+        sha256 = entry.get("lfs", {}).get("sha256")
+        blob_id = entry.get("blobId")
+        files.append({"path": rfilename, "size": size, "sha256": sha256, "blob_id": blob_id})
+        if rfilename == "config.json":
+            config_entry = entry
+        if rfilename.endswith((".safetensors", ".bin")):
+            weight_bytes += size
+
+    if not config_entry or weight_bytes == 0:
+        return None
+
+    config_dict = {}
+    if isinstance(data.get("config"), dict):
+        config_dict = data["config"]
+    if not config_dict:
+        config_url = f"https://huggingface.co/{repo_id}/raw/{rev}/config.json"
+        cfg_req = urllib.request.Request(config_url, headers=headers)
+        try:
+            with urllib.request.urlopen(cfg_req, timeout=timeout_sec) as resp:
+                config_dict = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+
+    storage_mib = max(1, (sum(f["size"] for f in files) + 1048575) // 1048576)
+    weight_mib = max(1, (weight_bytes + 1048575) // 1048576)
+    estimated_memory_mib = weight_mib + max(1024, (weight_mib * 20) // 100)
+
+    raw_context = config_dict.get("max_position_embeddings") or config_dict.get("seq_length") or config_dict.get("n_positions") or 4096
+    max_context = parse_int(raw_context, 4096)
+
+    quantization = ""
+    quant_config = config_dict.get("quantization_config")
+    if isinstance(quant_config, dict):
+        quant_method = quant_config.get("quant_method")
+        if quant_method:
+            quantization = str(quant_method)
+    if not quantization:
+        lower_repo = repo_id.lower()
+        if "nvfp4" in lower_repo:
+            quantization = "compressed-tensors"
+        elif "awq" in lower_repo:
+            quantization = "awq"
+        elif "gptq" in lower_repo:
+            quantization = "gptq"
+        elif "fp8" in lower_repo:
+            quantization = "fp8"
+
+    architectures = config_dict.get("architectures", [])
+    if not isinstance(architectures, list):
+        architectures = []
+
+    model_name = repo_id.split("/")[-1].lower()
+    model_name = re.sub(r"[^a-z0-9._-]+", "-", model_name).strip("-")
+
+    return {
+        "repo_id": repo_id,
+        "revision": revision,
+        "model_name": model_name,
+        "storage_mib": storage_mib,
+        "estimated_memory_mib": estimated_memory_mib,
+        "max_context": max_context,
+        "quantization": quantization,
+        "architectures": architectures,
+        "torch_dtype": str(config_dict.get("torch_dtype", "")),
+        "gated": bool(data.get("gated", False)),
+        "files": files,
+    }
+
+
+def generate_serving_env_text(meta: dict, model_path: Path | str) -> str:
+    name = meta.get("model_name", "")
+    repo_id = meta.get("repo_id", "")
+    estimated = parse_int(meta.get("estimated_memory_mib"), 0)
+    storage = parse_int(meta.get("storage_mib"), 0)
+    context = parse_int(meta.get("max_context"), 4096)
+    quant = meta.get("quantization", "")
+    gated = parse_bool(meta.get("gated"), False)
+
+    spec = ModelSpec(
+        name=name,
+        path=str(model_path),
+        repo_id=repo_id,
+        estimated_memory_mib=estimated,
+        storage_mib=storage,
+        max_context=context,
+        serving_mode="exclusive-gpu",
+        gpu_memory_utilization=0.90,
+        quantization=quant,
+        gated=gated,
+        autostart=False,
+    )
+    return spec.to_env_text()

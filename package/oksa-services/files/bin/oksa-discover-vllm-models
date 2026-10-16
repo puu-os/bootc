@@ -43,7 +43,8 @@ def discover(models_dir: Path) -> list[Path]:
             ):
                 continue
         elif (entry / ms.PRESEED_MANIFEST).exists():
-            continue
+            if not ms.verified_preseed(entry):
+                continue
         result.append(entry)
     return result
 

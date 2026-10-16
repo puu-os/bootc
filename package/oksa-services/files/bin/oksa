@@ -4,8 +4,10 @@
 
 import argparse
 import os
+import json
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 
@@ -20,6 +22,16 @@ def die(msg: str) -> None:
     sys.exit(f"error: {msg}")
 
 
+def resolve_helper(name: str) -> Path:
+    installed = libexec_dir / name
+    if installed.is_file():
+        return installed
+    sibling = Path(__file__).resolve().parent / name
+    if sibling.is_file():
+        return sibling
+    return installed
+
+
 def control_files(state_dir: Path) -> tuple[Path, Path]:
     selected = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
     disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
@@ -32,6 +44,8 @@ def run_discover(discover_bin: Path) -> None:
 
 
 def check_capabilities(planner_bin: Path, model_name: str) -> bool:
+    if not planner_bin.is_file() or not os.access(planner_bin, os.X_OK):
+        return False
     with tempfile.TemporaryDirectory() as tmp_dir:
         check_dir = Path(tmp_dir)
         manifests_dir = check_dir / "manifests"
@@ -97,21 +111,135 @@ def cmd_stop(state_dir: Path, planner_bin: Path) -> None:
         die("stop failed")
 
 
-def cmd_pull(preseed_bin: Path, discover_bin: Path, model_name: str) -> None:
+def cmd_model_list(state_dir: Path, discover_bin: Path, planner_bin: Path) -> None:
+    run_discover(discover_bin)
+    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+    active_model = ms.read_first_line(active_model_file)
+    models_json_path = state_dir / "models.json"
+    models_meta = {}
+    if models_json_path.is_file():
+        try:
+            data = json.loads(models_json_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "name" in item:
+                        models_meta[item["name"]] = item
+        except (OSError, ValueError):
+            pass
+
+    print(f"{'NAME':<24} {'REPO_ID':<32} {'SIZE':<10} {'QUANT':<12} {'CAPABILITIES':<14} ACTIVE")
+    for name, path, env_path in ms.read_models_list(state_dir / "models.list"):
+        meta = models_meta.get(name, {})
+        repo_id = meta.get("repo_id") or "-"
+        storage_mib = meta.get("storage_mib")
+        size_str = f"{storage_mib} MiB" if storage_mib else "-"
+        quant = meta.get("quantization") or "none"
+        cap = "ok" if check_capabilities(planner_bin, name) else "insufficient"
+        act = "*" if name == active_model else ""
+        print(f"{name:<24} {repo_id:<32} {size_str:<10} {quant:<12} {cap:<14} {act}")
+
+
+def cmd_model_add(
+    preseed_bin: Path,
+    discover_bin: Path,
+    repo_id: str,
+    name: str | None = None,
+    revision: str = "main",
+    force: bool = False,
+) -> None:
+    if os.geteuid() != 0:
+        die("oksa model add requires root privileges")
+    if not preseed_bin.is_file() or not os.access(preseed_bin, os.X_OK):
+        die(f"preseed helper not found: {preseed_bin}")
+    cmd = [str(preseed_bin), "--repo-id", repo_id, "--revision", revision]
+    if name:
+        cmd.extend(["--name", name])
+    if force:
+        cmd.append("--force")
+    res = subprocess.run(cmd)
+    if res.returncode != 0:
+        die("model download/add failed")
+    run_discover(discover_bin)
+
+
+def cmd_model_remove(
+    state_dir: Path,
+    discover_bin: Path,
+    planner_bin: Path,
+    model_name: str,
+) -> None:
+    if os.geteuid() != 0:
+        die("oksa model remove requires root privileges")
+    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+    if ms.read_first_line(active_model_file) == model_name:
+        cmd_stop(state_dir, planner_bin)
+
+    model_dir = ms.MODELS_DIR / model_name
+    if not model_dir.exists():
+        die(f"model directory not found: {model_dir}")
+    shutil.rmtree(model_dir)
+    env_file = state_dir / "models.d" / f"{model_name}.env"
+    env_file.unlink(missing_ok=True)
+    run_discover(discover_bin)
+    subprocess.run([str(planner_bin)], capture_output=True)
+    print(f"Removed model {model_name}")
+
+
+def cmd_model_inspect(repo_id: str, revision: str = "main") -> None:
+    print(f"Inspecting Hugging Face repository {repo_id} ({revision})...")
+    meta = ms.inspect_hf_model(repo_id, revision)
+    if not meta:
+        die(f"failed to fetch metadata for {repo_id}")
+    name = meta["model_name"]
+    arch = ", ".join(meta["architectures"]) if meta["architectures"] else "unknown"
+    dtype = meta["torch_dtype"] or "unknown"
+    quant = meta["quantization"] or "none"
+    storage = meta["storage_mib"]
+    mem = meta["estimated_memory_mib"]
+    context = meta["max_context"]
+    files_count = len(meta["files"])
+    gated = "yes" if meta["gated"] else "no"
+
+    print(f"Model:                {name}")
+    print(f"Repository:           {repo_id}")
+    print(f"Revision:             {revision}")
+    print(f"Architecture:         {arch}")
+    print(f"Torch Dtype:          {dtype}")
+    print(f"Quantization:         {quant}")
+    print(f"Max Context:          {context}")
+    print(f"Total Weight Files:   {files_count}")
+    print(f"Storage Required:     ~{storage} MiB")
+    print(f"Estimated RAM/VRAM:   ~{mem} MiB")
+    print(f"Gated:                {gated}")
+
+    fits, reason = ms.check_model_capacity(mem)
+    print(f"Capacity Assessment:  {'COMPATIBLE' if fits else 'INSUFFICIENT'}")
+    print(f"Details:              {reason}")
+    if not fits:
+        print("Note:                 Can still be run via multi-node QSFP clustering with --force.")
+
+
+def cmd_pull(preseed_bin: Path, discover_bin: Path, model_name: str, force: bool = False) -> None:
     if os.geteuid() != 0:
         die("oksa pull requires root privileges")
     if not preseed_bin.is_file() or not os.access(preseed_bin, os.X_OK):
         die(f"preseed helper not found: {preseed_bin}")
-    res = subprocess.run([str(preseed_bin), model_name])
+    cmd = [str(preseed_bin)]
+    if force:
+        cmd.append("--force")
+    cmd.append(model_name)
+    res = subprocess.run(cmd)
     if res.returncode != 0:
         die("pull failed")
     run_discover(discover_bin)
 
+
+
 def main() -> None:
     state_dir = ms.STATE_DIR
-    discover_bin = libexec_dir / "oksa-discover-vllm-models"
-    planner_bin = libexec_dir / "oksa-plan-vllm-workloads"
-    preseed_bin = libexec_dir / "oksa-preseed-vllm-models"
+    discover_bin = resolve_helper("oksa-discover-vllm-models")
+    planner_bin = resolve_helper("oksa-plan-vllm-workloads")
+    preseed_bin = resolve_helper("oksa-preseed-vllm-models")
 
     parser = argparse.ArgumentParser(prog="oksa", description="Puu OS model serving control")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -120,8 +248,29 @@ def main() -> None:
     start_parser = subparsers.add_parser("start", help="Start a model")
     start_parser.add_argument("name", help="Model name")
     subparsers.add_parser("stop", help="Stop model serving")
-    pull_parser = subparsers.add_parser("pull", help="Download a model from the catalog")
-    pull_parser.add_argument("name", help="Model name")
+
+    pull_parser = subparsers.add_parser("pull", help="Download a model from the catalog or Hugging Face")
+    pull_parser.add_argument("name", help="Model name or repository ID")
+    pull_parser.add_argument("--force", action="store_true", help="Download even if exceeding host capacity (for QSFP clustering)")
+
+    model_parser = subparsers.add_parser("model", help="Manage Hugging Face models")
+    model_sub = model_parser.add_subparsers(dest="model_command", required=True)
+
+    model_sub.add_parser("list", help="List downloaded models with details")
+
+    add_parser = model_sub.add_parser("add", help="Add/download a model from Hugging Face")
+    add_parser.add_argument("repo_id", help="Hugging Face repo ID (e.g. org/model)")
+    add_parser.add_argument("--name", help="Custom model name")
+    add_parser.add_argument("--revision", default="main", help="Git revision (default: main)")
+    add_parser.add_argument("--force", action="store_true", help="Download even if exceeding host capacity (for QSFP clustering)")
+
+    remove_parser = model_sub.add_parser("remove", help="Remove a downloaded model")
+    remove_parser.add_argument("name", help="Model name to remove")
+
+    inspect_parser = model_sub.add_parser("inspect", help="Inspect a Hugging Face model without downloading")
+    inspect_parser.add_argument("repo_id", help="Hugging Face repo ID (e.g. org/model)")
+    inspect_parser.add_argument("--revision", default="main", help="Git revision (default: main)")
+
 
     args = parser.parse_args()
 
@@ -131,8 +280,18 @@ def main() -> None:
         cmd_start(state_dir, discover_bin, planner_bin, args.name)
     elif args.command == "stop":
         cmd_stop(state_dir, planner_bin)
+
     elif args.command == "pull":
-        cmd_pull(preseed_bin, discover_bin, args.name)
+        cmd_pull(preseed_bin, discover_bin, args.name, force=args.force)
+    elif args.command == "model":
+        if args.model_command == "list":
+            cmd_model_list(state_dir, discover_bin, planner_bin)
+        elif args.model_command == "add":
+            cmd_model_add(preseed_bin, discover_bin, args.repo_id, name=args.name, revision=args.revision, force=args.force)
+        elif args.model_command == "remove":
+            cmd_model_remove(state_dir, discover_bin, planner_bin, args.name)
+        elif args.model_command == "inspect":
+            cmd_model_inspect(args.repo_id, revision=args.revision)
 
 if __name__ == "__main__":
     main()
