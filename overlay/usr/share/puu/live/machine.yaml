@@ -13,7 +13,7 @@ partitions:
 
 flatpak:
   manifestPath: /usr/share/puu/flatpaks.list
-  syncHelper: /usr/libexec/puu/flatpak-sync
+  syncHelper: /usr/libexec/puu/puu-flatpak-sync
   liveStore: /var/lib/flatpak
 
 k3s:

@@ -30,8 +30,8 @@ install() {
     }
     inst_multiple "${source#"${dracutsysrootdir-}"}" || exit 1
   done
-  inst_script "$moddir/validate-live-iso" /usr/libexec/puu-live-iso || exit 1
-  inst_script "$moddir/resolve-live-media" /usr/libexec/puu-live-media || exit 1
+  inst_script "$moddir/puu-live-iso" /usr/libexec/puu-live-iso || exit 1
+  inst_script "$moddir/puu-live-media" /usr/libexec/puu-live-media || exit 1
   inst_simple "$moddir/puu-live-media.service" "$systemdsystemunitdir/puu-live-media.service" || exit 1
   inst_simple "$moddir/live-media.conf" "$systemdsystemunitdir/sysroot.mount.d/50-puu-live-media.conf" || exit 1
   inst_simple "$moddir/live-media.conf" "$systemdsystemunitdir/initrd-switch-root.target.d/50-puu-live-media.conf" || exit 1
