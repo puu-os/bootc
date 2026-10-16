@@ -43,11 +43,10 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 			$(TARGET_DIR)/usr/share/puu/k3s/manifests/$(manifest)$(sep))
 	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/manifests/$(OKSA_SERVICES_BONSAI_MANIFEST_DIR)33-bonsai-2-27b.yaml \
 		$(TARGET_DIR)/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/share/puu/vllm/catalog.d
 	$(foreach catalog,$(notdir $(wildcard $(OKSA_SERVICES_FILES)/vllm/catalog.d/*.env)),\
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/vllm/catalog.d/$(catalog) \
 			$(TARGET_DIR)/usr/share/puu/vllm/catalog.d/$(catalog)$(sep))
-	$(SED) 's/^PUU_VLLM_AUTOSTART=true$$/PUU_VLLM_AUTOSTART=false/' \
-		$(TARGET_DIR)/usr/share/puu/vllm/catalog.d/qwen3.8-27b-nvfp4.env
 endef
 
 define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
