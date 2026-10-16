@@ -21,7 +21,7 @@ metadata:
   labels:
     app.kubernetes.io/name: bonsai-2-27b
 spec:
-  replicas: 1
+  replicas: 0
   strategy:
     type: Recreate
   selector:
@@ -58,13 +58,13 @@ spec:
             - --port
             - "8000"
             - --max-model-len
-            - "262144"
+            - "512"
             - --max-num-seqs
             - "1"
             - --max-num-batched-tokens
-            - "8192"
+            - "512"
             - --gpu-memory-utilization
-            - "0.90"
+            - "0.5"
             - --kv-cache-dtype
             - fp8
             - --language-model-only

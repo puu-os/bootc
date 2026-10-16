@@ -49,10 +49,19 @@ sudo systemctl restart puu-k3s-addons.service
 ## First boot
 
 After the first login, a new GNOME installation opens a setup session that
-shows service startup, model downloads and readiness. Network settings are
-available, and TTY/SSH can be used for recovery. Setup does not complete until
-the Bonsai model serves requests. When setup completes, Continue returns to the
-login screen and the next login opens GNOME.
+shows service startup, the Bonsai model download and capacity calibration.
+Network settings are available, and TTY/SSH can be used for recovery. When
+setup completes, Continue returns to the login screen and the next login
+opens GNOME.
+
+Systems without a suitable NVIDIA GPU complete setup with local inference
+disabled.
+
+To calibrate again:
+
+```sh
+sudo /usr/libexec/puu/oksa-calibrate --force
+```
 
 ## Development
 

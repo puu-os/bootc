@@ -1,0 +1,19 @@
+[Unit]
+Description=Measure and apply Bonsai inference limits
+Requires=k3s.service puu-k3s-addons.service
+PartOf=puu-k3s-addons.service
+Wants=puu-vllm-preseed.service puu-model-serving-labeler.service
+After=k3s.service puu-k3s-addons.service puu-vllm-preseed.service puu-model-serving-labeler.service
+ConditionKernelCommandLine=!puu.live
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/puu/oksa-calibrate
+TimeoutStartSec=5h
+TimeoutStopSec=180s
+Restart=on-failure
+RestartSec=1min
+
+[Install]
+WantedBy=multi-user.target
