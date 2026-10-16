@@ -256,6 +256,17 @@ def plan_workload(
     app_name = f"puu-vllm-{model_label}"
     model_node_label = ms.model_node_label(spec.name)
     gpu_memory_utilization = f"{spec.gpu_memory_utilization:.2f}"
+    cal_limits, cal_valid = ms.read_calibration_limits()
+    if cal_valid:
+        cal_util = cal_limits.get("gpu_memory_utilization")
+        if isinstance(cal_util, (int, float)) and 0.05 <= cal_util <= 0.98:
+            gpu_memory_utilization = f"{cal_util:.2f}"
+        cal_max_len = cal_limits.get("max_model_len")
+        if isinstance(cal_max_len, int) and 0 < cal_max_len < spec.max_context:
+            spec = dataclasses.replace(spec, max_context=cal_max_len)
+        cal_max_seqs = cal_limits.get("max_num_seqs")
+        if isinstance(cal_max_seqs, int) and 0 < cal_max_seqs < spec.max_concurrent_sequences:
+            spec = dataclasses.replace(spec, max_concurrent_sequences=cal_max_seqs)
     resource_gpus = 0
     replicas = 1
     assigned_gpu_devices = ""

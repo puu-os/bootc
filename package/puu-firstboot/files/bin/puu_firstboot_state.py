@@ -11,6 +11,13 @@ import stat
 import subprocess
 import tempfile
 import time
+import sys
+
+for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3] / "oksa-services" / "files" / "bin"):
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+
+import oksa_calibration_state as cs
 
 STATUS_PATH = Path("/run/puu-firstboot/status.json")
 COMPLETION_PATH = Path("/var/lib/puu/firstboot/completed.json")
@@ -30,6 +37,7 @@ CORE_UNITS = (
     "puu-postgresql.service",
     "puu-k3s-addons.service",
     "puu-vllm-preseed.service",
+    "puu-bonsai-calibration.service",
     "puu-model-serving-labeler.service",
     "avahi-daemon.service",
 
@@ -156,6 +164,16 @@ def setup_required() -> bool:
     return pending or enrollment is not None
 
 
+def verification_valid(value):
+    if value.get("verification") == "public-chat-completion":
+        return True
+    if value.get("verification") != "zero-capacity-calibration":
+        return False
+    calibration = cs.read_record(cs.RESULT_PATH)
+    return (cs.valid_result(calibration) and calibration["limits"] == cs.ZERO_LIMITS
+            and calibration.get("identity", {}).get("machine_id") == machine_id()
+            and value.get("calibration_fingerprint") == calibration["fingerprint"])
+
 def completion_valid() -> bool:
     try:
         enrollment = read_enrollment()
@@ -166,7 +184,7 @@ def completion_valid() -> bool:
             value.get("machine_id") == machine_id()
             and value.get("model") == MODEL
             and value.get("served_model") == SERVED_MODEL
-            and value.get("verification") == "public-chat-completion"
+            and verification_valid(value)
             and valid_timestamp(value.get("completed_at"))
             and type(value.get("enrolled_at")) in (int, float)
             and value["enrolled_at"] == enrollment["enrolled_at"]
