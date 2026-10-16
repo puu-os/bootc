@@ -235,6 +235,133 @@ def cmd_pull(preseed_bin: Path, discover_bin: Path, model_name: str, force: bool
 
 
 
+def check_admin_privileges() -> None:
+    if os.geteuid() != 0 and not os.environ.get("PUU_LITELLM_MASTER_KEY"):
+        die("operation requires root privileges or PUU_LITELLM_MASTER_KEY")
+
+
+def cmd_user_list() -> None:
+    ok, users = ms.litellm_user_list()
+    if not ok:
+        die(f"failed to retrieve users: {users}")
+    if not users:
+        print("No AI users found.")
+        return
+    print(f"{'USER ID':<24} {'EMAIL':<30} {'SPEND':<12} {'BUDGET':<12}")
+    for u in users:
+        uid = str(u.get("user_id", "-"))
+        email = str(u.get("user_email") or "-")
+        spend = f"${u.get('spend', 0):.2f}" if "spend" in u else "-"
+        budget = f"${u.get('max_budget'):.2f}" if u.get("max_budget") is not None else "unlimited"
+        print(f"{uid:<24} {email:<30} {spend:<12} {budget:<12}")
+
+
+def cmd_user_create(user_id: str, email: str | None = None, budget: float | None = None) -> None:
+    check_admin_privileges()
+    ok, res = ms.litellm_user_create(user_id, email=email, max_budget=budget)
+    if not ok:
+        die(f"failed to create user: {res}")
+    print(f"Created AI user {user_id}")
+
+
+def cmd_user_delete(user_id: str) -> None:
+    check_admin_privileges()
+    ok, res = ms.litellm_user_delete(user_id)
+    if not ok:
+        die(f"failed to delete user: {res}")
+    print(res)
+
+
+def cmd_user_info(user_id: str) -> None:
+    ok, res = ms.litellm_user_info(user_id)
+    if not ok:
+        die(f"failed to get user info: {res}")
+    info = res.get("user_info") if isinstance(res, dict) and "user_info" in res else res
+    uid = info.get("user_id", user_id)
+    email = info.get("user_email") or "-"
+    spend = f"${info.get('spend', 0):.2f}" if "spend" in info else "-"
+    budget = f"${info.get('max_budget'):.2f}" if info.get("max_budget") is not None else "unlimited"
+    keys = info.get("keys", [])
+    print(f"User:     {uid}")
+    print(f"Email:    {email}")
+    print(f"Spend:    {spend}")
+    print(f"Budget:   {budget}")
+    print(f"Keys:     {len(keys)} active")
+    if keys:
+        print(f"  {'ALIAS':<20} {'KEY':<32} {'SPEND':<10} {'EXPIRES'}")
+        for k in keys:
+            if isinstance(k, dict):
+                alias = k.get("key_name") or k.get("key_alias") or "-"
+                token = k.get("token") or k.get("key") or "-"
+                if len(token) > 16:
+                    token = token[:8] + "..." + token[-4:]
+                kspend = f"${k.get('spend', 0):.2f}" if "spend" in k else "-"
+                exp = k.get("expires") or "never"
+                print(f"  {alias:<20} {token:<32} {kspend:<10} {exp}")
+
+
+def cmd_key_create(
+    user_id: str,
+    alias: str | None = None,
+    models: str | None = None,
+    spend: float | None = None,
+    duration: str | None = None,
+) -> None:
+    check_admin_privileges()
+    models_list = [m.strip() for m in models.split(",") if m.strip()] if models else None
+    ok, res = ms.litellm_key_create(
+        user_id,
+        alias=alias,
+        models=models_list,
+        max_budget=spend,
+        duration=duration,
+    )
+    if not ok:
+        die(f"failed to generate key: {res}")
+    key = res.get("key", "")
+    key_alias = res.get("key_name") or res.get("key_alias") or alias or "-"
+    exp = res.get("expires") or (f"in {duration}" if duration else "never")
+    print("API Key generated successfully:")
+    print(f"  Key:        {key}")
+    print(f"  User:       {user_id}")
+    print(f"  Alias:      {key_alias}")
+    print(f"  Models:     {', '.join(models_list) if models_list else 'all'}")
+    print(f"  Budget:     {f'${spend:.2f}' if spend is not None else 'unlimited'}")
+    print(f"  Expires:    {exp}")
+
+
+def cmd_key_list(user_id: str | None = None) -> None:
+    ok, keys = ms.litellm_key_list(user_id=user_id)
+    if not ok:
+        die(f"failed to retrieve keys: {keys}")
+    if not keys:
+        print("No API keys found.")
+        return
+    print(f"{'ALIAS':<20} {'KEY PREFIX':<18} {'USER':<18} {'MODELS':<20} {'SPEND':<10} {'BUDGET':<10} EXPIRES")
+    for k in keys:
+        alias = k.get("key_name") or k.get("key_alias") or "-"
+        token = k.get("token") or k.get("key") or "-"
+        token_prefix = (token[:10] + "...") if len(token) > 10 else token
+        uid = k.get("user_id") or "-"
+        raw_models = k.get("models")
+        models_str = ", ".join(raw_models) if isinstance(raw_models, list) and raw_models else "all"
+        if len(models_str) > 18:
+            models_str = models_str[:15] + "..."
+        spend = f"${k.get('spend', 0):.2f}" if "spend" in k else "-"
+        budget = f"${k.get('max_budget'):.2f}" if k.get("max_budget") is not None else "unlimited"
+        exp = k.get("expires") or "never"
+        print(f"{alias:<20} {token_prefix:<18} {uid:<18} {models_str:<20} {spend:<10} {budget:<10} {exp}")
+
+
+def cmd_key_revoke(key_or_alias: str) -> None:
+    check_admin_privileges()
+    ok, res = ms.litellm_key_delete(key_or_alias)
+    if not ok:
+        die(f"failed to revoke key: {res}")
+    print(res)
+
+
+
 def main() -> None:
     state_dir = ms.STATE_DIR
     discover_bin = resolve_helper("oksa-discover-vllm-models")
@@ -272,6 +399,31 @@ def main() -> None:
     inspect_parser.add_argument("--revision", default="main", help="Git revision (default: main)")
 
 
+    user_parser = subparsers.add_parser("user", help="Manage AI users")
+    user_sub = user_parser.add_subparsers(dest="user_command", required=True)
+    user_sub.add_parser("list", help="List AI users")
+    ucreate = user_sub.add_parser("create", help="Create an AI user")
+    ucreate.add_argument("user_id", help="User identifier")
+    ucreate.add_argument("--email", help="User email address")
+    ucreate.add_argument("--budget", type=float, help="Maximum spend budget in USD")
+    udelete = user_sub.add_parser("delete", help="Delete an AI user")
+    udelete.add_argument("user_id", help="User identifier")
+    uinfo = user_sub.add_parser("info", help="Show user details and keys")
+    uinfo.add_argument("user_id", help="User identifier")
+
+    key_parser = subparsers.add_parser("key", help="Manage AI API keys")
+    key_sub = key_parser.add_subparsers(dest="key_command", required=True)
+    klist = key_sub.add_parser("list", help="List active AI keys")
+    klist.add_argument("user_id", nargs="?", help="Optional user ID to filter keys")
+    kcreate = key_sub.add_parser("create", help="Generate a new AI API key")
+    kcreate.add_argument("user_id", help="User to assign key to")
+    kcreate.add_argument("--name", help="Key alias/name")
+    kcreate.add_argument("--models", help="Comma-separated list of allowed models")
+    kcreate.add_argument("--spend", type=float, help="Max budget in USD")
+    kcreate.add_argument("--duration", help="Validity duration (e.g. 30d, 24h)")
+    krevoke = key_sub.add_parser("revoke", help="Revoke an AI key")
+    krevoke.add_argument("key", help="Key token or alias to revoke")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -292,6 +444,23 @@ def main() -> None:
             cmd_model_remove(state_dir, discover_bin, planner_bin, args.name)
         elif args.model_command == "inspect":
             cmd_model_inspect(args.repo_id, revision=args.revision)
+
+    elif args.command == "user":
+        if args.user_command == "list":
+            cmd_user_list()
+        elif args.user_command == "create":
+            cmd_user_create(args.user_id, email=args.email, budget=args.budget)
+        elif args.user_command == "delete":
+            cmd_user_delete(args.user_id)
+        elif args.user_command == "info":
+            cmd_user_info(args.user_id)
+    elif args.command == "key":
+        if args.key_command == "list":
+            cmd_key_list(user_id=args.user_id)
+        elif args.key_command == "create":
+            cmd_key_create(args.user_id, alias=args.name, models=args.models, spend=args.spend, duration=args.duration)
+        elif args.key_command == "revoke":
+            cmd_key_revoke(args.key)
 
 if __name__ == "__main__":
     main()
