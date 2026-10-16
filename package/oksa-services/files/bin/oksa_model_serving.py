@@ -639,3 +639,186 @@ def generate_serving_env_text(meta: dict, model_path: Path | str) -> str:
         autostart=False,
     )
     return spec.to_env_text()
+
+
+def get_litellm_master_key() -> str | None:
+    env_key = os.environ.get("PUU_LITELLM_MASTER_KEY")
+    if env_key:
+        return env_key.strip()
+    cred_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if cred_dir:
+        cred_file = Path(cred_dir) / "litellm-master-key"
+        if cred_file.is_file():
+            try:
+                return cred_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+    try:
+        encrypted_store = Path("/etc/credstore.encrypted/litellm-master-key")
+        if encrypted_store.is_file():
+            res = subprocess.run(
+                ["systemd-creds", "decrypt", str(encrypted_store), "-"],
+                capture_output=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                key = res.stdout.decode("utf-8").strip()
+                if key:
+                    return key
+    except (subprocess.SubprocessError, OSError):
+        pass
+    try:
+        proc = run_kubectl("get", "secret", "puu-litellm-masterkey", "-n", "puu-ai", "-o", "jsonpath={.data.masterkey}", check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            import base64
+            return base64.b64decode(proc.stdout.strip()).decode("utf-8").strip()
+    except Exception:
+        pass
+    return None
+
+
+def litellm_base_url() -> str:
+    env_url = os.environ.get("PUU_LITELLM_API_URL")
+    if env_url:
+        return env_url.rstrip("/")
+    try:
+        proc = run_kubectl(
+            "get", "service", "litellm", "--namespace", "puu-ai", "-o", "jsonpath={.spec.clusterIP}", check=False
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return f"http://{proc.stdout.strip()}:4000"
+    except Exception:
+        pass
+    return "http://127.0.0.1:4000"
+
+
+def litellm_api_call(
+    method: str,
+    endpoint: str,
+    payload: dict | None = None,
+    master_key: str | None = None,
+    timeout_sec: int = 15,
+) -> tuple[int, dict]:
+    base_url = litellm_base_url()
+    key = master_key if master_key is not None else get_litellm_master_key()
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    url = f"{base_url}{endpoint}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            raw = resp.read()
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+                return resp.status, parsed if isinstance(parsed, dict) else {"data": parsed}
+            except ValueError:
+                return resp.status, {"raw": raw.decode("utf-8", errors="replace")}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+            return exc.code, parsed if isinstance(parsed, dict) else {"error": str(parsed)}
+        except ValueError:
+            return exc.code, {"error": raw.decode("utf-8", errors="replace")}
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        return 0, {"error": str(exc)}
+
+
+def litellm_user_create(
+    user_id: str,
+    email: str | None = None,
+    max_budget: float | None = None,
+    master_key: str | None = None,
+) -> tuple[bool, dict | str]:
+    payload: dict[str, Any] = {"user_id": user_id}
+    if email:
+        payload["user_email"] = email
+    if max_budget is not None:
+        payload["max_budget"] = max_budget
+    status, resp = litellm_api_call("POST", "/user/new", payload=payload, master_key=master_key)
+    if status == 200:
+        return True, resp
+    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+    return False, str(err)
+
+
+def litellm_user_list(master_key: str | None = None) -> tuple[bool, list[dict] | str]:
+    status, resp = litellm_api_call("GET", "/user/list", master_key=master_key)
+    if status == 200:
+        if isinstance(resp, list):
+            return True, resp
+        if isinstance(resp.get("users"), list):
+            return True, resp["users"]
+        if isinstance(resp.get("data"), list):
+            return True, resp["data"]
+        return True, []
+    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+    return False, str(err)
+
+
+def litellm_user_delete(user_id: str, master_key: str | None = None) -> tuple[bool, str]:
+    payload = {"user_ids": [user_id]}
+    status, resp = litellm_api_call("POST", "/user/delete", payload=payload, master_key=master_key)
+    if status == 200:
+        return True, f"User {user_id} deleted"
+    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+    return False, str(err)
+
+
+def litellm_user_info(user_id: str, master_key: str | None = None) -> tuple[bool, dict | str]:
+    quoted_id = urllib.parse.quote(user_id)
+    status, resp = litellm_api_call("GET", f"/user/info?user_id={quoted_id}", master_key=master_key)
+    if status == 200:
+        return True, resp
+    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+    return False, str(err)
+
+
+def litellm_key_create(
+    user_id: str,
+    alias: str | None = None,
+    models: list[str] | None = None,
+    max_budget: float | None = None,
+    duration: str | None = None,
+    master_key: str | None = None,
+) -> tuple[bool, dict | str]:
+    payload: dict[str, Any] = {"user_id": user_id}
+    if alias:
+        payload["key_alias"] = alias
+    if models:
+        payload["models"] = models
+    if max_budget is not None:
+        payload["max_budget"] = max_budget
+    if duration:
+        payload["duration"] = duration
+    status, resp = litellm_api_call("POST", "/key/generate", payload=payload, master_key=master_key)
+    if status == 200:
+        return True, resp
+    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+    return False, str(err)
+
+
+def litellm_key_list(user_id: str | None = None, master_key: str | None = None) -> tuple[bool, list[dict] | str]:
+    endpoint = f"/key/list?user_id={urllib.parse.quote(user_id)}" if user_id else "/key/list"
+    status, resp = litellm_api_call("GET", endpoint, master_key=master_key)
+    if status == 200:
+        if isinstance(resp, list):
+            return True, resp
+        if isinstance(resp.get("keys"), list):
+            return True, resp["keys"]
+        if isinstance(resp.get("data"), list):
+            return True, resp["data"]
+        return True, []
+    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+    return False, str(err)
+
+
+def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tuple[bool, str]:
+    payload = {"keys": [key_or_alias]}
+    status, resp = litellm_api_call("POST", "/key/delete", payload=payload, master_key=master_key)
+    if status == 200:
+        return True, f"Key {key_or_alias} revoked"
+    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+    return False, str(err)
