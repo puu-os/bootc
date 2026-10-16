@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=GNOME
 Comment=This session logs you into GNOME
-Exec=/usr/libexec/puu/session-dispatch
-TryExec=/usr/libexec/puu/session-dispatch
+Exec=/usr/libexec/puu/puu-firstboot-session-dispatch
+TryExec=/usr/libexec/puu/puu-firstboot-session-dispatch
 Type=Application
 DesktopNames=GNOME
 X-GDM-SessionRegisters=true
