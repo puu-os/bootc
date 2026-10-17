@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+import argparse
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import uuid
+
+BRIDGE_NAME = "puu-qsfp0"
+ROOT = Path(os.environ.get("PUU_ROOT", "/"))
+SYSFS_NET = ROOT / "sys/class/net" if os.environ.get("PUU_ROOT") else Path("/sys/class/net")
+SYSFS_DMI = ROOT / "sys/class/dmi" if os.environ.get("PUU_ROOT") else Path("/sys/class/dmi")
+NM_CONN_DIR = ROOT / "etc/NetworkManager/system-connections"
+STATE_DIR = ROOT / "var/lib/puu-qsfp"
+STATE_FILE = STATE_DIR / "state.json"
+K3S_CONFIG_DIR = ROOT / "etc/rancher/k3s/config.yaml.d"
+K3S_DROPIN_FILE = K3S_CONFIG_DIR / "90-puu-qsfp.yaml"
+
+STP_STATES = {
+    "0": "disabled",
+    "1": "listening",
+    "2": "learning",
+    "3": "forwarding",
+    "4": "blocking",
+}
+
+
+def detect_ports() -> list[str]:
+    dmi_checks = [
+        SYSFS_DMI / "id/product_name",
+        SYSFS_DMI / "id/board_name",
+        ROOT / "proc/device-tree/model",
+    ]
+    for path in dmi_checks:
+        try:
+            val = path.read_text(encoding="utf-8", errors="replace").strip().lower()
+            if "spark" in val or "dgx spark" in val:
+                candidates = ["enp1s0f0np0", "enp1s0f1np1"]
+                found = [p for p in candidates if (SYSFS_NET / p).is_dir()]
+                if len(found) >= 2:
+                    return found
+        except OSError:
+            pass
+
+    candidates = []
+    net_dir = SYSFS_NET
+    if net_dir.is_dir():
+        for entry in sorted(net_dir.iterdir()):
+            if entry.name in ("lo", BRIDGE_NAME) or entry.name.startswith(
+                ("veth", "br", "docker", "cni", "flannel", "puu-")
+            ):
+                continue
+            is_mlx = False
+            try:
+                drv = (entry / "device" / "driver").resolve().name
+                if drv == "mlx5_core":
+                    is_mlx = True
+            except OSError:
+                pass
+            if not is_mlx:
+                try:
+                    vendor = (entry / "device" / "vendor").read_text(encoding="utf-8").strip().lower()
+                    if vendor in ("0x15b3", "15b3"):
+                        is_mlx = True
+                except OSError:
+                    pass
+            if is_mlx:
+                candidates.append(entry.name)
+        if len(candidates) >= 2:
+            return candidates[:2]
+    return []
+
+
+def get_bridge_ip() -> str:
+    res = subprocess.run(
+        ["ip", "-4", "addr", "show", "dev", BRIDGE_NAME],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode == 0:
+        match = re.search(r"inet\s+([0-9.]+/\d+)", res.stdout)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def get_member_ports() -> list[str]:
+    brif = SYSFS_NET / BRIDGE_NAME / "brif"
+    if brif.is_dir():
+        return sorted(p.name for p in brif.iterdir())
+    if STATE_FILE.is_file():
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            return data.get("ports", [])
+        except (OSError, json.JSONDecodeError):
+            pass
+    return []
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    try:
+        interface = ipaddress.IPv4Interface(args.address)
+    except ValueError as exc:
+        sys.exit(f"error: invalid IPv4 address: {exc}")
+
+    if args.ports:
+        ports = [p.strip() for p in args.ports.split(",") if p.strip()]
+        if len(ports) < 2:
+            sys.exit("error: at least two ports required for QSFP chain")
+    else:
+        ports = detect_ports()
+        if not ports:
+            sys.exit("error: could not auto-detect QSFP ports; specify with --ports <port1,port2>")
+
+    for port in ports:
+        if not (SYSFS_NET / port).is_dir():
+            sys.exit(f"error: interface {port} does not exist")
+
+    NM_CONN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    bridge_keyfile = NM_CONN_DIR / f"{BRIDGE_NAME}.nmconnection"
+    bridge_lines = [
+        "[connection]",
+        f"id={BRIDGE_NAME}",
+        f"uuid={uuid.uuid4()}",
+        "type=bridge",
+        f"interface-name={BRIDGE_NAME}",
+        "",
+        "[bridge]",
+        "stp=true",
+        "",
+        "[ipv4]",
+        f"address1={interface.ip}/{interface.network.prefixlen}",
+        "method=manual",
+        "",
+        "[ipv6]",
+        "method=disabled",
+    ]
+    if args.mtu:
+        bridge_lines.extend(["", "[ethernet]", f"mtu={args.mtu}"])
+    bridge_lines.append("")
+
+    bridge_keyfile.write_text("\n".join(bridge_lines), encoding="utf-8")
+    bridge_keyfile.chmod(0o600)
+
+    for port in ports:
+        slave_keyfile = NM_CONN_DIR / f"puu-qsfp-slave-{port}.nmconnection"
+        slave_lines = [
+            "[connection]",
+            f"id=puu-qsfp-slave-{port}",
+            f"uuid={uuid.uuid4()}",
+            "type=ethernet",
+            f"interface-name={port}",
+            f"master={BRIDGE_NAME}",
+            "slave-type=bridge",
+            "",
+            "[ethernet]",
+        ]
+        if args.mtu:
+            slave_lines.append(f"mtu={args.mtu}")
+        slave_lines.append("")
+        slave_keyfile.write_text("\n".join(slave_lines), encoding="utf-8")
+        slave_keyfile.chmod(0o600)
+
+    subprocess.run(["nmcli", "connection", "reload"], capture_output=True, check=False)
+    subprocess.run(["nmcli", "connection", "up", BRIDGE_NAME], capture_output=True, check=False)
+    for port in ports:
+        subprocess.run(
+            ["nmcli", "connection", "up", f"puu-qsfp-slave-{port}"],
+            capture_output=True,
+            check=False,
+        )
+
+    K3S_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    k3s_config = f'node-ip: "{interface.ip}"\nflannel-iface: "{BRIDGE_NAME}"\n'
+    K3S_DROPIN_FILE.write_text(k3s_config, encoding="utf-8")
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state = {
+        "address": str(interface),
+        "ip": str(interface.ip),
+        "prefix": interface.network.prefixlen,
+        "ports": ports,
+        "bridge": BRIDGE_NAME,
+        "mtu": args.mtu,
+    }
+    STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    print(f"configured {BRIDGE_NAME} ({interface.ip}) with ports: {', '.join(ports)}")
+
+
+def cmd_rollback(_args: argparse.Namespace) -> None:
+    ports = get_member_ports()
+    if K3S_DROPIN_FILE.is_file():
+        K3S_DROPIN_FILE.unlink()
+
+    bridge_keyfile = NM_CONN_DIR / f"{BRIDGE_NAME}.nmconnection"
+    if bridge_keyfile.is_file():
+        bridge_keyfile.unlink()
+
+    for port in ports:
+        slave_keyfile = NM_CONN_DIR / f"puu-qsfp-slave-{port}.nmconnection"
+        if slave_keyfile.is_file():
+            slave_keyfile.unlink()
+
+    for p in NM_CONN_DIR.glob("puu-qsfp*.nmconnection"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+    if STATE_FILE.is_file():
+        STATE_FILE.unlink()
+    try:
+        STATE_DIR.rmdir()
+    except OSError:
+        pass
+
+    subprocess.run(["nmcli", "connection", "reload"], capture_output=True, check=False)
+    subprocess.run(["ip", "link", "delete", BRIDGE_NAME], capture_output=True, check=False)
+    print("QSFP network configuration removed")
+
+
+def cmd_check(args: argparse.Namespace) -> None:
+    bridge_dir = SYSFS_NET / BRIDGE_NAME
+    if not bridge_dir.is_dir():
+        sys.exit(f"error: {BRIDGE_NAME} bridge does not exist")
+
+    ip = get_bridge_ip()
+    carrier_file = bridge_dir / "carrier"
+    has_carrier = False
+    try:
+        has_carrier = carrier_file.read_text().strip() == "1"
+    except OSError:
+        pass
+
+    ports = get_member_ports()
+    print(f"bridge: {BRIDGE_NAME} (ip: {ip or 'none'}, carrier: {'up' if has_carrier else 'down'})")
+    for port in ports:
+        port_dir = SYSFS_NET / port
+        p_carrier = "down"
+        try:
+            if (port_dir / "carrier").read_text().strip() == "1":
+                p_carrier = "up"
+        except OSError:
+            pass
+        p_state = "unknown"
+        try:
+            code = (port_dir / "brport" / "state").read_text().strip()
+            p_state = STP_STATES.get(code, f"code_{code}")
+        except OSError:
+            pass
+        print(f"  port {port}: carrier={p_carrier}, stp={p_state}")
+
+    failed = False
+    if not ip:
+        sys.stderr.write("warning: no IPv4 address on bridge\n")
+        failed = True
+    if not has_carrier:
+        sys.stderr.write("warning: bridge has no carrier\n")
+        failed = True
+
+    if args.peers:
+        for peer in args.peers:
+            res = subprocess.run(
+                ["ping", "-c", "1", "-W", "2", "-I", BRIDGE_NAME, peer],
+                capture_output=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                print(f"ping {peer}: OK")
+            else:
+                print(f"ping {peer}: FAIL")
+                failed = True
+
+    if failed:
+        sys.exit(1)
+
+
+def cmd_status(_args: argparse.Namespace) -> None:
+    bridge_dir = SYSFS_NET / BRIDGE_NAME
+    if not bridge_dir.is_dir() and not STATE_FILE.is_file():
+        print(f"{BRIDGE_NAME}: not configured")
+        return
+
+    ip = get_bridge_ip()
+    ports = get_member_ports()
+    print(f"interface: {BRIDGE_NAME}")
+    print(f"configured ip: {ip or 'none'}")
+    print(f"ports: {', '.join(ports) if ports else 'none'}")
+    if bridge_dir.is_dir():
+        try:
+            c = (bridge_dir / "carrier").read_text().strip()
+            print(f"carrier: {'up' if c == '1' else 'down'}")
+        except OSError:
+            print("carrier: unknown")
+
+
+def cmd_wait(args: argparse.Namespace) -> None:
+    bridge_dir = SYSFS_NET / BRIDGE_NAME
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < args.timeout:
+        if bridge_dir.is_dir():
+            ip = get_bridge_ip()
+            carrier = False
+            try:
+                carrier = (bridge_dir / "carrier").read_text().strip() == "1"
+            except OSError:
+                pass
+            if ip and carrier:
+                sys.exit(0)
+        time.sleep(1.0)
+    sys.exit(f"timed out waiting for {BRIDGE_NAME} bridge to become ready")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Puu OS QSFP Port Chaining Helper")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    setup_parser = subparsers.add_parser("setup", help="Configure local QSFP bridge and K3s binding")
+    setup_parser.add_argument("address", help="IPv4 address with prefix length (e.g. 172.30.0.1/24)")
+    setup_parser.add_argument("--ports", help="Comma-separated interface list (default: auto-detect)")
+    setup_parser.add_argument("--mtu", type=int, help="Optional MTU for bridge and member interfaces")
+    setup_parser.set_defaults(func=cmd_setup)
+
+    rollback_parser = subparsers.add_parser("rollback", help="Remove QSFP bridge and restore default state")
+    rollback_parser.set_defaults(func=cmd_rollback)
+
+    check_parser = subparsers.add_parser("check", help="Verify QSFP bridge status and peer connectivity")
+    check_parser.add_argument("peers", nargs="*", help="Optional peer IPv4 addresses to ping")
+    check_parser.set_defaults(func=cmd_check)
+
+    status_parser = subparsers.add_parser("status", help="Show current QSFP network status")
+    status_parser.set_defaults(func=cmd_status)
+
+    wait_parser = subparsers.add_parser("wait", help="Wait for bridge readiness during boot")
+    wait_parser.add_argument("--timeout", type=int, default=120, help="Timeout in seconds (default: 120)")
+    wait_parser.set_defaults(func=cmd_wait)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

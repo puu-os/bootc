@@ -33,6 +33,11 @@ def main() -> None:
             sys.stderr.write(f"error: invalid timeout: {sys.argv[1]}\n")
             sys.exit(2)
 
+    root = Path(os.environ.get("PUU_ROOT", "/"))
+    qsfp_state = root / "var/lib/puu-qsfp/state.json"
+    qsfp_bin = root / "usr/libexec/puu/puu-qsfp"
+    if qsfp_state.is_file() and qsfp_bin.is_file():
+        os.execv(str(qsfp_bin), ["puu-qsfp", "wait", "--timeout", str(timeout)])
     procfs_root = Path("/proc")
     poll_interval = float(os.environ.get("PUU_ROUTE_POLL_INTERVAL", "1.0"))
 
