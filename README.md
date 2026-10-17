@@ -55,7 +55,7 @@ download. Calibration probes increasing context and concurrency, narrows memory
 boundaries, and confirms the selected limits together with real inference.
 The search is bounded to 40 trials/four hours, 262,144 context tokens and eight
 simultaneous requests, while reserving host memory. Throughput and memory
-measurements are saved in `/var/lib/puu/calibration/bonsai.json` and reused when
+measurements are saved in `/var/lib/puu/calibration/bonsai-2-27b.json` and reused when
 the model, runtime and hardware identity match.
 
 No NVIDIA GPU or confirmed insufficient memory completes calibration with zero

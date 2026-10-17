@@ -33,6 +33,11 @@ spec:
 
     proxy_config:
       model_list:
+        - model_name: "prism-ml/bonsai-2-27b"
+          litellm_params:
+            model: openai/prism-ml/bonsai-2-27b
+            api_base: http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1
+            api_key: none
         - model_name: "bonsai-2-27b"
           litellm_params:
             model: openai/Bonsai-2-27B
