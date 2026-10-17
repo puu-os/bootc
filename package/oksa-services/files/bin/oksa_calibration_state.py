@@ -9,7 +9,7 @@ import re
 import stat
 import tempfile
 
-RESULT_PATH = Path("/var/lib/puu/calibration/bonsai.json")
+RESULT_PATH = Path("/var/lib/puu/calibration/bonsai-2-27b.json")
 STATUS_PATH = Path("/run/puu-calibration/status.json")
 MODEL = "bonsai-2-27b"
 ZERO_LIMITS = dict(max_model_len=0, max_num_seqs=0, max_num_batched_tokens=0,
