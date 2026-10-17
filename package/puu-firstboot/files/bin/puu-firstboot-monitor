@@ -352,9 +352,9 @@ def chat_valid(response):
 def static_model_mapping(response):
     if not isinstance(response, dict) or not isinstance(response.get("data"), list):
         return False
-    matches = [model for model in response["data"] if isinstance(model, dict) and model.get("model_name") == fs.MODEL]
-    return bool(matches) and all(
-        model.get("litellm_params", {}).get("model") == "openai/" + fs.SERVED_MODEL
+    matches = [model for model in response["data"] if isinstance(model, dict) and model.get("model_name") in (fs.MODEL, f"prism-ml/{fs.MODEL}")]
+    return bool(matches) and any(
+        model.get("litellm_params", {}).get("model") in ("openai/" + fs.SERVED_MODEL, "openai/Bonsai-2-27B", "openai/prism-ml/bonsai-2-27b", "openai/bonsai-2-27b")
         and model.get("litellm_params", {}).get("api_base") == "http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1"
         for model in matches
     )
@@ -525,7 +525,7 @@ def verify(progress):
         progress.publish("model", "Verifying AI model availability.")
         models = http_request(model_address, 8000, "/v1/models")
         if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
-            isinstance(model, dict) and model.get("id") == fs.SERVED_MODEL for model in models["data"]
+            isinstance(model, dict) and model.get("id") in (fs.SERVED_MODEL, "Bonsai-2-27B", "bonsai-2-27b", f"prism-ml/{fs.MODEL}") for model in models["data"]
         ):
             raise Pending("model", "AI runtime is initializing.")
         progress.publish("model", "AI model runtime is ready.", "done")
@@ -536,7 +536,7 @@ def verify(progress):
     progress.publish("gateway", "Checking API route.")
     models = http_request(address, 80, "/v1/models", "api.puu.local", key)
     if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
-        isinstance(model, dict) and model.get("id") == fs.MODEL for model in models["data"]
+        isinstance(model, dict) and model.get("id") in (fs.MODEL, f"prism-ml/{fs.MODEL}") for model in models["data"]
     ):
         raise Pending("gateway", "Waiting for API routes to become active.")
     progress.publish("gateway", "API gateway and routes are ready.", "done")
