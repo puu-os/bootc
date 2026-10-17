@@ -39,8 +39,7 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 endef
 
 define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
-	for unit in puu-k3s-addons.service puu-vllm-discovery.service \
-		puu-vllm-discovery.timer puu-model-serving-labeler.service \
+	for unit in puu-k3s-addons.service puu-model-serving-labeler.service \
 		puu-model-serving-labeler.timer puu-vllm-planner.service \
 		puu-vllm-planner.timer puu-vllm-preseed.service \
 		puu-postgresql.service puu-bonsai-calibration.service \
