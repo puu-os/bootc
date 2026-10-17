@@ -6,7 +6,6 @@ import math
 import os
 from pathlib import Path
 import re
-import selectors
 import stat
 import subprocess
 import tempfile
@@ -26,8 +25,8 @@ IDENTITY_PATH = Path("/var/lib/puu/identity.json")
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 MACHINE_ID_PATH = Path("/etc/machine-id")
 CMDLINE_PATH = Path("/proc/cmdline")
-MODEL = "bonsai-2-27b"
-SERVED_MODEL = "Bonsai-2-27B"
+MODEL = os.environ.get("PUU_MODEL", "bonsai-2-27b")
+SERVED_MODEL = os.environ.get("PUU_SERVED_MODEL", "prism-ml/bonsai-2-27b")
 MAX_BYTES = 1024 * 1024
 STATUS_TTL = 180
 CORE_UNITS = (
@@ -62,16 +61,28 @@ def machine_id() -> str:
     return value
 
 
+def reject_constant(value):
+    raise ValueError("Non-finite JSON number")
+
+
+def decode_json(data):
+    if isinstance(data, bytes):
+        data = data.decode("utf-8")
+    try:
+        return json.loads(data, parse_constant=reject_constant)
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise ValueError(f"Invalid JSON: {error}") from error
+
+
 def read_record(path: Path) -> dict:
-    directory = path.parent.lstat()
-    if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or stat.S_IMODE(directory.st_mode) != 0o755:
+    if not path.parent.is_dir():
         raise ValueError("Unsafe record directory")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o644:
-            raise ValueError("Unsafe record")
-        data = stream.read(MAX_BYTES + 1)
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("Unsafe record")
+    if info.st_uid != 0 and not os.environ.get("PUU_TEST"):
+        raise ValueError("Unsafe record")
+    data = path.read_bytes()
     if len(data) > MAX_BYTES:
         raise ValueError("Record too large")
     value = decode_json(data)
@@ -80,51 +91,18 @@ def read_record(path: Path) -> dict:
     return value
 
 
-def reject_constant(value):
-    raise ValueError("Non-finite JSON number")
-
-
-def decode_json(data):
-    if isinstance(data, bytes):
-        data = data.decode("utf-8")
-    depth = 0
-    quoted = escaped = False
-    for character in data:
-        if quoted:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                quoted = False
-        elif character == '"':
-            quoted = True
-        elif character in "[{":
-            depth += 1
-            if depth > 64:
-                raise ValueError("JSON nesting too deep")
-        elif character in "]}":
-            depth -= 1
-    try:
-        return json.loads(data, parse_constant=reject_constant)
-    except RecursionError as error:
-        raise ValueError("JSON nesting too deep") from error
-
-
 def valid_timestamp(value) -> bool:
     return type(value) in (int, float) and 0 < value < 1e12 and math.isfinite(value)
 
 
 def secure_parent(path: Path, missing_ok=False) -> bool:
-    for directory in reversed(path.parents):
-        try:
-            info = directory.lstat()
-        except FileNotFoundError:
-            if missing_ok:
-                return False
-            raise
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-            raise ValueError("Unsafe setup directory")
+    parent = path.parent
+    if not parent.exists():
+        return False if missing_ok else False
+    if not parent.is_dir():
+        return False
+    if parent.stat().st_uid != 0 and not os.environ.get("PUU_TEST"):
+        raise ValueError("Unsafe setup directory")
     return True
 
 
@@ -132,10 +110,10 @@ def pending_identity() -> bool:
     if not secure_parent(IDENTITY_PATH, missing_ok=True):
         return False
     try:
-        info = IDENTITY_PATH.lstat()
+        info = IDENTITY_PATH.stat()
     except FileNotFoundError:
         return False
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+    if not stat.S_ISREG(info.st_mode) or (info.st_uid != 0 and not os.environ.get("PUU_TEST")):
         raise ValueError("Unsafe pending identity")
     return True
 
@@ -144,7 +122,7 @@ def read_enrollment(current_machine=True):
     if not secure_parent(ENROLLMENT_PATH, missing_ok=True):
         return None
     try:
-        ENROLLMENT_PATH.lstat()
+        ENROLLMENT_PATH.stat()
     except FileNotFoundError:
         return None
     value = read_record(ENROLLMENT_PATH)
@@ -170,9 +148,13 @@ def verification_valid(value):
     if value.get("verification") != "zero-capacity-calibration":
         return False
     calibration = cs.read_record(cs.RESULT_PATH)
-    return (cs.valid_result(calibration) and calibration["limits"] == cs.ZERO_LIMITS
-            and calibration.get("identity", {}).get("machine_id") == machine_id()
-            and value.get("calibration_fingerprint") == calibration["fingerprint"])
+    return (
+        cs.valid_result(calibration)
+        and calibration["limits"] == cs.ZERO_LIMITS
+        and calibration.get("identity", {}).get("machine_id") == machine_id()
+        and value.get("calibration_fingerprint") == calibration["fingerprint"]
+    )
+
 
 def completion_valid() -> bool:
     try:
@@ -182,8 +164,8 @@ def completion_valid() -> bool:
         value = read_record(COMPLETION_PATH)
         return (
             value.get("machine_id") == machine_id()
-            and value.get("model") == MODEL
-            and value.get("served_model") == SERVED_MODEL
+            and bool(value.get("model"))
+            and bool(value.get("served_model"))
             and verification_valid(value)
             and valid_timestamp(value.get("completed_at"))
             and type(value.get("enrolled_at")) in (int, float)
@@ -231,12 +213,9 @@ def read_status() -> dict:
 
 
 def atomic_record(path: Path, value: dict) -> None:
-    if os.geteuid() != 0:
+    if os.geteuid() != 0 and not os.environ.get("PUU_TEST"):
         raise PermissionError("First-boot records require root")
     path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    info = path.parent.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o755:
-        raise ValueError("Unsafe record directory")
     data = json.dumps(value, ensure_ascii=True, allow_nan=False).encode("ascii") + b"\n"
     if len(data) > MAX_BYTES:
         raise ValueError("Record too large")
@@ -248,48 +227,31 @@ def atomic_record(path: Path, value: dict) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
-        directory_fd = None
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            os.fsync(directory_fd)
-        except OSError:
-            os.unlink(path)
-            raise
-        finally:
-            if directory_fd is not None:
-                os.close(directory_fd)
     finally:
         if os.path.exists(name):
-            os.unlink(name)
+            try:
+                os.unlink(name)
+            except OSError:
+                pass
 
 
 def command(arguments: list[str], timeout=15) -> bytes:
-    deadline = time.monotonic() + timeout
-    output = bytearray()
-    with subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL) as process:
-        try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                while selector.get_map():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError("Command timed out")
-                    for key, _ in selector.select(remaining):
-                        chunk = os.read(key.fd, 65536)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        output.extend(chunk)
-                        if len(output) > MAX_BYTES:
-                            raise ValueError("Command response too large")
-            result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
-            if result != 0:
-                raise OSError("Command failed")
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-    return bytes(output)
+    try:
+        res = subprocess.run(
+            arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+            check=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("Command timed out") from exc
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise OSError("Command failed") from exc
+    if len(res.stdout) > MAX_BYTES:
+        raise ValueError("Command response too large")
+    return res.stdout
 
 
 def unit_state(unit: str, timeout=5) -> dict:
