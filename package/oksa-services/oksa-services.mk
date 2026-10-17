@@ -18,7 +18,7 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/oksa \
 		$(TARGET_DIR)/usr/bin/oksa
 	for executable in oksa-discover-vllm-models oksa-label-model-serving-node \
-		oksa-collect-nvlink-topology oksa-plan-vllm-workloads oksa-preseed-vllm-models \
+		oksa-plan-vllm-workloads oksa-preseed-vllm-models \
 		oksa-init-litellm-db oksa-calibrate oksa-calibration-probe oksa-web; do \
 		$(INSTALL) -D -m 0755 $(OKSA_SERVICES_FILES)/bin/$$executable \
 			$(TARGET_DIR)/usr/libexec/puu/$$executable || exit $$?; \
@@ -41,8 +41,7 @@ endef
 define OKSA_SERVICES_INSTALL_INIT_SYSTEMD
 	for unit in puu-k3s-addons.service puu-vllm-discovery.service \
 		puu-vllm-discovery.timer puu-model-serving-labeler.service \
-		puu-model-serving-labeler.timer puu-nvlink-topology.service \
-		puu-nvlink-topology.timer puu-vllm-planner.service \
+		puu-model-serving-labeler.timer puu-vllm-planner.service \
 		puu-vllm-planner.timer puu-vllm-preseed.service \
 		puu-postgresql.service puu-bonsai-calibration.service \
 		puu-oksa-web.service; do \

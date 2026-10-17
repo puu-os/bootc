@@ -49,6 +49,11 @@ class GpuProbe:
     memory_source: str = "unknown"
     unified_memory: bool = False
     accelerator: str = "unknown"
+    nvlink_present: bool = False
+    nvlink_link_count: int = 0
+    nvlink_max_width: int = 0
+    nvlink_topology_available: bool = False
+    nvlink_topology_summary: str = ""
 
     @property
     def cuda_ready(self) -> bool:
@@ -89,6 +94,29 @@ def probe_accelerator(probe: GpuProbe) -> None:
         probe.accelerator = "gb10"
 
 
+NVLINK_RE = re.compile(r"^NV(\d+)$")
+
+
+def probe_nvlink(probe: GpuProbe) -> None:
+    if probe.count <= 1:
+        return
+    res = smi("topo", "-m")
+    if res.returncode != 0:
+        return
+    probe.nvlink_topology_available = True
+    topo_out = res.stdout
+    links = []
+    for token in topo_out.split():
+        m = NVLINK_RE.match(token)
+        if m:
+            links.append(int(m.group(1)))
+    probe.nvlink_link_count = len(links) // 2
+    if probe.nvlink_link_count > 0:
+        probe.nvlink_present = True
+        probe.nvlink_max_width = max(links)
+    probe.nvlink_topology_summary = ";".join(topo_out.splitlines())[:4096]
+
+
 def apply_uma_memory(probe: GpuProbe) -> None:
     mem_total_kib = get_meminfo_total_kib()
     if mem_total_kib <= 0:
@@ -118,6 +146,9 @@ def probe_gpus() -> GpuProbe:
 
     if probe.available:
         probe_accelerator(probe)
+
+    if probe.available and probe.count > 1:
+        probe_nvlink(probe)
 
     if probe.accelerator == "gb10":
         probe.unified_memory = True
@@ -190,6 +221,11 @@ def main() -> None:
         f"{ms.label_namespace()}/fast-nic-present={ms.bool_str(fast_nic_present)}",
         f"{ms.label_namespace()}/cluster-joined={ms.bool_str(cluster_joined)}",
         f"{ms.label_namespace()}/accelerator={gpu.accelerator}",
+        f"{ms.label_namespace()}/nvlink-present={ms.bool_str(gpu.nvlink_present)}",
+        f"{ms.label_namespace()}/nvlink-link-count={gpu.nvlink_link_count}",
+        f"{ms.label_namespace()}/nvlink-max-width={gpu.nvlink_max_width}",
+        f"{ms.label_namespace()}/fast-gpu-interconnect={ms.bool_str(gpu.nvlink_present)}",
+        f"{ms.label_namespace()}/topology-parallel-capable={ms.bool_str(gpu.nvlink_present)}",
         *(f"{label}=true" for label in model_labels),
         *(f"{label}-" for label in sorted(stale_labels)),
     ]
@@ -204,6 +240,9 @@ def main() -> None:
         f"{ms.label_namespace()}/gpu-memory-per-gpu-mib={gpu.memory_per_gpu}",
         f"{ms.label_namespace()}/gpu-memory-source={gpu.memory_source}",
         f"{ms.label_namespace()}/fast-nics={fast_nics_str}",
+        f"{ms.label_namespace()}/nvlink-topology-available={ms.bool_str(gpu.nvlink_topology_available)}",
+        f"{ms.label_namespace()}/nvlink-gpu-count={gpu.count}",
+        f"{ms.label_namespace()}/nvlink-topology={gpu.nvlink_topology_summary}",
         check=False,
     )
 
@@ -225,6 +264,15 @@ def main() -> None:
         f"PUU_NODE_LOCAL_MODELS={','.join(model_names)}",
     ]
     ms.atomic_write_text(state_dir / "node-capacity.env", "\n".join(cap_lines) + "\n")
+    topo_lines = [
+        f"PUU_NODE_NVLINK_PRESENT={ms.bool_str(gpu.nvlink_present)}",
+        f"PUU_NODE_NVLINK_LINK_COUNT={gpu.nvlink_link_count}",
+        f"PUU_NODE_NVLINK_MAX_WIDTH={gpu.nvlink_max_width}",
+        f"PUU_NODE_FAST_GPU_INTERCONNECT={ms.bool_str(gpu.nvlink_present)}",
+        f"PUU_NODE_TOPOLOGY_PARALLEL_CAPABLE={ms.bool_str(gpu.nvlink_present)}",
+        f"PUU_NODE_TOPOLOGY_AVAILABLE={ms.bool_str(gpu.nvlink_topology_available)}",
+    ]
+    ms.atomic_write_text(state_dir / "topology.env", "\n".join(topo_lines) + "\n")
 
 
 if __name__ == "__main__":

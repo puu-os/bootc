@@ -5,7 +5,6 @@ enable k3s.service
 enable puu-k3s-addons.service
 enable puu-vllm-discovery.timer
 enable puu-model-serving-labeler.timer
-enable puu-nvlink-topology.timer
 enable puu-vllm-planner.timer
 enable puu-vllm-preseed.service
 enable puu-bonsai-calibration.service
