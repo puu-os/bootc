@@ -1,9 +1,0 @@
-[Unit]
-Description=Publish NVIDIA NVLink topology metadata
-Requires=k3s.service
-After=k3s.service nvidia-cdi-refresh.service
-ConditionKernelCommandLine=!puu.live
-
-[Service]
-Type=oneshot
-ExecStart=/usr/libexec/puu/oksa-collect-nvlink-topology
