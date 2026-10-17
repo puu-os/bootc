@@ -24,7 +24,7 @@ import urllib.request
 STATE_DIR = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 MODELS_DIR = Path(os.environ.get("PUU_VLLM_MODELS_DIR", "/var/lib/vllm/models"))
 PRESEED_MANIFEST = ".puu-preseed.json"
-CALIBRATION_RESULT_PATH = Path(os.environ.get("PUU_CALIBRATION_FILE", "/var/lib/puu/calibration/bonsai.json"))
+CALIBRATION_RESULT_PATH = Path(os.environ.get("PUU_CALIBRATION_FILE", "/var/lib/puu/calibration/bonsai-2-27b.json"))
 
 
 @contextmanager
