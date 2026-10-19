@@ -39,7 +39,13 @@ spec:
                   name: open-webui-secret
                   key: secretkey
             - name: DEFAULT_MODELS
-              value: "prism-ml/bonsai-2-27b;bonsai-2-27b"
+              value: "prism-ml/bonsai-2-27b"
+            - name: ENABLE_EVALUATION_ARENA_MODELS
+              value: "False"
+            - name: ENABLE_WEB_SEARCH
+              value: "True"
+            - name: WEB_SEARCH_ENGINE
+              value: "duckduckgo"
           ports:
             - name: http
               containerPort: 8080
