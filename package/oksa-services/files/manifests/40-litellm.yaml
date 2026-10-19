@@ -38,16 +38,6 @@ spec:
             model: openai/prism-ml/bonsai-2-27b
             api_base: http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1
             api_key: none
-        - model_name: "bonsai-2-27b"
-          litellm_params:
-            model: openai/Bonsai-2-27B
-            api_base: http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1
-            api_key: none
-        - model_name: "*"
-          litellm_params:
-            model: openai/*
-            api_base: http://llm-d-inference-gateway.puu-ai.svc.cluster.local:8000/v1
-            api_key: none
       general_settings:
         master_key: os.environ/PUU_LITELLM_MASTER_KEY
         max_parallel_requests: 32
