@@ -32,6 +32,10 @@ class CapacityError(Exception):
     pass
 
 
+class ProbeTimeout(TimeoutError):
+    pass
+
+
 def candidate_command(command, context, sequences, utilization):
     replacements = {
         "--max-model-len": str(context),
@@ -112,7 +116,8 @@ def stop_child(child):
             signal.signal(sig, handler)
 
 
-def probe(command, context, sequences, utilization, reserve, metrics, log):
+def probe(command, context, sequences, utilization, reserve, metrics, log, seconds):
+    trial_deadline = time.monotonic() + seconds
     import torch
 
     child = None
@@ -141,7 +146,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
         except Exception as error:
             log_errors.append(f"candidate log drain failed: {type(error).__name__}: {error}")
 
-    def monitor():
+    def monitor(check_deadline=True):
         if log_errors:
             raise RuntimeError(log_errors[0])
         with open("/calibration-host-meminfo", encoding="ascii") as meminfo:
@@ -167,19 +172,27 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
                 if child.returncode >= 0 and MEMORY_ERRORS.search(text):
                     raise CapacityError("candidate reported memory capacity exhaustion")
                 raise RuntimeError(f"candidate exited with code {child.returncode}")
+        if check_deadline and time.monotonic() >= trial_deadline:
+            raise ProbeTimeout("Trial time budget exhausted")
         return free, total
 
     def receive(results, deadline):
         while True:
-            monitor()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("startup/request deadline exceeded")
+            monitor(check_deadline=False)
             try:
-                value, error = results.get(timeout=min(0.2, remaining))
+                value, error = results.get_nowait()
             except queue.Empty:
-                continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProbeTimeout("Startup/request deadline exceeded")
+                try:
+                    value, error = results.get(timeout=min(0.2, remaining))
+                except queue.Empty:
+                    continue
             if error is not None:
+                if (isinstance(error, TimeoutError) or
+                        isinstance(error, threading.BrokenBarrierError) and time.monotonic() >= deadline):
+                    raise ProbeTimeout("Request deadline exceeded") from error
                 raise error
             return value
 
@@ -201,7 +214,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
     free, total = monitor()
     if free < utilization * total + min(1024 ** 3, total * 0.1):
         raise CapacityError("CUDA free memory cannot cover utilization and headroom")
-    startup_deadline = time.monotonic() + 1800
+    startup_deadline = min(trial_deadline, time.monotonic() + 1800)
     try:
         child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  start_new_session=True, bufsize=0)
@@ -212,7 +225,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
             start_request(results, "/health", timeout=2)
             try:
                 status, _ = receive(results, min(startup_deadline, time.monotonic() + 3))
-            except ConnectionRefusedError:
+            except (ConnectionRefusedError, ProbeTimeout):
                 status = 503
             if status == 200:
                 break
@@ -220,7 +233,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
                 raise RuntimeError(f"health returned HTTP {status}")
             monitor()
             if time.monotonic() >= startup_deadline:
-                raise TimeoutError("startup deadline exceeded")
+                raise ProbeTimeout("Startup deadline exceeded")
             time.sleep(0.2)
         log_deadline = min(startup_deadline, time.monotonic() + 2)
         while True:
@@ -234,7 +247,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
         metrics["kv_cache_tokens"] = min(int(value.replace(",", "")) for value in matches)
         if context * sequences > metrics["kv_cache_tokens"]:
             raise CapacityError("context * sequences exceeds GPU KV cache token budget")
-        deadline = time.monotonic() + 300
+        deadline = min(trial_deadline, time.monotonic() + 300)
         models = json.loads(fetch("/v1/models", deadline))["data"]
         if not models or not isinstance(models[0]["id"], str):
             raise RuntimeError("no served model ID")
@@ -245,13 +258,18 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
         for index in range(sequences):
             monitor()
             if time.monotonic() >= deadline:
-                raise TimeoutError("inference setup deadline exceeded")
+                raise ProbeTimeout("Inference setup deadline exceeded")
             payload = {"model": models[0]["id"], "prompt": [100 + index] * (context - 32),
                        "max_tokens": 32, "ignore_eos": True, "temperature": 0}
             start_request(results, "/v1/completions", payload, barrier,
                           max(0.001, deadline - time.monotonic()))
         started = time.monotonic()
-        barrier.wait(timeout=min(1, max(0.001, deadline - started)))
+        try:
+            barrier.wait(timeout=min(1, max(0.001, deadline - started)))
+        except threading.BrokenBarrierError as error:
+            if time.monotonic() >= deadline:
+                raise ProbeTimeout("Inference barrier deadline exceeded") from error
+            raise
         for _ in range(sequences):
             status, data = receive(results, deadline)
             if status != 200:
@@ -273,6 +291,8 @@ def probe(command, context, sequences, utilization, reserve, metrics, log):
         if any(labels not in after or after[labels] < value for labels, value in before.items()):
             raise RuntimeError("vLLM preemption counters disappeared or reset")
         monitor()
+        if time.monotonic() >= deadline:
+            raise ProbeTimeout("Inference deadline exceeded")
         metrics["tokens_per_second"] = sequences * 32 / elapsed
     finally:
         if child is not None:
@@ -309,21 +329,24 @@ def run():
         sequences = record["sequences"] = int(os.environ["PUU_PROBE_SEQUENCES"])
         utilization = record["utilization"] = float(os.environ["PUU_PROBE_UTILIZATION"])
         reserve = int(os.environ["PUU_PROBE_HOST_RESERVE"])
+        seconds = int(os.environ["PUU_PROBE_SECONDS"])
         if (not isinstance(command, list) or not command or
                 any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)):
             raise ValueError("PUU_PROBE_COMMAND must be a nonempty JSON command list")
-        if context <= 32 or sequences <= 0 or not 0 < utilization <= 1 or reserve < 0:
-            raise ValueError("invalid context, sequences, utilization, or host reserve")
+        if context <= 32 or sequences <= 0 or not 0 < utilization <= 1 or reserve < 0 or not 1 <= seconds <= 2100:
+            raise ValueError("invalid context, sequences, utilization, host reserve, or time budget")
         command = candidate_command(command, context, sequences, utilization)
         with tempfile.TemporaryFile() as log:
             try:
-                probe(command, context, sequences, utilization, reserve, record["metrics"], log)
+                probe(command, context, sequences, utilization, reserve, record["metrics"], log, seconds)
             finally:
                 if sys.exc_info()[0] is not None:
                     print(log_text(log)[-8192:], file=sys.stderr)
         record.update(status="passed", reason="concurrent full-context inference completed without preemptions")
     except CapacityError as error:
         record.update(status="capacity", reason=str(error)[:400])
+    except ProbeTimeout as error:
+        record.update(status="timeout", reason=str(error)[:400])
     except Exception as error:
         record.update(status="error", reason=f"{type(error).__name__}: {error}"[:400])
     if record["utilization"] is not None and not math.isfinite(record["utilization"]):
