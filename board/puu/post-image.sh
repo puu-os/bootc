@@ -183,7 +183,7 @@ mkdir -p "${iso_tmp}/empty" "${iso_tmp}/root"/{LiveOS,payload,boot}
 ln "${rootfs_squashfs}" "${iso_tmp}/root/LiveOS/squashfs.img"
 ln "${oci_archive}" "${iso_tmp}/root/payload/image.tar"
 ln "${BINARIES_DIR}/image.manifest" "${iso_tmp}/root/payload/image.manifest"
-cmdline="puu.live SYSTEMD_SULOGIN_FORCE=1 root=live:LABEL=@ISO_VOLUME_ID@ puu.iso=@ISO_VOLUME_ID@ puu.boot-partuuid=@BOOT_PARTUUID@ ro rd.live.image rd.overlay systemd.gpt_auto=0${PUU_CMDLINE_EXTRA} quiet splash plymouth.ignore-serial-consoles vt.global_cursor_default=0 console=tty0"
+cmdline="puu.live SYSTEMD_SULOGIN_FORCE=1 root=live:LABEL=@ISO_VOLUME_ID@ puu.iso=@ISO_VOLUME_ID@ puu.boot-partuuid=@BOOT_PARTUUID@ ro rd.live.image rd.overlay systemd.gpt_auto=0${PUU_CMDLINE_EXTRA} quiet splash plymouth.ignore-serial-consoles plymouth.use-simpledrm vt.global_cursor_default=0 console=tty0"
 "${HOST_DIR}/bin/python3" "${BASH_SOURCE%/*}/generate-iso" \
   --arch "${PUU_ARCH}" --epoch "${SOURCE_DATE_EPOCH}" \
   --output "${iso_tmp}/genimage.cfg" \
