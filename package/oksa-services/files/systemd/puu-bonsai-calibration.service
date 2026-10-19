@@ -1,6 +1,6 @@
 [Unit]
 Description=Measure and apply Bonsai inference limits
-Requires=k3s.service puu-k3s-addons.service
+Wants=k3s.service puu-k3s-addons.service
 PartOf=puu-k3s-addons.service
 Wants=puu-vllm-preseed.service puu-model-serving-labeler.service
 After=k3s.service puu-k3s-addons.service puu-vllm-preseed.service puu-model-serving-labeler.service
