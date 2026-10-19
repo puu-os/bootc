@@ -13,6 +13,7 @@ ExecStart=/usr/libexec/puu/oksa-calibrate
 TimeoutStartSec=5h
 TimeoutStopSec=180s
 Restart=on-failure
+RestartPreventExitStatus=75
 RestartSec=1min
 
 [Install]

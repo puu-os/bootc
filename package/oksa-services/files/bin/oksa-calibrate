@@ -25,6 +25,10 @@ MAX_SECONDS = 4 * 60 * 60
 from oksa_model_serving import label_namespace, render_manifest
 
 
+class CalibrationTimeout(TimeoutError):
+    pass
+
+
 def publish(state, message, fingerprint=""):
     atomic_record(STATUS_PATH, dict(schema=1, boot_id=boot_id(), state=state,
                                   message=message[:512], fingerprint=fingerprint, updated_at=time.time()))
@@ -45,7 +49,19 @@ def kubectl(*args, payload=None):
                             capture_output=True, text=True, timeout=150)
     if result.returncode:
         raise RuntimeError(f"kubectl {' '.join(args[:3])}: {result.stderr[-2048:]}")
-    return json.loads(result.stdout) if "json" in args and result.stdout.strip() else result.stdout
+    if "json" not in args or not result.stdout.strip():
+        return result.stdout
+    decoder = json.JSONDecoder()
+    pos = 0
+    items = []
+    text = result.stdout.strip()
+    while pos < len(text):
+        obj, end = decoder.raw_decode(text, idx=pos)
+        items.append(obj)
+        while end < len(text) and text[end].isspace():
+            end += 1
+        pos = end
+    return items[0] if len(items) == 1 else dict(apiVersion="v1", kind="List", items=items)
 
 
 def set_limits(command, limits):
@@ -83,13 +99,13 @@ def apply_profile(manifest, result, node):
 
 
 def delete_probe():
-    kubectl("delete", "pod", POD, "-n", "puu-ai", "--ignore-not-found", "--wait=true", "--timeout=120s", "-o", "json")
+    kubectl("delete", "pod", POD, "-n", "puu-ai", "--ignore-not-found", "--wait=true", "--timeout=120s", "-o", "name")
 
 
-def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve):
+def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds):
     spec = copy.deepcopy(deployment["spec"]["template"]["spec"])
     spec["restartPolicy"] = "Never"
-    spec["activeDeadlineSeconds"] = 2160
+    spec["activeDeadlineSeconds"] = seconds + 60
     spec["terminationGracePeriodSeconds"] = 15
     spec["automountServiceAccountToken"] = False
     spec["nodeSelector"]["kubernetes.io/hostname"] = node["metadata"]["labels"]["kubernetes.io/hostname"]
@@ -106,6 +122,7 @@ def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, r
         dict(name="PUU_PROBE_SEQUENCES", value=str(sequences)),
         dict(name="PUU_PROBE_UTILIZATION", value=str(utilization)),
         dict(name="PUU_PROBE_HOST_RESERVE", value=str(reserve)),
+        dict(name="PUU_PROBE_SECONDS", value=str(seconds)),
     ])
     container.setdefault("volumeMounts", []).extend([
         dict(name="calibration", mountPath="/calibration", readOnly=True),
@@ -118,14 +135,23 @@ def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, r
     return dict(apiVersion="v1", kind="Pod", metadata=dict(name=POD, namespace="puu-ai"), spec=spec)
 
 
-def run_trial(deployment, node, context, sequences, utilization, memory_bytes, reserve, deadline):
-    publish("running", f"Testing {context} context tokens, {sequences} simultaneous requests, {utilization:.0%} GPU memory.")
-    pod = probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve)
+def run_trial(deployment, node, context, sequences, utilization, memory_bytes, reserve, deadline, trial_number):
+    started = time.monotonic()
+    seconds = max(1, min(2100, int(deadline - started)))
+    message = (f"Trial {trial_number}/{MAX_TRIALS}: testing {context} context tokens, "
+               f"{sequences} simultaneous requests; GPU-memory budget {utilization:.0%}.")
+    publish("running", message)
+    pod = probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds)
     try:
         kubectl("create", "-f", "-", "-o", "json", payload=pod)
-        trial_deadline = min(deadline, time.monotonic() + 2220)
+        trial_deadline = min(deadline, started + seconds + 60)
+        next_update = started + 10
         while time.monotonic() < trial_deadline:
+            if time.monotonic() >= next_update:
+                publish("running", f"{message} Elapsed {int(time.monotonic() - started)}s.")
+                next_update = time.monotonic() + 10
             current = kubectl("get", "pod", POD, "-n", "puu-ai", "-o", "json")
+            deadline_exceeded = current.get("status", {}).get("reason") == "DeadlineExceeded"
             statuses = current.get("status", {}).get("containerStatuses", [])
             for status in statuses:
                 waiting = status.get("state", {}).get("waiting", {})
@@ -137,8 +163,10 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
                 if terminated.get("reason") == "OOMKilled":
                     return dict(status="capacity", reason="Pod memory limit reached", context=context,
                                 sequences=sequences, utilization=utilization)
-                value = json.loads(terminated.get("message", "{}"))
-                if value.get("status") not in ("passed", "capacity"):
+                value = json.loads(terminated.get("message") or "{}")
+                if deadline_exceeded and (not value or value.get("reason") == "InterruptedError: probe interrupted by signal 15"):
+                    raise CalibrationTimeout("Calibration pod time budget exhausted")
+                if value.get("status") not in ("passed", "capacity", "timeout"):
                     raise RuntimeError(f"Calibration probe failed: {value or terminated}")
                 if terminated.get("exitCode") != 0:
                     raise RuntimeError(f"Calibration probe exited unsuccessfully: {terminated}")
@@ -154,10 +182,12 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
                     if metrics["kv_cache_tokens"] < context * sequences or metrics["minimum_host_available_bytes"] < reserve:
                         raise ValueError("Calibration probe exceeded its memory bounds")
                 return value
+            if deadline_exceeded:
+                raise CalibrationTimeout("Calibration pod time budget exhausted")
             if current.get("status", {}).get("phase") in ("Failed", "Succeeded"):
                 raise RuntimeError(f"Calibration pod ended without a probe result: {current.get('status')}")
             time.sleep(2)
-        raise TimeoutError("Calibration probe deadline exceeded")
+        raise CalibrationTimeout("Calibration probe deadline exceeded")
     finally:
         delete_probe()
 
@@ -192,24 +222,35 @@ def calibrate(manifest, node, identity, fingerprint):
     deployment = deployment_of(manifest)
     deadline = time.monotonic() + MAX_SECONDS
     trials = result["trials"]
+    best = None
 
     def test(context, sequences, utilization):
+        nonlocal best
         if len(trials) >= MAX_TRIALS or time.monotonic() >= deadline:
-            raise TimeoutError("Calibration search budget exhausted")
-        value = run_trial(deployment, node, context, sequences, utilization, budget, reserve, deadline)
+            raise CalibrationTimeout("Calibration search budget exhausted")
+        value = run_trial(deployment, node, context, sequences, utilization, budget, reserve, deadline, len(trials) + 1)
         trials.append(value)
-        return value["status"] == "passed"
+        if value["status"] == "timeout":
+            raise CalibrationTimeout(value["reason"])
+        if value["status"] == "passed":
+            best = value
+            return True
+        return False
 
-    for utilization in (0.9, 0.85, 0.7, 0.5):
-        if test(512, 1, utilization):
-            break
-    else:
-        return result
-    context = 512 * search_limit(lambda blocks: test(blocks * 512, 1, utilization), 512)
-    sequences = search_limit(lambda count: test(context, count, utilization), 8)
-    if not test(context, sequences, utilization):
-        raise RuntimeError("Joint calibration confirmation failed; no result saved")
-    result.update(reason="measured", completed_at=time.time(), metrics=trials[-1]["metrics"], limits=dict(
+    try:
+        for utilization in (0.9, 0.85, 0.7, 0.5):
+            if test(512, 1, utilization):
+                break
+        else:
+            return result
+        context = 512 * search_limit(lambda blocks: test(blocks * 512, 1, utilization), 512)
+        search_limit(lambda count: test(context, count, utilization), 8)
+    except CalibrationTimeout as error:
+        if best is None:
+            raise CalibrationTimeout(f"{error}; no profile passed. Restart calibration manually to retry.") from error
+        publish("running", f"{error}; applying the last successfully measured profile.")
+    context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
+    result.update(reason="measured", completed_at=time.time(), metrics=best["metrics"], limits=dict(
         max_model_len=context, max_num_seqs=sequences, max_num_batched_tokens=min(8192, context * sequences),
         gpu_memory_utilization=utilization, memory_bytes=budget))
     return result
@@ -301,10 +342,13 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             run(force=arguments.force)
+        except CalibrationTimeout as error:
+            publish("error", str(error))
+            return 75
         except Exception as error:
             publish("error", str(error))
             raise
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
