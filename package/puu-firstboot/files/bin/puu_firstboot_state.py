@@ -184,7 +184,9 @@ def read_status() -> dict:
     if value.get("boot_id") != boot_id():
         raise ValueError("Status belongs to another boot")
     updated = value.get("updated_at")
-    if not valid_timestamp(updated) or not -30 <= time.time() - updated <= STATUS_TTL:
+    if not valid_timestamp(updated) or time.time() - updated < -30:
+        raise ValueError("Invalid status timestamp")
+    if not value.get("complete") and time.time() - updated > STATUS_TTL:
         raise ValueError("Status is stale")
     if type(value.get("complete")) is not bool:
         raise ValueError("Invalid completion state")
