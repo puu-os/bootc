@@ -1,6 +1,6 @@
 [Unit]
 Description=Generate per-model vLLM workloads
-Requires=k3s.service
+Wants=k3s.service
 After=k3s.service puu-model-serving-labeler.service
 ConditionKernelCommandLine=!puu.live
 
