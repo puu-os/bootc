@@ -43,12 +43,14 @@ spec:
       runtimeClassName: nvidia-cdi
       containers:
         - name: vllm
-          image: vllm/vllm-openai@sha256:2cc49b81319f7a66a33dd8bd63a7bfddae079122b33ce51989b6828a1f038c37
+          image: fraserpricee/bonsai-vllm@sha256:a40d14f5eb218d80984d5009a61262668f9665f2f2946b84bd3c0102f1fc85e9
           imagePullPolicy: IfNotPresent
           command:
             - vllm
             - serve
-            - prism-ml/Ternary-Bonsai-2-27B
+            - fraserprice/Ternary-Bonsai-2-27B-vllm
+            - --revision
+            - 1e1d7c0f5cb02b71d81b0574c54ddd1dc9088495
             - --served-model-name
             - prism-ml/bonsai-2-27b
             - bonsai-2-27b

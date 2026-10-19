@@ -6,7 +6,11 @@ OKSA_SERVICES_LICENSE_FILES = LICENSE
 OKSA_SERVICES_DEPENDENCIES = k3s oksa-crds
 
 OKSA_SERVICES_FILES = $(OKSA_SERVICES_PKGDIR)/files
-
+ifeq ($(BR2_aarch64),y)
+OKSA_SERVICES_BONSAI_MANIFEST_DIR = arm64/
+else
+OKSA_SERVICES_BONSAI_MANIFEST_DIR =
+endif
 
 define OKSA_SERVICES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/bin/oksa_model_serving.py \
@@ -29,9 +33,11 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/lib/tmpfiles.d/oksa-services.conf
 	$(foreach manifest,20-agentgateway.yaml 21-llm-d-gateway.yaml \
 		30-llm-d.yaml 30-nvidia-cdi-runtime.yaml 32-nvidia-device-plugin.yaml \
-		33-bonsai-2-27b.yaml 40-litellm.yaml 45-open-webui.yaml,\
+		40-litellm.yaml 45-open-webui.yaml,\
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/manifests/$(manifest) \
 			$(TARGET_DIR)/usr/share/puu/k3s/manifests/$(manifest)$(sep))
+	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/manifests/$(OKSA_SERVICES_BONSAI_MANIFEST_DIR)33-bonsai-2-27b.yaml \
+		$(TARGET_DIR)/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/share/puu/vllm/catalog.d
 	$(foreach catalog,$(notdir $(wildcard $(OKSA_SERVICES_FILES)/vllm/catalog.d/*.env)),\
 		$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/vllm/catalog.d/$(catalog) \
