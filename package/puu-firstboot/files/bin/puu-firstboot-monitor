@@ -331,7 +331,7 @@ def master_key():
 
 
 def chat_valid(response):
-    if not isinstance(response, dict) or response.get("model") != fs.SERVED_MODEL:
+    if not isinstance(response, dict) or response.get("model") not in (fs.MODEL, fs.SERVED_MODEL):
         return False
     usage = response.get("usage")
     if not isinstance(usage, dict) or type(usage.get("completion_tokens")) is not int or usage["completion_tokens"] <= 0:
@@ -469,7 +469,7 @@ def snapshot(progress):
             raise Pending(stage, message)
     containers = deployments["open-webui"]["spec"]["template"]["spec"]["containers"]
     if not any(container.get("name") == "open-webui" and any(
-        env.get("name") == "DEFAULT_MODELS" and env.get("value") == fs.MODEL
+        env.get("name") == "DEFAULT_MODELS" and fs.MODEL in env.get("value", "").split(";")
         for env in container.get("env", [])
     ) for container in containers):
         raise Pending("model", "Configuring AI model defaults…", True)

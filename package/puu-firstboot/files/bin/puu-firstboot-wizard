@@ -46,6 +46,7 @@ class Wizard(Adw.Application):
         self.ready = False
         self.complete = False
         self.finishing = False
+        self.pulse_source = None
         self.status_start_time = GLib.get_monotonic_time()
         self.connect("activate", self.activate_window)
 
@@ -178,6 +179,9 @@ class Wizard(Adw.Application):
     def refresh(self):
         self.complete = self.completion_valid()
         if self.complete:
+            if self.pulse_source is not None:
+                GLib.source_remove(self.pulse_source)
+                self.pulse_source = None
             self.stack.set_visible_child_name("complete")
             return GLib.SOURCE_CONTINUE
 
@@ -187,6 +191,9 @@ class Wizard(Adw.Application):
             status = BACKEND.read_status()
             self.status_start_time = None
         except (OSError, ValueError) as error:
+            if self.pulse_source is not None:
+                GLib.source_remove(self.pulse_source)
+                self.pulse_source = None
             now = GLib.get_monotonic_time()
             if self.status_start_time is None:
                 self.status_start_time = now
@@ -210,6 +217,13 @@ class Wizard(Adw.Application):
 
         steps = status.get("steps", [])
         has_error = any(step.get("state") == "error" for step in steps)
+        active_step = next((step for step in steps if step.get("state") == "running"
+                            and step.get("id") == status.get("stage")), {})
+        calibrating = (status.get("stage") == "calibration" and bool(active_step)
+                       and not status.get("complete") and not has_error)
+        if not calibrating and self.pulse_source is not None:
+            GLib.source_remove(self.pulse_source)
+            self.pulse_source = None
         if has_error:
             self.stack.set_visible_child_name("error")
             msg = status.get("message", "")
@@ -229,18 +243,22 @@ class Wizard(Adw.Application):
             return GLib.SOURCE_CONTINUE
 
         self.stack.set_visible_child_name("progress")
-        done_count = sum(1 for step in steps if step.get("state") == "done")
-        total_count = max(len(steps), 1)
-        fraction = max(done_count / total_count, 0.05)
-        self.progress_bar.set_fraction(fraction)
+        if calibrating:
+            if self.pulse_source is None:
+                def pulse():
+                    self.progress_bar.pulse()
+                    return GLib.SOURCE_CONTINUE
 
-        active_step = next((step for step in steps if step.get("state") == "running"), None)
-        if active_step:
-            self.status_label.set_text(plain(active_step.get("label", "")) + "…")
-        elif status.get("message"):
-            self.status_label.set_text(plain(status["message"]))
+                pulse()
+                self.pulse_source = GLib.timeout_add(150, pulse)
         else:
-            self.status_label.set_text("Configuring system…")
+            done_count = sum(1 for step in steps if step.get("state") == "done")
+            total_count = max(len(steps), 1)
+            fraction = max(done_count / total_count, 0.05)
+            self.progress_bar.set_fraction(fraction)
+
+        self.status_label.set_text(plain(status.get("message") or active_step.get("detail")
+                                         or active_step.get("label") or "Configuring system…"))
 
         return GLib.SOURCE_CONTINUE
 
