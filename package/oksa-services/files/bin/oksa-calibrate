@@ -14,6 +14,7 @@ import subprocess
 import time
 
 from oksa_calibration_state import MODEL, RESULT_PATH, STATUS_PATH, ZERO_LIMITS, atomic_record, boot_id, read_record, valid_result
+from oksa_model_serving import STATE_DIR, read_first_line
 SOURCE_PATH = Path("/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml")
 MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai-2-27b.yaml")
 PROBE_PATH = Path(__file__).with_name("oksa-calibration-probe")
@@ -81,7 +82,9 @@ def apply_profile(manifest, result, node):
     manifest = copy.deepcopy(manifest)
     deployment = deployment_of(manifest)
     limits = result["limits"]
-    deployment["spec"]["replicas"] = int(limits["max_num_seqs"] > 0)
+    selected = read_first_line(Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(STATE_DIR / "selected-model"))))
+    disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(STATE_DIR / "serving.disabled")))
+    deployment["spec"]["replicas"] = int(limits["max_num_seqs"] > 0 and not disabled.exists() and selected in ("", MODEL))
     if limits["max_num_seqs"]:
         spec = deployment["spec"]["template"]["spec"]
         spec["nodeSelector"]["kubernetes.io/hostname"] = node["metadata"]["labels"]["kubernetes.io/hostname"]
@@ -360,6 +363,7 @@ def main():
         except Exception as error:
             publish("error", str(error))
             raise
+    subprocess.run([str(Path(__file__).with_name("oksa-plan-vllm-workloads"))], check=True)
 
 
 if __name__ == "__main__":
