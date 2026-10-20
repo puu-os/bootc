@@ -18,6 +18,7 @@ SOURCE_PATH = Path("/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml")
 MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai-2-27b.yaml")
 PROBE_PATH = Path(__file__).with_name("oksa-calibration-probe")
 POD = "bonsai-calibration"
+NAMESPACE = "oksa"
 MAX_TRIALS = 40
 MAX_SECONDS = 4 * 60 * 60
 
@@ -96,7 +97,7 @@ def apply_profile(manifest, result, node):
 
 
 def delete_probe():
-    kubectl("delete", "pod", POD, "-n", "puu-ai", "--ignore-not-found", "--wait=true", "--timeout=120s", "-o", "name")
+    kubectl("delete", "pod", POD, "-n", NAMESPACE, "--ignore-not-found", "--wait=true", "--timeout=120s", "-o", "name")
 
 
 def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds):
@@ -129,7 +130,7 @@ def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, r
         dict(name="calibration", hostPath=dict(path=str(PROBE_PATH.parent), type="Directory")),
         dict(name="host-meminfo", hostPath=dict(path="/proc/meminfo", type="File")),
     ])
-    return dict(apiVersion="v1", kind="Pod", metadata=dict(name=POD, namespace="puu-ai"), spec=spec)
+    return dict(apiVersion="v1", kind="Pod", metadata=dict(name=POD, namespace=NAMESPACE), spec=spec)
 
 
 def run_trial(deployment, node, context, sequences, utilization, memory_bytes, reserve, deadline, trial_number):
@@ -147,7 +148,7 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
             if time.monotonic() >= next_update:
                 publish("running", f"{message} Elapsed {int(time.monotonic() - started)}s.")
                 next_update = time.monotonic() + 10
-            current = kubectl("get", "pod", POD, "-n", "puu-ai", "-o", "json")
+            current = kubectl("get", "pod", POD, "-n", NAMESPACE, "-o", "json")
             deadline_exceeded = current.get("status", {}).get("reason") == "DeadlineExceeded"
             statuses = current.get("status", {}).get("containerStatuses", [])
             for status in statuses:
@@ -273,6 +274,20 @@ def hardware_identity():
                 probe=hashlib.sha256(PROBE_PATH.read_bytes()).hexdigest())
 
 
+def ensure_namespace(namespace=NAMESPACE):
+    deadline = time.monotonic() + 120
+    while True:
+        try:
+            kubectl("create", "namespace", namespace)
+            return
+        except RuntimeError as exc:
+            if "AlreadyExists" in str(exc):
+                return
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+
+
 def run(force=False):
     publish("running", "Preparing measured Bonsai calibration.")
     identity = hardware_identity()
@@ -282,17 +297,9 @@ def run(force=False):
         raise ValueError("Expected Bonsai manifest list")
     deployment = deployment_of(manifest)
     deployment["spec"]["replicas"] = 0
-    namespace_deadline = time.monotonic() + 120
-    while True:
-        try:
-            kubectl("get", "namespace", "puu-ai")
-            break
-        except RuntimeError:
-            if time.monotonic() >= namespace_deadline:
-                raise
-            time.sleep(1)
+    ensure_namespace()
     apply_profile(manifest, dict(limits=ZERO_LIMITS), None)
-    kubectl("wait", "--for=delete", "pod", "-n", "puu-ai", "-l", f"app.kubernetes.io/name={MODEL}", "--timeout=120s")
+    kubectl("wait", "--for=delete", "pod", "-n", NAMESPACE, "-l", f"app.kubernetes.io/name={MODEL}", "--timeout=120s")
     delete_probe()
     node = kubectl("get", "node", identity["node"], "-o", "json")
     if identity["gpus"]:

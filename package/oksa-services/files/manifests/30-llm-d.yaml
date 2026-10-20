@@ -6,7 +6,7 @@ metadata:
 spec:
   chart: oci://ghcr.io/llm-d/charts/llm-d-router-gateway@sha256:63a79a842974691be73d44918c7086bcc52d6fee546ff39113517a23c03eeab0
   version: v0.11.0
-  targetNamespace: puu-ai
+  targetNamespace: oksa
   createNamespace: true
   valuesContent: |-
     provider:

@@ -25,6 +25,7 @@ STATE_DIR = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 MODELS_DIR = Path(os.environ.get("PUU_VLLM_MODELS_DIR", "/var/lib/vllm/models"))
 PRESEED_MANIFEST = ".puu-preseed.json"
 CALIBRATION_RESULT_PATH = Path(os.environ.get("PUU_CALIBRATION_FILE", "/var/lib/puu/calibration/bonsai-2-27b.json"))
+OKSA_NAMESPACE = "oksa"
 
 
 @contextmanager
@@ -669,7 +670,7 @@ def get_litellm_master_key() -> str | None:
     except (subprocess.SubprocessError, OSError):
         pass
     try:
-        proc = run_kubectl("get", "secret", "puu-litellm-masterkey", "-n", "puu-ai", "-o", "jsonpath={.data.masterkey}", check=False)
+        proc = run_kubectl("get", "secret", "puu-litellm-masterkey", "-n", OKSA_NAMESPACE, "-o", "jsonpath={.data.masterkey}", check=False)
         if proc.returncode == 0 and proc.stdout.strip():
             import base64
             return base64.b64decode(proc.stdout.strip()).decode("utf-8").strip()
@@ -684,7 +685,7 @@ def litellm_base_url() -> str:
         return env_url.rstrip("/")
     try:
         proc = run_kubectl(
-            "get", "service", "litellm", "--namespace", "puu-ai", "-o", "jsonpath={.spec.clusterIP}", check=False
+            "get", "service", "litellm", "--namespace", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return f"http://{proc.stdout.strip()}:4000"
@@ -889,7 +890,7 @@ def collect_host_memory() -> dict:
 
 def collect_k8s_workloads() -> list[dict]:
     try:
-        proc = run_kubectl("get", "pods", "-n", "puu-ai", "-o", "json", check=False)
+        proc = run_kubectl("get", "pods", "-n", OKSA_NAMESPACE, "-o", "json", check=False)
         if proc.returncode != 0:
             return []
         data = json.loads(proc.stdout)
@@ -923,7 +924,7 @@ def collect_vllm_metrics(active_model: str) -> dict:
     model_label = re.sub(r"[^a-z0-9]+", "-", active_model.lower()).strip("-")
     service_name = f"puu-vllm-{model_label}"
     try:
-        proc = run_kubectl("get", "service", service_name, "-n", "puu-ai", "-o", "jsonpath={.spec.clusterIP}", check=False)
+        proc = run_kubectl("get", "service", service_name, "-n", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False)
         if proc.returncode != 0 or not proc.stdout.strip():
             return {}
         cluster_ip = proc.stdout.strip()

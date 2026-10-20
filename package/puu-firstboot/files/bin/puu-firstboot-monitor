@@ -21,7 +21,7 @@ for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3]
 import puu_firstboot_state as fs
 import oksa_calibration_state as cs
 
-NAMESPACE = "puu-ai"
+NAMESPACE = "oksa"
 STEP_LABELS = (
     ("identity", "User account"),
     ("services", "System services"),
@@ -355,7 +355,7 @@ def static_model_mapping(response):
     matches = [model for model in response["data"] if isinstance(model, dict) and model.get("model_name") in (fs.MODEL, f"prism-ml/{fs.MODEL}")]
     return bool(matches) and any(
         model.get("litellm_params", {}).get("model") in ("openai/" + fs.SERVED_MODEL, "openai/Bonsai-2-27B", "openai/prism-ml/bonsai-2-27b", "openai/bonsai-2-27b")
-        and model.get("litellm_params", {}).get("api_base") == "http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1"
+        and model.get("litellm_params", {}).get("api_base") == "http://bonsai-2-27b.oksa.svc.cluster.local:8000/v1"
         for model in matches
     )
 
