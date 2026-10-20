@@ -469,7 +469,7 @@ def snapshot(progress):
             raise Pending(stage, message)
     containers = deployments["open-webui"]["spec"]["template"]["spec"]["containers"]
     if not any(container.get("name") == "open-webui" and any(
-        env.get("name") == "DEFAULT_MODELS" and fs.MODEL in env.get("value", "").split(";")
+        env.get("name") == "DEFAULT_MODELS" and fs.SERVED_MODEL in env.get("value", "").split(";")
         for env in container.get("env", [])
     ) for container in containers):
         raise Pending("model", "Configuring AI model defaults…", True)
@@ -548,7 +548,7 @@ def verify(progress):
     progress.publish("verification", "Verifying system response.")
     if not zero_capacity:
         response = http_request(address, 80, "/v1/chat/completions", "api.puu.local", key, {
-            "model": fs.MODEL,
+            "model": fs.SERVED_MODEL,
             "messages": [{"role": "user", "content": "Say hello."}],
             "max_tokens": 1,
             "stream": False,
