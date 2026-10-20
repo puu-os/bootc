@@ -286,6 +286,15 @@ def run(force=False):
         raise ValueError("Expected Bonsai manifest list")
     deployment = deployment_of(manifest)
     deployment["spec"]["replicas"] = 0
+    namespace_deadline = time.monotonic() + 120
+    while True:
+        try:
+            kubectl("get", "namespace", "puu-ai")
+            break
+        except RuntimeError:
+            if time.monotonic() >= namespace_deadline:
+                raise
+            time.sleep(1)
     apply_profile(manifest, dict(limits=ZERO_LIMITS), None)
     kubectl("wait", "--for=delete", "pod", "-n", "puu-ai", "-l", f"app.kubernetes.io/name={MODEL}", "--timeout=120s")
     delete_probe()
