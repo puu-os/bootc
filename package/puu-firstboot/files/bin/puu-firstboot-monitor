@@ -224,7 +224,7 @@ def service_address(service, port):
 
 def route_ready(route, hostname, backend, port, controller):
     spec = route.get("spec", {})
-    if spec.get("hostnames") != [hostname]:
+    if spec.get("hostnames") and hostname not in spec["hostnames"]:
         return False
     parents = spec.get("parentRefs", [])
     if not any(parent_matches(parent) for parent in parents):
