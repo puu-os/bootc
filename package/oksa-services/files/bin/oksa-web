@@ -652,7 +652,6 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
     <h1>Puu OS — Oksa</h1>
     <span class="badge">Model Management & Telemetry</span>
   </div>
-  <div id="serving-badge" class="pill active">SERVING: CHECKING...</div>
 </header>
 
 <nav>
@@ -927,15 +926,6 @@ async function loadMonitoring() {
     const data = await res.json();
     if (!data.ok) return;
     const s = data.status;
-
-    const sBadge = document.getElementById('serving-badge');
-    if (s.serving_enabled) {
-      sBadge.textContent = 'SERVING: ENABLED (' + (s.active_model || 'IDLE') + ')';
-      sBadge.className = 'pill ' + (s.active_model ? 'active' : 'ok');
-    } else {
-      sBadge.textContent = 'SERVING: DISABLED';
-      sBadge.className = 'pill insufficient';
-    }
 
     if (s.host_memory) {
       document.getElementById('host-mem-val').textContent = s.host_memory.used_mib + ' / ' + s.host_memory.total_mib + ' MiB';
