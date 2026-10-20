@@ -318,6 +318,7 @@ def main() -> None:
         apply_crds(crd_src)
     except subprocess.CalledProcessError as exc:
         sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")
+    ms.run_kubectl("create", "namespace", PUU_AI_NAMESPACE, check=False)
     copy_manifests(manifest_src, manifest_dst)
     ensure_webui_secret(manifest_dst)
     ensure_postgresql_endpoints(manifest_dst)
