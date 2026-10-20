@@ -31,6 +31,44 @@ CALIBRATION_REPO = "fraserprice/Ternary-Bonsai-2-27B-vllm"
 CALIBRATED_MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai-2-27b.yaml")
 
 
+def is_calibration_model(name: str) -> bool:
+    return name.lower() in (
+        CALIBRATION_MODEL, f"prism-ml/{CALIBRATION_MODEL}",
+        CALIBRATION_REPO.lower(), CALIBRATION_REPO.rsplit("/", 1)[-1].lower(),
+    )
+
+
+def calibration_model_info() -> dict:
+    from oksa_calibration_state import applied_result
+
+    try:
+        capable = applied_result()["limits"]["max_num_seqs"] > 0
+    except (OSError, ValueError):
+        capable = False
+    proc = run_kubectl("get", "deployment", CALIBRATION_MODEL, "-n", OKSA_NAMESPACE,
+                       "--ignore-not-found", "--request-timeout=5s", "-o", "json", check=False)
+    deployment = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else {}
+    containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+    repo_id = CALIBRATION_REPO
+    if containers:
+        command = containers[0].get("command", []) + containers[0].get("args", [])
+        if "serve" in command and command.index("serve") + 1 < len(command):
+            repo_id = command[command.index("serve") + 1]
+    cache = Path("/var/lib/huggingface/hub") / ("models--" + repo_id.replace("/", "--")) / "blobs"
+    storage = sum(path.stat().st_size for path in cache.glob("*")
+                  if path.is_file() and not path.name.endswith(".incomplete"))
+    status = deployment.get("status", {})
+    return {
+        "name": CALIBRATION_MODEL,
+        "repo_id": repo_id,
+        "storage_mib": storage // (1024 * 1024),
+        "quantization": "ternary",
+        "capabilities": "ok" if capable else "insufficient",
+        "active": (status.get("readyReplicas", 0) > 0
+                   and status.get("observedGeneration") == deployment.get("metadata", {}).get("generation")),
+        "removable": False,
+    }
+
 @contextmanager
 def preseed_publish_lock(models_dir: Path, exclusive: bool = False):
     lock_path = models_dir.parent / ".puu-preseed-publish.lock"
@@ -942,7 +980,7 @@ def collect_vllm_metrics(active_model: str) -> dict:
     if not active_model or active_model == "-":
         return {}
     model_label = re.sub(r"[^a-z0-9]+", "-", active_model.lower()).strip("-")
-    service_name = f"puu-vllm-{model_label}"
+    service_name = CALIBRATION_MODEL if active_model == CALIBRATION_MODEL else f"puu-vllm-{model_label}"
     try:
         proc = run_kubectl("get", "service", service_name, "-n", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False)
         if proc.returncode != 0 or not proc.stdout.strip():
@@ -1004,6 +1042,8 @@ def collect_serving_status() -> dict:
     gpus = collect_gpu_telemetry()
     host_mem = collect_host_memory()
     workloads = collect_k8s_workloads()
+    if active_model == "-" and any(w["name"].startswith(CALIBRATION_MODEL + "-") and w["ready"] for w in workloads):
+        active_model = CALIBRATION_MODEL
     metrics = collect_vllm_metrics(active_model)
     gateway_status = collect_litellm_status()
 
