@@ -464,7 +464,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Puu OS — Oksa Management</title>
+<title>Oksa Web</title>
 <style>
 :root {
   --bg-base: #181825;
@@ -497,14 +497,6 @@ header {
 }
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand h1 { font-size: 1.25rem; font-weight: 700; color: #fff; }
-.brand .badge {
-  background: #313244;
-  color: var(--primary);
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
-}
 nav {
   display: flex;
   gap: 8px;
@@ -555,7 +547,6 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
   border-radius: 4px;
   font-size: 0.75rem;
   font-weight: 600;
-  text-transform: uppercase;
 }
 .pill.ok { background: rgba(166,227,161,0.2); color: var(--success); }
 .pill.insufficient { background: rgba(249,226,175,0.2); color: var(--warning); }
@@ -649,15 +640,14 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
 
 <header>
   <div class="brand">
-    <h1>Puu OS — Oksa</h1>
-    <span class="badge">Model Management & Telemetry</span>
+    <h1>Oksa Web</h1>
   </div>
 </header>
 
 <nav>
-  <button class="nav-tab active" onclick="switchTab('monitoring')">Host Monitoring</button>
-  <button class="nav-tab" onclick="switchTab('models')">Hugging Face Models</button>
-  <button class="nav-tab" onclick="switchTab('users')">AI Users & Keys</button>
+  <button class="nav-tab active" onclick="switchTab('monitoring')">Monitoring</button>
+  <button class="nav-tab" onclick="switchTab('models')">Models</button>
+  <button class="nav-tab" onclick="switchTab('users')">Users & API Keys</button>
 </nav>
 
 <div class="container">
@@ -666,12 +656,12 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
       <div class="card">
         <h2>Host Memory</h2>
         <div class="metric-value" id="host-mem-val">-</div>
-        <div class="metric-sub" id="host-mem-sub">Utilization</div>
+        <div class="metric-sub" id="host-mem-sub"></div>
       </div>
       <div class="card">
-        <h2>Active Workload</h2>
+        <h2>Model</h2>
         <div class="metric-value" id="active-model-val">-</div>
-        <div class="metric-sub" id="active-model-sub">Serving state</div>
+        <div class="metric-sub" id="active-model-sub"></div>
       </div>
       <div class="card">
         <h2>Inference Requests</h2>
@@ -681,33 +671,32 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
       <div class="card">
         <h2>KV Cache Usage</h2>
         <div class="metric-value" id="kv-cache-val">-</div>
-        <div class="metric-sub">Paged memory cache</div>
       </div>
     </div>
 
     <div class="card" style="margin-bottom: 24px;">
-      <h2>Hardware Accelerators</h2>
+      <h2>GPUs</h2>
       <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>Index</th><th>Accelerator</th><th>GPU Util</th><th>VRAM Used</th><th>VRAM Total</th><th>Temp</th><th>Power</th>
+              <th>Index</th><th>GPU</th><th>Usage</th><th>VRAM Used</th><th>VRAM Total</th><th>Temperature</th><th>Power</th>
             </tr>
           </thead>
           <tbody id="gpus-body">
-            <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No accelerator data available</td></tr>
+            <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No GPU data</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
     <div class="card">
-      <h2>Cluster Workloads (K3s)</h2>
+      <h2>K3s Workloads</h2>
       <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>Pod / Service</th><th>Status</th><th>Ready</th><th>Restarts</th>
+              <th>Pod</th><th>Status</th><th>Ready</th><th>Restarts</th>
             </tr>
           </thead>
           <tbody id="workloads-body">
@@ -721,17 +710,17 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
   <div id="tab-models" class="tab-content">
     <div class="card" style="margin-bottom: 24px;">
       <div class="action-bar">
-        <h2>Available Models</h2>
+        <h2>Models</h2>
         <div>
-          <button class="btn btn-secondary btn-sm" onclick="stopServing()">Stop Serving</button>
-          <button class="btn btn-sm" onclick="openAddModal()">+ Add Model from Hugging Face</button>
+          <button class="btn btn-secondary btn-sm" onclick="stopServing()">Stop</button>
+          <button class="btn btn-sm" onclick="openAddModal()">Download</button>
         </div>
       </div>
       <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>Name</th><th>Repository ID</th><th>Size</th><th>Quant</th><th>Host Fit</th><th>Active</th><th>Actions</th>
+              <th>Name</th><th>Repository</th><th>Size</th><th>Quantization</th><th>Compatibility</th><th>Active</th><th>Actions</th>
             </tr>
           </thead>
           <tbody id="models-body">
@@ -742,7 +731,7 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
     </div>
 
     <div id="pull-status-card" class="card" style="display:none; border-color:var(--primary);">
-      <h2>Download in Progress</h2>
+      <h2>Download</h2>
       <p id="pull-repo-text" style="font-weight:600; margin-bottom:8px;"></p>
       <div style="background:var(--bg-card); padding:12px; border-radius:6px; font-family:monospace; font-size:0.8rem;" id="pull-log-text"></div>
     </div>
@@ -751,18 +740,18 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
   <div id="tab-users" class="tab-content">
     <div class="card" style="margin-bottom: 24px;">
       <div class="action-bar">
-        <h2>AI Users</h2>
-        <button class="btn btn-sm" onclick="openUserModal()">+ Create User</button>
+        <h2>Users</h2>
+        <button class="btn btn-sm" onclick="openUserModal()">Create User</button>
       </div>
       <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>User ID</th><th>Email</th><th>Spend</th><th>Budget Limit</th><th>Actions</th>
+              <th>User ID</th><th>Email</th><th>Spend</th><th>Budget</th><th>Actions</th>
             </tr>
           </thead>
           <tbody id="users-body">
-            <tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Loading AI users...</td></tr>
+            <tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Loading users...</td></tr>
           </tbody>
         </table>
       </div>
@@ -770,14 +759,14 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
 
     <div class="card">
       <div class="action-bar">
-        <h2>AI API Keys</h2>
-        <button class="btn btn-sm" onclick="openKeyModal()">+ Generate API Key</button>
+        <h2>API Keys</h2>
+        <button class="btn btn-sm" onclick="openKeyModal()">Create Key</button>
       </div>
       <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>Alias</th><th>Token / Key</th><th>User</th><th>Allowed Models</th><th>Spend</th><th>Budget</th><th>Expires</th><th>Actions</th>
+              <th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Spend</th><th>Budget</th><th>Expires</th><th>Actions</th>
             </tr>
           </thead>
           <tbody id="keys-body">
@@ -791,17 +780,17 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
 
 <div id="add-modal" class="modal-overlay">
   <div class="modal">
-    <h3>Download Hugging Face Model</h3>
+    <h3>Download Model</h3>
     <div class="input-group">
-      <label>Hugging Face Repo ID (e.g. org/model)</label>
+      <label>Hugging Face Repository</label>
       <input type="text" id="add-repo" placeholder="mistralai/Mistral-7B-Instruct-v0.3">
     </div>
     <div class="input-group">
-      <label>Local Model Alias (Optional)</label>
+      <label>Name (optional)</label>
       <input type="text" id="add-name" placeholder="mistral-7b">
     </div>
     <div class="input-group">
-      <label>Git Revision (Default: main)</label>
+      <label>Revision</label>
       <input type="text" id="add-rev" value="main">
     </div>
 
@@ -815,31 +804,31 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
     <div class="input-group" id="force-group" style="display:none;">
       <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
         <input type="checkbox" id="add-force" style="width:auto;">
-        Force download for multi-node / QSFP cluster
+        Download despite compatibility warning
       </label>
     </div>
 
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('add-modal')">Cancel</button>
-      <button class="btn btn-secondary" onclick="runInspect()">Inspect & Check Fit</button>
-      <button class="btn" id="btn-pull" onclick="startPull()" disabled>Download & Ramp</button>
+      <button class="btn btn-secondary" onclick="runInspect()">Check Compatibility</button>
+      <button class="btn" id="btn-pull" onclick="startPull()" disabled>Download</button>
     </div>
   </div>
 </div>
 
 <div id="user-modal" class="modal-overlay">
   <div class="modal">
-    <h3>Create AI User</h3>
+    <h3>Create User</h3>
     <div class="input-group">
-      <label>User Identifier</label>
+      <label>User ID</label>
       <input type="text" id="user-id" placeholder="developer-01">
     </div>
     <div class="input-group">
-      <label>Email Address (Optional)</label>
+      <label>Email (optional)</label>
       <input type="email" id="user-email" placeholder="dev@example.org">
     </div>
     <div class="input-group">
-      <label>Spend Budget Limit in USD (Optional)</label>
+      <label>Budget (USD, optional)</label>
       <input type="number" step="0.01" id="user-budget" placeholder="100.00">
     </div>
     <div class="modal-actions">
@@ -851,37 +840,37 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
 
 <div id="key-modal" class="modal-overlay">
   <div class="modal">
-    <h3>Generate AI API Key</h3>
+    <h3>Create API Key</h3>
     <div class="input-group">
       <label>User ID</label>
       <input type="text" id="key-user-id" placeholder="developer-01">
     </div>
     <div class="input-group">
-      <label>Key Alias</label>
+      <label>Name</label>
       <input type="text" id="key-alias" placeholder="dev-key">
     </div>
     <div class="input-group">
-      <label>Allowed Models (Comma-separated, blank for all)</label>
+      <label>Models (comma-separated; blank for all)</label>
       <input type="text" id="key-models" placeholder="bonsai-2-27b">
     </div>
     <div class="input-group">
-      <label>Max Budget in USD (Optional)</label>
+      <label>Budget (USD, optional)</label>
       <input type="number" step="0.01" id="key-spend" placeholder="50.00">
     </div>
     <div class="input-group">
-      <label>Validity Duration (e.g. 30d, 24h)</label>
+      <label>Expires in (e.g. 30d, 24h)</label>
       <input type="text" id="key-duration" placeholder="30d">
     </div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('key-modal')">Cancel</button>
-      <button class="btn" onclick="submitCreateKey()">Generate Key</button>
+      <button class="btn" onclick="submitCreateKey()">Create Key</button>
     </div>
   </div>
 </div>
 
 <div id="key-result-modal" class="modal-overlay">
   <div class="modal">
-    <h3>API Key Generated</h3>
+    <h3>API Key Created</h3>
     <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">Copy this API key now. It will not be shown again.</p>
     <div class="key-box">
       <span id="created-key-token"></span>
@@ -953,7 +942,7 @@ async function loadMonitoring() {
         </tr>
       `).join('');
     } else {
-      gBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No accelerator data available</td></tr>';
+      gBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No GPU data</td></tr>';
     }
 
     const wBody = document.getElementById('workloads-body');
@@ -1077,7 +1066,7 @@ async function runInspect() {
   const rev = document.getElementById('add-rev').value.trim() || 'main';
   if (!repo) { alert('Please enter a repository ID'); return; }
 
-  showToast('Inspecting repository metadata...');
+  showToast('Checking compatibility...');
   try {
     const res = await fetch('/api/models/inspect', {
       method: 'POST',
@@ -1085,7 +1074,7 @@ async function runInspect() {
       body: JSON.stringify({repo_id: repo, revision: rev})
     });
     const d = await res.json();
-    if (!d.ok) { alert(d.error || 'Inspection failed'); return; }
+    if (!d.ok) { alert(d.error || 'Compatibility check failed'); return; }
 
     const m = d.metadata;
     document.getElementById('inspect-arch').textContent = 'Architecture: ' + (m.architectures ? m.architectures.join(', ') : 'unknown');
@@ -1097,11 +1086,11 @@ async function runInspect() {
     const btnPull = document.getElementById('btn-pull');
 
     if (d.fits) {
-      fitDiv.innerHTML = '<span class="pill ok">COMPATIBLE</span> Host capacity is sufficient.';
+      fitDiv.innerHTML = '<span class="pill ok">Enough memory</span>';
       forceGroup.style.display = 'none';
       btnPull.disabled = false;
     } else {
-      fitDiv.innerHTML = '<span class="pill insufficient">INSUFFICIENT</span> ' + d.reason;
+      fitDiv.innerHTML = '<span class="pill insufficient">Not compatible</span> ' + d.reason;
       forceGroup.style.display = 'block';
       const forceCheck = document.getElementById('add-force');
       forceCheck.checked = false;
@@ -1130,7 +1119,7 @@ async function startPull() {
       showToast(d.message);
       loadModels();
     } else {
-      alert(d.error || 'Failed to start pull');
+      alert(d.error || 'Failed to start download');
     }
   } catch (err) { alert(err); }
 }
@@ -1151,7 +1140,7 @@ async function loadUsers() {
         </tr>
       `).join('');
     } else {
-      uBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No AI users found</td></tr>';
+      uBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No users</td></tr>';
     }
   } catch (err) {}
 }
@@ -1171,7 +1160,7 @@ async function submitCreateUser() {
     const d = await res.json();
     if (d.ok) {
       closeModal('user-modal');
-      showToast('Created AI user ' + uid);
+      showToast('Created user ' + uid);
       loadUsers();
     } else {
       alert(d.error || 'Failed to create user');
@@ -1273,7 +1262,7 @@ loadMonitoring();
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Puu Oksa Web Management Service")
+    parser = argparse.ArgumentParser(description="Oksa Web")
     parser.add_argument("--host", default="0.0.0.0", help="Listen host address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8088, help="Listen port (default: 8088)")
     args = parser.parse_args()
