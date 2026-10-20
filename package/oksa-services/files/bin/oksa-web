@@ -108,8 +108,14 @@ def collect_models_list() -> dict:
     selected_model = ms.read_first_line(selected_file)
 
     meta_map = get_models_metadata()
-    models = []
+    builtin = ms.calibration_model_info()
+    builtin["selected"] = selected_model == ms.CALIBRATION_MODEL or (not selected_model and serving_enabled)
+    models = [builtin]
+    if builtin["active"]:
+        active_model = ms.CALIBRATION_MODEL
     for name, path, env_path in ms.read_models_list(state_dir / "models.list"):
+        if ms.is_calibration_model(name):
+            continue
         meta = meta_map.get(name, {})
         cap = "ok" if check_capabilities(name) else "insufficient"
         models.append({
@@ -364,6 +370,13 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(400, {"ok": False, "error": "repo_id is required"})
                 return
             name = body.get("name")
+            if not isinstance(repo_id, str) or (name is not None and not isinstance(name, str)):
+                self.send_json(400, {"ok": False, "error": "Invalid repository or model name"})
+                return
+            effective_name = re.sub(r"[^a-z0-9._-]+", "-", (name or repo_id.rsplit("/", 1)[-1]).lower()).strip("-")
+            if ms.is_calibration_model(repo_id) or ms.is_calibration_model(effective_name):
+                self.send_json(403, {"ok": False, "error": "The calibration model is installed automatically"})
+                return
             revision = body.get("revision", "main")
             force = bool(body.get("force", False))
 
@@ -443,6 +456,9 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
 
         if path.startswith("/api/models/"):
             model_name = urllib.parse.unquote(path[len("/api/models/"):])
+            if ms.is_calibration_model(model_name):
+                self.send_json(403, {"ok": False, "error": "The calibration model cannot be deleted"})
+                return
             if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name)
                     or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
                 self.send_json(400, {"ok": False, "error": "Invalid model name"})
@@ -989,7 +1005,7 @@ async function loadModels() {
             ${m.active ?
               `<button class="btn btn-sm btn-secondary" onclick="stopServing()">Stop</button>` :
               `<button class="btn btn-sm" onclick="startModel('${m.name}')">Start</button>`}
-            <button class="btn btn-sm btn-danger" style="margin-left:6px;" onclick="removeModel('${m.name}')">Delete</button>
+            ${m.removable !== false ? `<button class="btn btn-sm btn-danger" style="margin-left:6px;" onclick="removeModel('${m.name}')">Delete</button>` : ''}
           </td>
         </tr>
       `).join('');
