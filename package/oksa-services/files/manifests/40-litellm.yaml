@@ -6,7 +6,7 @@ metadata:
 spec:
   chart: oci://docker.litellm.ai/berriai/litellm-helm@sha256:e528ce9c544c55368ff2a1736136cc9154b85fb1d8084040848a4da3e813dcd4
   version: 1.90.1
-  targetNamespace: puu-ai
+  targetNamespace: oksa
   createNamespace: true
   valuesContent: |-
     fullnameOverride: litellm
@@ -36,7 +36,7 @@ spec:
         - model_name: "prism-ml/bonsai-2-27b"
           litellm_params:
             model: openai/prism-ml/bonsai-2-27b
-            api_base: http://bonsai-2-27b.puu-ai.svc.cluster.local:8000/v1
+            api_base: http://bonsai-2-27b.oksa.svc.cluster.local:8000/v1
             api_key: none
       general_settings:
         master_key: os.environ/PUU_LITELLM_MASTER_KEY

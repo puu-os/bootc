@@ -373,7 +373,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {plan.app_name}
-  namespace: puu-ai
+  namespace: oksa
   labels:
     app.kubernetes.io/name: {plan.app_name}
     {ms.label_namespace()}/model-name: {plan.model_label}
@@ -393,7 +393,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {plan.app_name}
-  namespace: puu-ai
+  namespace: oksa
   labels:
     app.kubernetes.io/name: {plan.app_name}
     {ms.label_namespace()}/model-name: {plan.model_label}

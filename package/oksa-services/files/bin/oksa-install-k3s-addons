@@ -19,7 +19,7 @@ import oksa_model_serving as ms
 
 NVIDIA_MANIFESTS = ("30-nvidia-cdi-runtime.yaml", "32-nvidia-device-plugin.yaml")
 
-PUU_AI_NAMESPACE = "puu-ai"
+OKSA_NAMESPACE = "oksa"
 LITELLM_SERVICE = "litellm"
 LITELLM_PORT = 4000
 LITELLM_TIMEOUT_SEC = 900
@@ -76,7 +76,7 @@ def write_secret(manifest_dst: Path, filename: str, name: str, data: dict[str, s
         "kind: Secret",
         "metadata:",
         f"  name: {name}",
-        f"  namespace: {PUU_AI_NAMESPACE}",
+        f"  namespace: {OKSA_NAMESPACE}",
         "type: Opaque",
         "stringData:",
     ]
@@ -101,9 +101,9 @@ def ensure_webui_secret(manifest_dst: Path) -> None:
     secret_key = secrets.token_hex(32)
     ms.atomic_write_text(
         secret_path,
-        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: puu-ai\n"
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: oksa\n"
         "---\napiVersion: v1\nkind: Secret\nmetadata:\n"
-        "  name: open-webui-secret\n  namespace: puu-ai\n"
+        "  name: open-webui-secret\n  namespace: oksa\n"
         "type: Opaque\nstringData:\n"
         f"  secretkey: '{secret_key}'\n",
         0o600,
@@ -111,7 +111,7 @@ def ensure_webui_secret(manifest_dst: Path) -> None:
 
 
 def service_dns(name: str) -> str:
-    return f"{name}.{PUU_AI_NAMESPACE}.svc.cluster.local"
+    return f"{name}.{OKSA_NAMESPACE}.svc.cluster.local"
 
 
 def node_internal_ip() -> str:
@@ -145,7 +145,7 @@ def ensure_postgresql_endpoints(manifest_dst: Path) -> None:
 kind: Service
 metadata:
   name: {POSTGRESQL_SERVICE}
-  namespace: {PUU_AI_NAMESPACE}
+  namespace: {OKSA_NAMESPACE}
 spec:
   ports:
     - name: postgresql
@@ -156,7 +156,7 @@ apiVersion: v1
 kind: Endpoints
 metadata:
   name: {POSTGRESQL_SERVICE}
-  namespace: {PUU_AI_NAMESPACE}
+  namespace: {OKSA_NAMESPACE}
 subsets:
   - addresses:
       - ip: {address}
@@ -227,7 +227,7 @@ spec:
 
 def litellm_address() -> str | None:
     proc = ms.run_kubectl(
-        "get", "service", LITELLM_SERVICE, "--namespace", PUU_AI_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False
+        "get", "service", LITELLM_SERVICE, "--namespace", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False
     )
     if proc.returncode != 0:
         return None
@@ -303,7 +303,7 @@ def ensure_openwebui_key(manifest_dst: Path, master_key: str | None) -> None:
         {"api_key": mint_openwebui_key(master_key)},
     )
     ms.run_kubectl(
-        "rollout", "restart", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", PUU_AI_NAMESPACE, check=False
+        "rollout", "restart", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE, check=False
     )
 
 
@@ -318,7 +318,7 @@ def main() -> None:
         apply_crds(crd_src)
     except subprocess.CalledProcessError as exc:
         sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")
-    ms.run_kubectl("create", "namespace", PUU_AI_NAMESPACE, check=False)
+    ms.run_kubectl("create", "namespace", OKSA_NAMESPACE, check=False)
     copy_manifests(manifest_src, manifest_dst)
     ensure_webui_secret(manifest_dst)
     ensure_postgresql_endpoints(manifest_dst)

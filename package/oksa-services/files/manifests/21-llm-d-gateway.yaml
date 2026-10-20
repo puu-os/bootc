@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: puu-ai
+  name: oksa
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: llm-d-inference-gateway
-  namespace: puu-ai
+  namespace: oksa
 spec:
   gatewayClassName: agentgateway
   listeners:
@@ -22,7 +22,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: puu-gateway
-  namespace: puu-ai
+  namespace: oksa
 spec:
   gatewayClassName: agentgateway
   listeners:
@@ -37,7 +37,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: puu-gateway
-  namespace: puu-ai
+  namespace: oksa
 spec:
   parentRefs:
     - name: puu-gateway
@@ -54,7 +54,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: puu-api
-  namespace: puu-ai
+  namespace: oksa
 spec:
   parentRefs:
     - name: puu-gateway
