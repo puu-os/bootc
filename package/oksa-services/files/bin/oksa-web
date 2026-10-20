@@ -7,6 +7,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socketserver
 import subprocess
@@ -439,6 +440,10 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
 
         if path.startswith("/api/models/"):
             model_name = urllib.parse.unquote(path[len("/api/models/"):])
+            if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name)
+                    or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
+                self.send_json(400, {"ok": False, "error": "Invalid model name"})
+                return
             active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
             if ms.read_first_line(active_model_file) == model_name:
                 selected_model_file, serving_disabled_file = control_files()
