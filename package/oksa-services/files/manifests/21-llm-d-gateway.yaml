@@ -41,8 +41,6 @@ metadata:
 spec:
   parentRefs:
     - name: puu-gateway
-  hostnames:
-    - puu.local
   rules:
     - matches:
         - path:
@@ -62,6 +60,7 @@ spec:
     - name: puu-gateway
   hostnames:
     - api.puu.local
+    - api.puu.lan
   rules:
     - matches:
         - path:
