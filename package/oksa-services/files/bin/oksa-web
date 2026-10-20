@@ -40,6 +40,7 @@ planner_bin = resolve_helper("oksa-plan-vllm-workloads")
 preseed_bin = resolve_helper("oksa-preseed-vllm-models")
 
 pull_lock = threading.Lock()
+control_lock = threading.Lock()
 pull_state = {
     "running": False,
     "repo_id": None,
@@ -388,12 +389,13 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             if not check_capabilities(model_name):
                 self.send_json(400, {"ok": False, "error": "Model has insufficient host capabilities"})
                 return
-            state_dir.mkdir(parents=True, exist_ok=True)
-            selected_model_file, serving_disabled_file = control_files()
-            ms.atomic_write_text(selected_model_file, f"{model_name}\n")
-            serving_disabled_file.unlink(missing_ok=True)
-            env = dict(os.environ, PUU_VLLM_SELECTED_MODEL=model_name, PUU_VLLM_REQUIRE_SELECTED_MODEL="true")
-            res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
+            with control_lock:
+                state_dir.mkdir(parents=True, exist_ok=True)
+                selected_model_file, serving_disabled_file = control_files()
+                ms.atomic_write_text(selected_model_file, f"{model_name}\n")
+                serving_disabled_file.unlink(missing_ok=True)
+                env = dict(os.environ, PUU_VLLM_SELECTED_MODEL=model_name, PUU_VLLM_REQUIRE_SELECTED_MODEL="true")
+                res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
             if res.returncode != 0:
                 self.send_json(500, {"ok": False, "error": "Failed to activate model workload"})
                 return
@@ -401,11 +403,12 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/api/models/stop":
-            state_dir.mkdir(parents=True, exist_ok=True)
-            selected_model_file, serving_disabled_file = control_files()
-            selected_model_file.unlink(missing_ok=True)
-            ms.atomic_write_text(serving_disabled_file, "")
-            res = subprocess.run([str(planner_bin)], capture_output=True)
+            with control_lock:
+                state_dir.mkdir(parents=True, exist_ok=True)
+                selected_model_file, serving_disabled_file = control_files()
+                selected_model_file.unlink(missing_ok=True)
+                ms.atomic_write_text(serving_disabled_file, "")
+                res = subprocess.run([str(planner_bin)], capture_output=True)
             if res.returncode != 0:
                 self.send_json(500, {"ok": False, "error": "Failed to stop model workload"})
                 return
