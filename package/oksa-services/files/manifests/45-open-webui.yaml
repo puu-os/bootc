@@ -46,6 +46,10 @@ spec:
               value: "True"
             - name: WEB_SEARCH_ENGINE
               value: "duckduckgo"
+            - name: BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
+              value: "True"
+            - name: USER_AGENT
+              value: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
           ports:
             - name: http
               containerPort: 8080
