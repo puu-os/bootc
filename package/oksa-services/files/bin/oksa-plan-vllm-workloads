@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 import dataclasses
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import textwrap
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oksa_model_serving as ms
+from oksa_calibration_state import STATUS_PATH, applied_result
 
 
 @dataclasses.dataclass
@@ -578,7 +580,38 @@ spec:
     return manifest_text
 
 
-def main() -> None:
+def calibrated_workload() -> tuple[dict, dict, dict]:
+    result = applied_result()
+    manifest = json.loads(ms.CALIBRATED_MANIFEST_PATH.read_text())
+    if not isinstance(manifest, dict) or manifest.get("kind") != "List" or not isinstance(manifest.get("items"), list):
+        raise ValueError("Expected calibrated Bonsai manifest List")
+    deployments = [
+        item for item in manifest["items"]
+        if isinstance(item, dict) and item.get("kind") == "Deployment"
+        and isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("name") == ms.CALIBRATION_MODEL
+    ]
+    if len(deployments) != 1 or not isinstance(deployments[0].get("spec"), dict):
+        raise ValueError("Missing calibrated Bonsai Deployment")
+    return result, manifest, deployments[0]
+
+
+def stop_generic_workloads(keep_app: str = "") -> None:
+    selector = f"{ms.label_namespace()}/model-name"
+    if keep_app:
+        selector += f",app.kubernetes.io/name!={keep_app}"
+    deployments = ms.run_kubectl(
+        "get", "deployment", "-n", ms.OKSA_NAMESPACE, "-l", selector, "-o", "name"
+    ).stdout.split()
+    if deployments:
+        ms.run_kubectl("scale", "-n", ms.OKSA_NAMESPACE, *deployments, "--replicas=0")
+        ms.run_kubectl(
+            "wait", "--for=delete", "pod", "-n", ms.OKSA_NAMESPACE,
+            "-l", selector, "--timeout=120s"
+        )
+
+
+def reconcile(dry_run: bool) -> None:
     state_dir = ms.STATE_DIR
     models_dir = ms.MODELS_DIR
     manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
@@ -596,9 +629,7 @@ def main() -> None:
     require_selected_model = ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False)
     ignore_serving_disabled = ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
 
-    state_dir.mkdir(parents=True, exist_ok=True)
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-
+    disabled = not ignore_serving_disabled and serving_disabled_file.is_file()
     node = ms.NodeCapacity.from_env(
         ms.parse_env_file(node_capacity_env),
         ms.parse_env_file(topology_env),
@@ -610,14 +641,34 @@ def main() -> None:
     specs = [
         ms.ModelSpec.from_env(ms.parse_env_file(env_path), name=name, path=path)
         for name, path, env_path in ms.read_models_list(state_dir / "models.list")
+        if name != ms.CALIBRATION_MODEL
     ]
 
     empty_manifest = "apiVersion: v1\nkind: List\nitems: []\n"
     shared_reserved_mib = 0
     planned: PlannedWorkload | None = None
 
-    if not ignore_serving_disabled and serving_disabled_file.is_file() and not selected_model:
+    calibration = calibrated_manifest = calibrated_deployment = None
+    try:
+        calibration, calibrated_manifest, calibrated_deployment = calibrated_workload()
+    except (OSError, ValueError) as err:
+        if selected_model == ms.CALIBRATION_MODEL:
+            warn(f"cannot start calibrated Bonsai: {err}")
+    calibration_pending = calibration is None
+    bonsai_active = False
+
+    if disabled:
         pass
+    elif selected_model == ms.CALIBRATION_MODEL:
+        bonsai_active = calibration is not None and calibration["limits"]["max_num_seqs"] > 0
+        if not bonsai_active:
+            warn("Bonsai requires a positive calibration applied during this boot")
+    elif not selected_model and (calibration_pending or calibration["limits"]["max_num_seqs"] > 0):
+        # Calibration owns automatic serving until a model is explicitly selected.
+        bonsai_active = (calibration is not None and calibration["limits"]["max_num_seqs"] > 0
+                         and calibrated_deployment["spec"].get("replicas", 1) > 0)
+    elif calibration_pending:
+        warn("waiting for a valid calibration before switching workloads")
     elif selected_model:
         matching = [s for s in specs if s.name == selected_model]
         if not matching:
@@ -643,17 +694,63 @@ def main() -> None:
             except PlanError as err:
                 warn(f"skipping {spec.name}: {err}")
 
-    if planned:
-        manifest_content = render_manifest(planned, image, models_dir)
-        ms.atomic_write_text(active_model_file, f"{planned.spec.name}\n")
+    if selected_model and not (planned or bonsai_active):
+        if require_selected_model:
+            sys.exit(1)
+        if not disabled:
+            return
+
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_content = render_manifest(planned, image, models_dir) if planned else empty_manifest
+    manifest_changed = not manifest.is_file() or manifest.read_text() != manifest_content
+
+    if not dry_run:
+        if disabled or bonsai_active or planned:
+            # Remove the old desired workload before freeing its GPU.
+            if manifest_changed:
+                ms.atomic_write_text(manifest, empty_manifest)
+            stop_generic_workloads(planned.app_name if planned else "")
+        if calibrated_deployment is not None and (disabled or selected_model):
+            calibrated_deployment["spec"]["replicas"] = int(bonsai_active)
+            ms.atomic_write_text(ms.CALIBRATED_MANIFEST_PATH, json.dumps(calibrated_manifest) + "\n")
+            ms.run_kubectl("apply", "-f", str(ms.CALIBRATED_MANIFEST_PATH))
+            if not bonsai_active:
+                ms.run_kubectl(
+                    "wait", "--for=delete", "pod", "-n", ms.OKSA_NAMESPACE,
+                    "-l", f"app.kubernetes.io/name={ms.CALIBRATION_MODEL}", "--timeout=120s"
+                )
+
+    if manifest_changed:
+        ms.atomic_write_text(manifest, manifest_content)
+    if bonsai_active or planned:
+        active_name = ms.CALIBRATION_MODEL if bonsai_active else planned.spec.name
+        ms.atomic_write_text(active_model_file, f"{active_name}\n")
     else:
-        manifest_content = empty_manifest
         active_model_file.unlink(missing_ok=True)
 
-    ms.atomic_write_text(manifest, manifest_content)
 
-    if require_selected_model and selected_model and not planned:
-        sys.exit(1)
+def main() -> None:
+    manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
+    dry_run = (ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
+               or manifest_dir != ms.CALIBRATED_MANIFEST_PATH.parent)
+    if dry_run:
+        reconcile(dry_run=True)
+        return
+    ms.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (ms.STATE_DIR / "planner.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            calibration_lock = (STATUS_PATH.parent / "lock").open("a")
+        except FileNotFoundError:
+            return
+        with calibration_lock:
+            try:
+                fcntl.flock(calibration_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False):
+                    sys.exit("Calibration is in progress")
+                return
+            reconcile(dry_run=False)
 
 
 if __name__ == "__main__":

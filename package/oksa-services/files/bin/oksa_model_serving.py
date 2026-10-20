@@ -26,6 +26,9 @@ MODELS_DIR = Path(os.environ.get("PUU_VLLM_MODELS_DIR", "/var/lib/vllm/models"))
 PRESEED_MANIFEST = ".puu-preseed.json"
 CALIBRATION_RESULT_PATH = Path(os.environ.get("PUU_CALIBRATION_FILE", "/var/lib/puu/calibration/bonsai-2-27b.json"))
 OKSA_NAMESPACE = "oksa"
+CALIBRATION_MODEL = "bonsai-2-27b"
+CALIBRATION_REPO = "fraserprice/Ternary-Bonsai-2-27B-vllm"
+CALIBRATED_MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai-2-27b.yaml")
 
 
 @contextmanager
