@@ -35,7 +35,7 @@ Default network services available after installation:
 - SSH: port 22
 
 Puu publishes `api.puu.local` over mDNS. Linux clients using `mdns4_minimal`
-need `mdns4` before `resolve`/`dns` in `/etc/nsswitch.conf` and `.puu.local`
+need `mdns4` before `resolve`/`dns` in `/etc/nsswitch.conf` and `.local`
 allowed in `/etc/mdns.allow`, or a local DNS record for the API hostname.
 
 LiteLLM proxies the OpenAI API keyless by default. Store a master key to
