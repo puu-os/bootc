@@ -1,7 +1,7 @@
 [Unit]
 Description=Install Puu k3s add-ons
-Wants=k3s.service puu-postgresql.service
-After=k3s.service puu-postgresql.service
+Wants=k3s.service puu-postgresql.service avahi-daemon.service
+After=k3s.service puu-postgresql.service avahi-daemon.service
 ConditionKernelCommandLine=!puu.live
 
 [Service]

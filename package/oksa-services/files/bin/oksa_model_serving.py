@@ -201,6 +201,88 @@ def resolve_k3s_node_name() -> str:
     return socket.gethostname()
 
 
+def _valid_fqdn(candidate: str) -> str | None:
+    fqdn = candidate.strip().lower().rstrip(".")
+    if not fqdn or "." not in fqdn or fqdn.startswith("api."):
+        return None
+    if fqdn in ("localhost", "localhost.localdomain") or fqdn.endswith(".localhost"):
+        return None
+    return fqdn if re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", fqdn) else None
+
+
+def avahi_host_fqdn() -> str:
+    raw_host = socket.gethostname().strip().lower().rstrip(".")
+    short_host = (raw_host.split(".", 1)[0] if raw_host else "") or "puu"
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/busctl", "--system", "--json=short", "call",
+             "org.freedesktop.Avahi", "/", "org.freedesktop.Avahi.Server", "GetHostNameFqdn"],
+            capture_output=True, text=True, check=False, timeout=3,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            data = json.loads(proc.stdout).get("data") or []
+            if data and isinstance(data[0], str):
+                fqdn = _valid_fqdn(data[0])
+                if fqdn:
+                    return fqdn
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return f"{short_host}.local"
+
+
+def discover_host_fqdns() -> list[str]:
+    raw_host = socket.gethostname().strip().lower().rstrip(".")
+    short_host = (raw_host.split(".", 1)[0] if raw_host else "") or "puu"
+    fqdns: list[str] = []
+
+    def add(candidate: str | None) -> None:
+        fqdn = _valid_fqdn(candidate or "")
+        if fqdn and fqdn not in fqdns:
+            fqdns.append(fqdn)
+
+    add(avahi_host_fqdn())
+    add(raw_host)
+    try:
+        add(socket.getfqdn())
+    except OSError:
+        pass
+    try:
+        for entry in socket.getaddrinfo(raw_host or short_host, None, flags=socket.AI_CANONNAME):
+            add(entry[3])
+    except OSError:
+        pass
+
+    for resolv_path in (Path("/etc/resolv.conf"), Path("/run/systemd/resolve/resolv.conf"), Path("/run/NetworkManager/resolv.conf")):
+        try:
+            lines = resolv_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            parts = line.split("#", 1)[0].split()
+            if len(parts) >= 2 and parts[0] in ("search", "domain"):
+                for domain in parts[1:]:
+                    candidate = f"{short_host}.{domain.strip().lstrip('.')}"
+                    try:
+                        for entry in socket.getaddrinfo(candidate, None, flags=socket.AI_CANONNAME):
+                            add(entry[3] or candidate)
+                        add(candidate)
+                    except OSError:
+                        add(candidate)
+
+    if not fqdns:
+        fqdns.append(f"{short_host}.local")
+    return fqdns
+
+
+def discover_api_hostnames() -> list[str]:
+    return [f"api.{fqdn}" for fqdn in discover_host_fqdns()]
+
+
+def primary_gateway_hosts() -> tuple[str, str]:
+    fqdn = avahi_host_fqdn()
+    return fqdn, f"api.{fqdn}"
+
+
 def get_kubeconfig() -> str:
     return os.environ.get("KUBECONFIG", "/var/lib/rancher/k3s/k3s.yaml")
 
