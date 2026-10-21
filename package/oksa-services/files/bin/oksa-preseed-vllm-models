@@ -20,7 +20,7 @@ libexec_dir = Path("/usr/libexec/puu")
 for directory in (Path(__file__).resolve().parent, libexec_dir):
     if directory.is_dir() and str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
-import model_serving as ms
+import oksa_model_serving as ms
 
 
 def download_with_cli(repo_id: str, revision: str, dest_dir: Path) -> bool:
@@ -199,10 +199,10 @@ def preseed_locked(catalog_file: Path, models_dir: Path, model_name: str, repo_i
 
 def notify_discovery_and_planner() -> None:
     if os.geteuid() == 0:
-        discover_bin = libexec_dir / "discover-vllm-models"
+        discover_bin = libexec_dir / "oksa-discover-vllm-models"
         if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
             subprocess.run([str(discover_bin)], check=False)
-        planner_bin = libexec_dir / "plan-vllm-workloads"
+        planner_bin = libexec_dir / "oksa-plan-vllm-workloads"
         if planner_bin.is_file() and os.access(planner_bin, os.X_OK):
             subprocess.run([str(planner_bin)], check=False)
 

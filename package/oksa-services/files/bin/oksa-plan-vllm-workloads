@@ -10,7 +10,7 @@ import sys
 import textwrap
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import model_serving as ms
+import oksa_model_serving as ms
 
 
 @dataclasses.dataclass
@@ -43,7 +43,7 @@ def _match_expr(key: str, val: str, indent: str = "                  ") -> list[
 
 
 def warn(msg: str) -> None:
-    sys.stderr.write(f"plan-vllm-workloads: {msg}\n")
+    sys.stderr.write(f"oksa-plan-vllm-workloads: {msg}\n")
 
 
 def serving_mode_for_model(requested_mode: str, sharing_policy: str) -> str:

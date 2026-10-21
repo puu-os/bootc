@@ -10,7 +10,7 @@ import shlex
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import model_serving as ms
+import oksa_model_serving as ms
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 

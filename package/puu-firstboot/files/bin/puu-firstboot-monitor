@@ -28,7 +28,7 @@ STEP_LABELS = (
 )
 
 
-from model_serving import label_namespace
+from oksa_model_serving import label_namespace
 
 
 class Pending(Exception):

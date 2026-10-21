@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import model_serving as ms
+import oksa_model_serving as ms
 
 NVLINK_RE = re.compile(r"^NV(\d+)$")
 
@@ -29,7 +29,7 @@ def main() -> None:
     smi_bin = Path("/usr/bin/nvidia-smi")
     if ms.has_nvidia_hardware():
         if not smi_bin.is_file() or not os.access(smi_bin, os.X_OK):
-            sys.exit("collect-nvlink-topology: NVIDIA hardware found but /usr/bin/nvidia-smi is missing")
+            sys.exit("oksa-collect-nvlink-topology: NVIDIA hardware found but /usr/bin/nvidia-smi is missing")
         res = subprocess.run([str(smi_bin), "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
         if res.returncode == 0:
             gpu_count = len([line for line in res.stdout.splitlines() if line.strip()])
