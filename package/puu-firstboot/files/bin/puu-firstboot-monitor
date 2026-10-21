@@ -20,6 +20,7 @@ for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3]
 
 import puu_firstboot_state as fs
 import oksa_calibration_state as cs
+import oksa_model_serving as ms
 
 NAMESPACE = "oksa"
 STEP_LABELS = (
@@ -226,7 +227,7 @@ def route_ready(route, hostname, backend, port, controller):
     parents = spec.get("parentRefs", [])
     if not any(parent_matches(parent) for parent in parents):
         return False
-    path = "/v1" if hostname == "api.puu.local" else "/"
+    path = "/v1" if hostname.startswith("api.") else "/"
     rules = spec.get("rules", [])
     if len(rules) != 1 or rules[0].get("filters"):
         return False
@@ -479,7 +480,8 @@ def snapshot(progress):
         raise Pending("gateway", "Waiting for the configured agentgateway class controller.")
     gateway = resource(resources, "Gateway", "puu-gateway")
     routes = [resource(resources, "HTTPRoute", name) for name in ("puu-gateway", "puu-api")]
-    if not route_ready(routes[0], "puu.local", "open-webui", 8080, controller) or not route_ready(routes[1], "api.puu.local", "litellm", 4000, controller):
+    webui_host, api_host = ms.primary_gateway_hosts()
+    if not route_ready(routes[0], webui_host, "open-webui", 8080, controller) or not route_ready(routes[1], api_host, "litellm", 4000, controller):
         raise Pending("gateway", "Waiting for current public routes to be accepted and their backends resolved.")
     address = gateway_address(gateway, resources)
     key, key_identity = master_key()
@@ -513,6 +515,7 @@ def verify(progress):
     if enrollment is None:
         raise Pending("identity", "User account setup is not complete.", True)
     progress.publish("identity", "User account setup complete.", "done")
+    webui_host, api_host = ms.primary_gateway_hosts()
     address, key, services, fingerprint, calibration = snapshot(progress)
     zero_capacity = calibration["limits"] == cs.ZERO_LIMITS
     progress.publish("downloads", "System downloads complete.", "done")
@@ -534,20 +537,20 @@ def verify(progress):
     if not static_model_mapping(mapping):
         raise Pending("gateway", "Waiting for API gateway configuration.", True)
     progress.publish("gateway", "Checking API route.")
-    models = http_request(address, 80, "/v1/models", "api.puu.local", key)
+    models = http_request(address, 80, "/v1/models", api_host, key)
     if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
-        isinstance(model, dict) and model.get("id") in (fs.MODEL, f"prism-ml/{fs.MODEL}") for model in models["data"]
+        isinstance(model, dict) and model.get("id") in (fs.SERVED_MODEL, fs.MODEL, f"prism-ml/{fs.MODEL}") for model in models["data"]
     ):
         raise Pending("gateway", "Waiting for API routes to become active.")
     progress.publish("gateway", "API gateway and routes are ready.", "done")
     progress.publish("webui", "Checking desktop services.")
-    health = http_request(address, 80, "/health", "puu.local")
+    health = http_request(address, 80, "/health", webui_host)
     if not isinstance(health, dict) or health.get("status") is not True:
         raise Pending("webui", "Desktop services are starting.")
     progress.publish("webui", "Desktop services are ready.", "done")
     progress.publish("verification", "Verifying system response.")
     if not zero_capacity:
-        response = http_request(address, 80, "/v1/chat/completions", "api.puu.local", key, {
+        response = http_request(address, 80, "/v1/chat/completions", api_host, key, {
             "model": fs.SERVED_MODEL,
             "messages": [{"role": "user", "content": "Say hello."}],
             "max_tokens": 1,
