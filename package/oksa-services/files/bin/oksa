@@ -13,7 +13,7 @@ libexec_dir = Path("/usr/libexec/puu")
 for directory in (Path(__file__).resolve().parent, libexec_dir):
     if directory.is_dir() and str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
-import model_serving as ms
+import oksa_model_serving as ms
 
 
 def die(msg: str) -> None:
@@ -109,9 +109,9 @@ def cmd_pull(preseed_bin: Path, discover_bin: Path, model_name: str) -> None:
 
 def main() -> None:
     state_dir = ms.STATE_DIR
-    discover_bin = libexec_dir / "discover-vllm-models"
-    planner_bin = libexec_dir / "plan-vllm-workloads"
-    preseed_bin = libexec_dir / "preseed-vllm-models"
+    discover_bin = libexec_dir / "oksa-discover-vllm-models"
+    planner_bin = libexec_dir / "oksa-plan-vllm-workloads"
+    preseed_bin = libexec_dir / "oksa-preseed-vllm-models"
 
     parser = argparse.ArgumentParser(prog="oksa", description="Puu OS model serving control")
     subparsers = parser.add_subparsers(dest="command", required=True)
