@@ -38,8 +38,9 @@ Puu publishes `api.puu.local` over mDNS. Linux clients using `mdns4_minimal`
 need `mdns4` before `resolve`/`dns` in `/etc/nsswitch.conf` and `.local`
 allowed in `/etc/mdns.allow`, or a local DNS record for the API hostname.
 
-LiteLLM proxies the OpenAI API keyless by default. Store a master key to
-require credentials and to hand out per-user keys:
+LiteLLM inference is keyless by default; supplied per-user keys are still
+validated. Anonymous requests remain unrestricted. Store a master key to
+require credentials for every inference request:
 
 ```sh
 sudo systemd-creds encrypt --with-key=host - /etc/credstore.encrypted/litellm-master-key

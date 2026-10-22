@@ -299,7 +299,7 @@ def cmd_user_info(user_id: str) -> None:
     email = info.get("user_email") or "-"
     spend = f"${info.get('spend', 0):.2f}" if "spend" in info else "-"
     budget = f"${info.get('max_budget'):.2f}" if info.get("max_budget") is not None else "unlimited"
-    keys = info.get("keys", [])
+    keys = res.get("keys", [])
     print(f"User:     {uid}")
     print(f"Email:    {email}")
     print(f"Spend:    {spend}")
@@ -309,10 +309,8 @@ def cmd_user_info(user_id: str) -> None:
         print(f"  {'ALIAS':<20} {'KEY':<32} {'SPEND':<10} {'EXPIRES'}")
         for k in keys:
             if isinstance(k, dict):
-                alias = k.get("key_name") or k.get("key_alias") or "-"
-                token = k.get("token") or k.get("key") or "-"
-                if len(token) > 16:
-                    token = token[:8] + "..." + token[-4:]
+                alias = k.get("key_alias") or "-"
+                token = k.get("key_name") or "-"
                 kspend = f"${k.get('spend', 0):.2f}" if "spend" in k else "-"
                 exp = k.get("expires") or "never"
                 print(f"  {alias:<20} {token:<32} {kspend:<10} {exp}")
@@ -337,7 +335,7 @@ def cmd_key_create(
     if not ok:
         die(f"failed to generate key: {res}")
     key = res.get("key", "")
-    key_alias = res.get("key_name") or res.get("key_alias") or alias or "-"
+    key_alias = res.get("key_alias") or alias or "-"
     exp = res.get("expires") or (f"in {duration}" if duration else "never")
     print("API Key generated successfully:")
     print(f"  Key:        {key}")
@@ -357,9 +355,8 @@ def cmd_key_list(user_id: str | None = None) -> None:
         return
     print(f"{'ALIAS':<20} {'KEY PREFIX':<18} {'USER':<18} {'MODELS':<20} {'SPEND':<10} {'BUDGET':<10} EXPIRES")
     for k in keys:
-        alias = k.get("key_name") or k.get("key_alias") or "-"
-        token = k.get("token") or k.get("key") or "-"
-        token_prefix = (token[:10] + "...") if len(token) > 10 else token
+        alias = k.get("key_alias") or "-"
+        token_prefix = k.get("key_name") or "-"
         uid = k.get("user_id") or "-"
         raw_models = k.get("models")
         models_str = ", ".join(raw_models) if isinstance(raw_models, list) and raw_models else "all"

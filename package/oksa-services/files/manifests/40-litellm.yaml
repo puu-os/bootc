@@ -10,6 +10,7 @@ spec:
   createNamespace: true
   valuesContent: |-
     fullnameOverride: litellm
+    masterkeySecretName: puu-litellm-masterkey
 
     image:
       repository: ghcr.io/berriai/litellm
@@ -31,15 +32,62 @@ spec:
     migrationJob:
       enabled: true
 
+    numWorkers: 1
+    command:
+      - python3
+      - -c
+      - |
+        import os
+        import importlib
+        from litellm.proxy._types import UserAPIKeyAuth, LitellmUserRoles
+        import litellm.proxy.proxy_server as ps
+        import litellm.proxy.utils as u
+        from litellm.proxy.proxy_cli import run_server
+
+        os.environ.setdefault("STORE_MODEL_IN_DB", "True")
+        os.environ.setdefault("LITELLM_SALT_KEY", os.environ.get("PUU_LITELLM_MASTER_KEY") or "puu-litellm-salt")
+        _models = u.get_available_models_for_user
+        _keyless = os.environ.get("PUU_LITELLM_REQUIRE_KEY") == "false"
+        a = importlib.import_module("litellm.proxy.auth.user_api_key_auth")
+        _auth = a._user_api_key_auth_builder
+
+        async def _routed(*a, **kw):
+            r = a[1] if len(a) > 1 else kw.get("llm_router")
+            routed = set(r.get_model_names() if r is not None else ())
+            return [x for x in await _models(*a, **kw) if x in routed]
+
+        async def _authenticate(request, **kw):
+            route = a.get_request_route(request)
+            headers = ("authorization", "api-key", "x-api-key", "x-goog-api-key", "ocp-apim-subscription-key", "x-litellm-api-key")
+            method = request.scope.get("method")
+            public = (method == "GET" and route in ("/models", "/v1/models")) or (
+                method == "POST" and route.removeprefix("/v1") in (
+                    "/chat/completions", "/completions", "/embeddings", "/responses",
+                    "/images/generations", "/images/edits", "/audio/transcriptions", "/audio/speech", "/moderations",
+                )
+            )
+            if _keyless and public and not any(request.headers.get(h) for h in headers):
+                await a.pre_db_read_auth_checks(request=request, request_data=kw["request_data"], route=route)
+                return UserAPIKeyAuth(user_role=LitellmUserRoles.INTERNAL_USER)
+            return await _auth(request=request, **kw)
+
+        @ps.app.middleware("http")
+        async def _revoke_sessions(request, call_next):
+            response = await call_next(request)
+            if request.method == "POST" and a.get_request_route(request) == "/user/delete" and response.status_code == 200:
+                # ponytail: user deletion is rare; flush auth cache to revoke hidden UI sessions too.
+                ps.user_api_key_cache.flush_cache()
+            return response
+
+        u.get_available_models_for_user = _routed
+        a._user_api_key_auth_builder = _authenticate
+        run_server()
+
     proxy_config:
-      model_list:
-        - model_name: "fraserprice/Ternary-Bonsai-2-27B-vllm"
-          litellm_params:
-            model: openai/fraserprice/Ternary-Bonsai-2-27B-vllm
-            api_base: http://bonsai-2-27b.oksa.svc.cluster.local:8000/v1
-            api_key: none
+      model_list: []
       general_settings:
-        master_key: os.environ/PUU_LITELLM_MASTER_KEY
+        master_key: os.environ/PROXY_MASTER_KEY
+        store_model_in_db: true
         max_parallel_requests: 32
       router_settings:
         timeout: 1200

@@ -713,9 +713,17 @@ def reconcile(dry_run: bool) -> None:
     manifest_content = render_manifest(planned, image, models_dir) if planned else empty_manifest
     manifest_changed = not manifest.is_file() or manifest.read_text() != manifest_content
 
+    active_name = (ms.CALIBRATION_MODEL if bonsai_active else planned.spec.name) if (bonsai_active or planned) else ""
+    prev_active = ms.read_first_line(active_model_file)
+
     if not dry_run:
+        if not active_name or (prev_active and prev_active != active_name):
+            unpub_ok = ms.sync_litellm_models(None, state_dir)
+            if not active_name and not unpub_ok:
+                warn("failed to unpublish stopped model from LiteLLM")
+                if disabled or require_selected_model:
+                    sys.exit(1)
         if disabled or bonsai_active or planned:
-            # Remove the old desired workload before freeing its GPU.
             if manifest_changed:
                 ms.atomic_write_text(manifest, empty_manifest)
             stop_generic_workloads(planned.app_name if planned else "")
@@ -731,12 +739,14 @@ def reconcile(dry_run: bool) -> None:
 
     if manifest_changed:
         ms.atomic_write_text(manifest, manifest_content)
-    if bonsai_active or planned:
-        active_name = ms.CALIBRATION_MODEL if bonsai_active else planned.spec.name
+    if active_name:
         ms.atomic_write_text(active_model_file, f"{active_name}\n")
+        if not dry_run and not ms.sync_litellm_models(active_name, state_dir):
+            warn(f"failed to publish {active_name} to LiteLLM")
+            if require_selected_model:
+                sys.exit(1)
     else:
         active_model_file.unlink(missing_ok=True)
-
 
 def main() -> None:
     manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
