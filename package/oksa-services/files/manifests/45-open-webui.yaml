@@ -7,6 +7,8 @@ metadata:
     app.kubernetes.io/name: open-webui
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: open-webui
@@ -19,6 +21,72 @@ spec:
         - name: open-webui
           image: ghcr.io/open-webui/open-webui@sha256:90eae5b419e40b4c3dd684582b2c83440b36f9ae2f6532c09639b2ba4ee65158
           imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              python3 - <<'PY'
+              from contextlib import closing
+              import json
+              from pathlib import Path
+              import sqlite3
+
+              data_dir = Path("/app/backend/data")
+              database = data_dir / "webui.db"
+              marker = data_dir / ".puu-model-identity-v1"
+              canonical = "fraserprice/Ternary-Bonsai-2-27B-vllm"
+              aliases = {"prism-ml/bonsai-2-27b", "bonsai-2-27b", "ternary-bonsai-2-27b-vllm"}
+
+              def rename(value):
+                  return canonical if isinstance(value, str) and value.strip().lower() in aliases else value
+
+              if database.exists() and not marker.exists():
+                  with closing(sqlite3.connect(database)) as db, db:
+                      backup = data_dir / "webui-before-model-identity.db"
+                      if not backup.exists():
+                          temporary = backup.with_suffix(".tmp")
+                          temporary.unlink(missing_ok=True)
+                          temporary.touch(mode=0o600)
+                          with closing(sqlite3.connect(temporary)) as snapshot:
+                              db.backup(snapshot)
+                          temporary.replace(backup)
+                      db.execute("BEGIN IMMEDIATE")
+                      tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                      for table, column, paths in (
+                          ("config", "data", ("ui.default_models", "ui.default_pinned_models", "ui.model_order_list")),
+                          ("user", "settings", ("ui.models", "ui.pinnedModels")),
+                          ("chat", "chat", ("models",)),
+                          ("folder", "data", ("model_ids",)),
+                      ):
+                          if table not in tables:
+                              continue
+                          for row_id, raw in db.execute(f'SELECT id, "{column}" FROM "{table}"').fetchall():
+                              if raw is None:
+                                  continue
+                              data = json.loads(raw)
+                              changed = False
+                              for path in paths:
+                                  keys = path.split(".")
+                                  parent = data
+                                  for key in keys[:-1]:
+                                      parent = parent.get(key) if isinstance(parent, dict) else None
+                                  if not isinstance(parent, dict) or keys[-1] not in parent:
+                                      continue
+                                  value = parent[keys[-1]]
+                                  if isinstance(value, list):
+                                      updated = [rename(item) for item in value]
+                                  elif isinstance(value, str):
+                                      updated = ",".join(rename(item) for item in value.split(","))
+                                  else:
+                                      continue
+                                  if updated != value:
+                                      parent[keys[-1]] = updated
+                                      changed = True
+                              if changed:
+                                  db.execute(f'UPDATE "{table}" SET "{column}"=? WHERE id=?', (json.dumps(data), row_id))
+                  marker.touch()
+              PY
+              exec bash /app/backend/start.sh
           env:
             - name: WEBUI_NAME
               value: Puu AI
@@ -39,7 +107,7 @@ spec:
                   name: open-webui-secret
                   key: secretkey
             - name: DEFAULT_MODELS
-              value: "prism-ml/bonsai-2-27b"
+              value: "fraserprice/Ternary-Bonsai-2-27B-vllm"
             - name: ENABLE_EVALUATION_ARENA_MODELS
               value: "False"
             - name: ENABLE_WEB_SEARCH

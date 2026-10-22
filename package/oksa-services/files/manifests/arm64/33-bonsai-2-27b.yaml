@@ -83,9 +83,7 @@ spec:
             - --revision
             - 1e1d7c0f5cb02b71d81b0574c54ddd1dc9088495
             - --served-model-name
-            - prism-ml/bonsai-2-27b
-            - bonsai-2-27b
-            - Bonsai-2-27B
+            - fraserprice/Ternary-Bonsai-2-27B-vllm
             - --host
             - 0.0.0.0
             - --port

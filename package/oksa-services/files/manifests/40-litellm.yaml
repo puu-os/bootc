@@ -33,9 +33,9 @@ spec:
 
     proxy_config:
       model_list:
-        - model_name: "prism-ml/bonsai-2-27b"
+        - model_name: "fraserprice/Ternary-Bonsai-2-27B-vllm"
           litellm_params:
-            model: openai/prism-ml/bonsai-2-27b
+            model: openai/fraserprice/Ternary-Bonsai-2-27B-vllm
             api_base: http://bonsai-2-27b.oksa.svc.cluster.local:8000/v1
             api_key: none
       general_settings:

@@ -106,10 +106,15 @@ def collect_models_list() -> dict:
     selected_file, disabled_file = control_files()
     serving_enabled = not disabled_file.exists()
     selected_model = ms.read_first_line(selected_file)
+    if selected_model:
+        try:
+            selected_model = ms.resolve_model_name(selected_model, state_dir)
+        except ValueError:
+            pass
 
     meta_map = get_models_metadata()
     builtin = ms.calibration_model_info()
-    builtin["selected"] = selected_model == ms.CALIBRATION_MODEL or (not selected_model and serving_enabled)
+    builtin["selected"] = ms.is_calibration_model(selected_model) or (not selected_model and serving_enabled)
     models = [builtin]
     if builtin["active"]:
         active_model = ms.CALIBRATION_MODEL
@@ -119,7 +124,8 @@ def collect_models_list() -> dict:
         meta = meta_map.get(name, {})
         cap = "ok" if check_capabilities(name) else "insufficient"
         models.append({
-            "name": name,
+            "name": ms.public_model_name(name, state_dir),
+            "id": name,
             "repo_id": meta.get("repo_id") or "-",
             "storage_mib": meta.get("storage_mib") or 0,
             "quantization": meta.get("quantization") or "none",
@@ -130,8 +136,8 @@ def collect_models_list() -> dict:
 
     return {
         "ok": True,
-        "active_model": active_model,
-        "selected_model": selected_model,
+        "active_model": ms.public_model_name(active_model, state_dir),
+        "selected_model": ms.public_model_name(selected_model, state_dir),
         "serving_enabled": serving_enabled,
         "models": models,
     }
@@ -399,6 +405,11 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             if not model_name:
                 self.send_json(400, {"ok": False, "error": "name is required"})
                 return
+            try:
+                model_name = ms.resolve_model_name(model_name, state_dir)
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "error": str(exc)})
+                return
             if not check_capabilities(model_name):
                 self.send_json(400, {"ok": False, "error": "Model has insufficient host capabilities"})
                 return
@@ -412,7 +423,7 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             if res.returncode != 0:
                 self.send_json(500, {"ok": False, "error": "Failed to activate model workload"})
                 return
-            self.send_json(200, {"ok": True, "message": f"Model {model_name} activated"})
+            self.send_json(200, {"ok": True, "message": f"Model {ms.public_model_name(model_name, state_dir)} activated"})
             return
 
         if path == "/api/models/stop":
@@ -459,6 +470,12 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             if ms.is_calibration_model(model_name):
                 self.send_json(403, {"ok": False, "error": "The calibration model cannot be deleted"})
                 return
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
+                try:
+                    model_name = ms.resolve_model_name(model_name, state_dir)
+                except ValueError as exc:
+                    self.send_json(400, {"ok": False, "error": str(exc)})
+                    return
             if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name)
                     or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
                 self.send_json(400, {"ok": False, "error": "Invalid model name"})
@@ -471,13 +488,14 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
                 subprocess.run([str(planner_bin)], capture_output=True)
 
             model_dir = ms.MODELS_DIR / model_name
+            public_name = ms.public_model_name(model_name, state_dir)
             if model_dir.exists():
                 shutil.rmtree(model_dir)
             env_file = state_dir / "models.d" / f"{model_name}.env"
             env_file.unlink(missing_ok=True)
             run_discover()
             subprocess.run([str(planner_bin)], capture_output=True)
-            self.send_json(200, {"ok": True, "message": f"Model {model_name} deleted"})
+            self.send_json(200, {"ok": True, "message": f"Model {public_name} deleted"})
             return
 
         self.send_json(404, {"ok": False, "error": "Not Found"})
@@ -810,7 +828,7 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
       <input type="text" id="add-repo" placeholder="mistralai/Mistral-7B-Instruct-v0.3">
     </div>
     <div class="input-group">
-      <label>Name (optional)</label>
+      <label>Storage ID (optional)</label>
       <input type="text" id="add-name" placeholder="mistral-7b">
     </div>
     <div class="input-group">
@@ -875,7 +893,7 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
     </div>
     <div class="input-group">
       <label>Models (comma-separated; blank for all)</label>
-      <input type="text" id="key-models" placeholder="bonsai-2-27b">
+      <input type="text" id="key-models" placeholder="org/model">
     </div>
     <div class="input-group">
       <label>Budget (USD, optional)</label>
@@ -1004,8 +1022,8 @@ async function loadModels() {
           <td>
             ${m.active ?
               `<button class="btn btn-sm btn-secondary" onclick="stopServing()">Stop</button>` :
-              `<button class="btn btn-sm" onclick="startModel('${m.name}')">Start</button>`}
-            ${m.removable !== false ? `<button class="btn btn-sm btn-danger" style="margin-left:6px;" onclick="removeModel('${m.name}')">Delete</button>` : ''}
+              `<button class="btn btn-sm" onclick="startModel('${m.id}')">Start</button>`}
+            ${m.removable !== false ? `<button class="btn btn-sm btn-danger" style="margin-left:6px;" onclick="removeModel('${m.id}')">Delete</button>` : ''}
           </td>
         </tr>
       `).join('');
