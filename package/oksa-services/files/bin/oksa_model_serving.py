@@ -788,6 +788,9 @@ def generate_serving_env_text(meta: dict, model_path: Path | str) -> str:
     return spec.to_env_text()
 
 
+_litellm_cache: dict[str, str | None] = {}
+
+
 def get_litellm_master_key() -> str | None:
     env_key = os.environ.get("PUU_LITELLM_MASTER_KEY")
     if env_key:
@@ -814,11 +817,16 @@ def get_litellm_master_key() -> str | None:
                     return key
     except (subprocess.SubprocessError, OSError):
         pass
+    if _litellm_cache.get("master_key"):
+        return _litellm_cache["master_key"]
     try:
         proc = run_kubectl("get", "secret", "puu-litellm-masterkey", "-n", OKSA_NAMESPACE, "-o", "jsonpath={.data.masterkey}", check=False)
         if proc.returncode == 0 and proc.stdout.strip():
             import base64
-            return base64.b64decode(proc.stdout.strip()).decode("utf-8").strip()
+            key = base64.b64decode(proc.stdout.strip()).decode("utf-8").strip()
+            if key:
+                _litellm_cache["master_key"] = key
+                return key
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return None
@@ -828,12 +836,16 @@ def litellm_base_url() -> str:
     env_url = os.environ.get("PUU_LITELLM_API_URL")
     if env_url:
         return env_url.rstrip("/")
+    if _litellm_cache.get("base_url"):
+        return str(_litellm_cache["base_url"])
     try:
         proc = run_kubectl(
             "get", "service", "litellm", "--namespace", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            return f"http://{proc.stdout.strip()}:4000"
+            url = f"http://{proc.stdout.strip()}:4000"
+            _litellm_cache["base_url"] = url
+            return url
     except Exception:
         pass
     return "http://127.0.0.1:4000"
@@ -863,6 +875,8 @@ def litellm_api_call(
             except ValueError:
                 return resp.status, {"raw": raw.decode("utf-8", errors="replace")}
     except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            _litellm_cache.pop("master_key", None)
         raw = exc.read()
         try:
             parsed = json.loads(raw.decode("utf-8"))
@@ -870,6 +884,7 @@ def litellm_api_call(
         except ValueError:
             return exc.code, {"error": raw.decode("utf-8", errors="replace")}
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        _litellm_cache.pop("base_url", None)
         return 0, {"error": str(exc)}
 
 
@@ -1014,10 +1029,14 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
         return False, str(keys)
     hashed = hashlib.sha256(key_or_alias.encode("utf-8")).hexdigest()
     matches = [key for key in keys if key.get("token") in (key_or_alias, hashed)]
+    if not matches and len(key_or_alias) >= 8:
+        matches = [key for key in keys if str(key.get("token") or "").startswith(key_or_alias)]
     if not matches:
         matches = [key for key in keys if key.get("key_alias") == key_or_alias]
+    if not matches:
+        matches = [key for key in keys if key.get("key_name") == key_or_alias]
     if len(matches) != 1:
-        return False, "Key not found or alias is ambiguous; use the full key or its token ID"
+        return False, "Key not found or identifier is ambiguous; use the full key or its token ID"
     key = matches[0]
     if key.get("key_alias") == "open-webui":
         return False, "The Open WebUI service key cannot be revoked here"
@@ -1113,9 +1132,7 @@ def migrate_litellm_model_restrictions(
         if isinstance(tid, str) and tid:
             team_ids.add(tid)
         valid, patch = _policy_patch(key_obj, mapping)
-        if not valid:
-            return False
-        if not patch:
+        if not valid or not patch:
             continue
         token = key_obj.get("token") or key_obj.get("key")
         if not isinstance(token, str) or not token:
@@ -1131,9 +1148,7 @@ def migrate_litellm_model_restrictions(
             if isinstance(tid, str) and tid:
                 team_ids.add(tid)
         valid, patch = _policy_patch(user_obj, mapping)
-        if not valid:
-            return False
-        if not patch:
+        if not valid or not patch:
             continue
         uid = user_obj.get("user_id")
         if not isinstance(uid, str) or not uid:
@@ -1145,15 +1160,15 @@ def migrate_litellm_model_restrictions(
         status, resp = litellm_api_call(
             "GET", "/team/info?" + urllib.parse.urlencode({"team_id": tid}), master_key=master_key
         )
+        if status == 404:
+            continue
         if status != 200:
             return False
         team_obj = resp.get("team_info") if isinstance(resp.get("team_info"), dict) else resp
         if not isinstance(team_obj, dict):
             return False
         valid, patch = _policy_patch(team_obj, mapping)
-        if not valid:
-            return False
-        if not patch:
+        if not valid or not patch:
             continue
         status, _ = litellm_api_call("POST", "/team/update", payload={"team_id": tid, **patch}, master_key=master_key)
         if status != 200:
@@ -1166,8 +1181,7 @@ def sync_litellm_models(
     state_dir: Path = STATE_DIR,
     master_key: str | None = None,
 ) -> bool:
-    if not migrate_litellm_model_restrictions(state_dir, master_key=master_key):
-        return False
+    migrate_litellm_model_restrictions(state_dir, master_key=master_key)
     status, resp = litellm_api_call("GET", "/model/info", master_key=master_key)
     if status != 200 or not isinstance(resp.get("data"), list):
         return False
