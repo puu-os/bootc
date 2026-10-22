@@ -29,12 +29,10 @@ spec:
               from contextlib import closing
               import glob
               import json
-              import os
               from pathlib import Path
               import re
               import sqlite3
               import textwrap
-              import urllib.parse
 
               data_dir = Path("/app/backend/data")
               database = data_dir / "webui.db"
@@ -45,80 +43,90 @@ spec:
               def rename(value):
                   return canonical if isinstance(value, str) and value.strip().lower() in aliases else value
 
-              if database.exists() and not marker.exists():
+              if database.exists():
                   with closing(sqlite3.connect(database)) as db, db:
-                      backup = data_dir / "webui-before-model-identity.db"
-                      if not backup.exists():
-                          temporary = backup.with_suffix(".tmp")
-                          temporary.unlink(missing_ok=True)
-                          temporary.touch(mode=0o600)
-                          with closing(sqlite3.connect(temporary)) as snapshot:
-                              db.backup(snapshot)
-                          temporary.replace(backup)
+                      if not marker.exists():
+                          backup = data_dir / "webui-before-model-identity.db"
+                          if not backup.exists():
+                              temporary = backup.with_suffix(".tmp")
+                              temporary.unlink(missing_ok=True)
+                              temporary.touch(mode=0o600)
+                              with closing(sqlite3.connect(temporary)) as snapshot:
+                                  db.backup(snapshot)
+                              temporary.replace(backup)
                       db.execute("BEGIN IMMEDIATE")
                       tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                      for table, column, paths in (
-                          ("config", "data", ("ui.default_models", "ui.default_pinned_models", "ui.model_order_list")),
-                          ("user", "settings", ("ui.models", "ui.pinnedModels")),
-                          ("chat", "chat", ("models",)),
-                          ("folder", "data", ("model_ids",)),
-                      ):
-                          if table not in tables:
-                              continue
-                          for row_id, raw in db.execute(f'SELECT id, "{column}" FROM "{table}"').fetchall():
+                      if not marker.exists():
+                          for table, column, paths in (
+                              ("config", "data", ("ui.default_models", "ui.default_pinned_models", "ui.model_order_list")),
+                              ("user", "settings", ("ui.models", "ui.pinnedModels")),
+                              ("chat", "chat", ("models",)),
+                              ("folder", "data", ("model_ids",)),
+                          ):
+                              if table not in tables:
+                                  continue
+                              for row_id, raw in db.execute(f'SELECT id, "{column}" FROM "{table}"').fetchall():
+                                  if raw is None:
+                                      continue
+                                  data = json.loads(raw)
+                                  changed = False
+                                  for path in paths:
+                                      keys = path.split(".")
+                                      parent = data
+                                      for key in keys[:-1]:
+                                          parent = parent.get(key) if isinstance(parent, dict) else None
+                                      if not isinstance(parent, dict) or keys[-1] not in parent:
+                                          continue
+                                      value = parent[keys[-1]]
+                                      if isinstance(value, list):
+                                          updated = [rename(item) for item in value]
+                                      elif isinstance(value, str):
+                                          updated = ",".join(rename(item) for item in value.split(","))
+                                      else:
+                                          continue
+                                      if updated != value:
+                                          parent[keys[-1]] = updated
+                                          changed = True
+                                  if changed:
+                                      db.execute(f'UPDATE "{table}" SET "{column}"=? WHERE id=?', (json.dumps(data), row_id))
+                          if "model" in tables:
+                              for row_id, base_id, name in db.execute('SELECT id, base_model_id, name FROM "model"').fetchall():
+                                  new_id, new_base, new_name = rename(row_id), rename(base_id), rename(name)
+                                  if (new_id, new_base, new_name) != (row_id, base_id, name):
+                                      if new_id != row_id and db.execute('SELECT 1 FROM "model" WHERE id=?', (new_id,)).fetchone():
+                                          db.execute('DELETE FROM "model" WHERE id=?', (row_id,))
+                                      else:
+                                          db.execute('UPDATE "model" SET id=?, base_model_id=?, name=? WHERE id=?', (new_id, new_base, new_name, row_id))
+                      if "config" in tables:
+                          for row_id, raw in db.execute('SELECT id, "data" FROM "config"').fetchall():
                               if raw is None:
                                   continue
                               data = json.loads(raw)
+                              if not isinstance(data, dict):
+                                  continue
                               changed = False
-                              for path in paths:
-                                  keys = path.split(".")
-                                  parent = data
-                                  for key in keys[:-1]:
-                                      parent = parent.get(key) if isinstance(parent, dict) else None
-                                  if not isinstance(parent, dict) or keys[-1] not in parent:
-                                      continue
-                                  value = parent[keys[-1]]
-                                  if isinstance(value, list):
-                                      updated = [rename(item) for item in value]
-                                  elif isinstance(value, str):
-                                      updated = ",".join(rename(item) for item in value.split(","))
-                                  else:
-                                      continue
-                                  if updated != value:
-                                      parent[keys[-1]] = updated
+                              rag = data.get("rag")
+                              if isinstance(rag, dict):
+                                  web = rag.get("web")
+                                  if isinstance(web, dict) and isinstance(web.get("search"), dict):
+                                      search = web["search"]
+                                      for k, v in (
+                                          ("enable", True),
+                                          ("engine", "duckduckgo"),
+                                          ("bypass_embedding_and_retrieval", True),
+                                          ("bypass_web_loader", True),
+                                      ):
+                                          if search.get(k) != v:
+                                              search[k] = v
+                                              changed = True
+                                  if rag.pop("template", None) is not None:
                                       changed = True
-                              if table == "config" and isinstance(data, dict):
-                                  rag = data.get("rag")
-                                  if isinstance(rag, dict):
-                                      web = rag.get("web")
-                                      if isinstance(web, dict) and isinstance(web.get("search"), dict):
-                                          search = web["search"]
-                                          for k, v in (
-                                              ("enable", True),
-                                              ("engine", "duckduckgo"),
-                                              ("bypass_embedding_and_retrieval", True),
-                                              ("bypass_web_loader", True),
-                                          ):
-                                              if search.get(k) != v:
-                                                  search[k] = v
-                                                  changed = True
-                                      if "template" in rag:
-                                          rag.pop("template", None)
-                                          changed = True
-                                  task = data.get("task")
-                                  if isinstance(task, dict) and isinstance(task.get("query"), dict) and "prompt_template" in task["query"]:
-                                      task["query"].pop("prompt_template", None)
+                              task = data.get("task")
+                              if isinstance(task, dict) and isinstance(task.get("query"), dict):
+                                  if task["query"].pop("prompt_template", None) is not None:
                                       changed = True
                               if changed:
-                                  db.execute(f'UPDATE "{table}" SET "{column}"=? WHERE id=?', (json.dumps(data), row_id))
-                      if "model" in tables:
-                          for row_id, base_id, name in db.execute('SELECT id, base_model_id, name FROM "model"').fetchall():
-                              new_id, new_base, new_name = rename(row_id), rename(base_id), rename(name)
-                              if (new_id, new_base, new_name) != (row_id, base_id, name):
-                                  if new_id != row_id and db.execute('SELECT 1 FROM "model" WHERE id=?', (new_id,)).fetchone():
-                                      db.execute('DELETE FROM "model" WHERE id=?', (row_id,))
-                                  else:
-                                      db.execute('UPDATE "model" SET id=?, base_model_id=?, name=? WHERE id=?', (new_id, new_base, new_name, row_id))
+                                  db.execute('UPDATE "config" SET "data"=? WHERE id=?', (json.dumps(data), row_id))
                   marker.touch()
 
               for p in glob.glob("/app/build/_app/immutable/chunks/*.js"):
@@ -150,7 +158,7 @@ spec:
                       if "_search_web_images" not in ddg_code:
                           ddg_code = ddg_code.replace(
                               "from __future__ import annotations\n",
-                              "from __future__ import annotations\n\nimport json\nimport re\nimport urllib.parse\n",
+                              "from __future__ import annotations\n\nimport json\nimport re\nimport urllib.parse\nimport urllib.request\n",
                           )
                           helper = textwrap.dedent('''
                               _IMAGE_QUERY_RE = re.compile(
@@ -241,9 +249,10 @@ spec:
                       if "_IMAGE_QUERY_RE" not in mw_code:
                           q_target = "    await event_emitter(\n        {\n            'type': 'status',\n            'data': {\n                'action': 'web_search_queries_generated',"
                           q_patch = (
-                              "    from open_webui.retrieval.web.duckduckgo import _IMAGE_QUERY_RE\n"
-                              "    if user_message and _IMAGE_QUERY_RE.search(user_message):\n"
-                              "        queries = [q if _IMAGE_QUERY_RE.search(q) else f'{q} photo' for q in queries]\n\n"
+                              "    import open_webui.retrieval.web.duckduckgo as _ddg\n"
+                              "    _img_re = getattr(_ddg, '_IMAGE_QUERY_RE', None)\n"
+                              "    if user_message and _img_re and _img_re.search(user_message):\n"
+                              "        queries = [q if _img_re.search(q) else f'{q} photo' for q in queries]\n\n"
                               + q_target
                           )
                           mw_code = mw_code.replace(q_target, q_patch, 1)
