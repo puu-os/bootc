@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 from pathlib import Path
+import hashlib
 import ipaddress
 import json
 import os
@@ -39,7 +40,6 @@ AVAHI_API_UNIT = "puu-avahi-api-alias.service"
 
 MASTER_KEY_CREDENTIAL = "litellm-master-key"
 MASTER_KEY_STORE = Path("/etc/credstore.encrypted")
-MASTER_KEY_ENV = "PUU_LITELLM_MASTER_KEY"
 MASTER_KEY_SECRET_NAME = "puu-litellm-masterkey"
 MASTER_KEY_MANIFEST = "39-litellm-masterkey.yaml"
 AUTH_MANIFEST = "40-litellm-auth.yaml"
@@ -261,13 +261,16 @@ def master_key_from_credential() -> str | None:
     return master_key or None
 
 
-def ensure_litellm_auth(manifest_dst: Path) -> str | None:
+def ensure_litellm_auth(manifest_dst: Path) -> str:
     auth_manifest = manifest_dst / AUTH_MANIFEST
     master_key = master_key_from_credential()
-    if master_key is None:
-        auth_manifest.unlink(missing_ok=True)
-        return None
-    write_secret(manifest_dst, MASTER_KEY_MANIFEST, MASTER_KEY_SECRET_NAME, {"masterkey": master_key})
+    old_key = secret_value(manifest_dst / MASTER_KEY_MANIFEST, "masterkey")
+    management_key = master_key or old_key or "sk-" + secrets.token_urlsafe(32)
+    legacy_auth = auth_manifest.is_file() and "name: PUU_LITELLM_MASTER_KEY" in auth_manifest.read_text()
+    legacy_salt = old_key if legacy_auth else "puu-litellm-salt"
+    salt_key = secret_value(manifest_dst / MASTER_KEY_MANIFEST, "saltkey") or legacy_salt or "puu-litellm-salt"
+    checksum = hashlib.sha256(json.dumps([management_key, salt_key]).encode()).hexdigest()
+    write_secret(manifest_dst, MASTER_KEY_MANIFEST, MASTER_KEY_SECRET_NAME, {"masterkey": management_key, "saltkey": salt_key})
     ms.atomic_write_text(
         auth_manifest,
         f"""apiVersion: helm.cattle.io/v1
@@ -278,15 +281,26 @@ metadata:
 spec:
   valuesContent: |-
     extraEnvVars:
-      - name: {MASTER_KEY_ENV}
+      - name: PUU_LITELLM_MASTER_KEY
         valueFrom:
           secretKeyRef:
             name: {MASTER_KEY_SECRET_NAME}
             key: masterkey
+      - name: PUU_LITELLM_REQUIRE_KEY
+        value: "{str(master_key is not None).lower()}"
+      - name: LITELLM_SALT_KEY
+        valueFrom:
+          secretKeyRef:
+            name: {MASTER_KEY_SECRET_NAME}
+            key: saltkey
+    podAnnotations:
+      puu.io/litellm-credentials: "{checksum}"
 """,
         0o600,
     )
-    return master_key
+    ms.run_kubectl("apply", "-f", str(manifest_dst / MASTER_KEY_MANIFEST))
+    ms.run_kubectl("apply", "-f", str(auth_manifest))
+    return management_key
 
 
 def litellm_address() -> str | None:
@@ -348,14 +362,18 @@ def mint_openwebui_key(master_key: str) -> str:
     sys.exit("LiteLLM did not mint an OpenWebUI key")
 
 
-def ensure_openwebui_key(manifest_dst: Path, master_key: str | None) -> None:
+def ensure_openwebui_key(manifest_dst: Path, master_key: str) -> None:
     key_manifest = manifest_dst / OPENWEBUI_KEY_MANIFEST
+    deadline = time.monotonic() + LITELLM_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        status, _ = litellm_request("GET", "/key/list?page=1&size=1", master_key)
+        if status == 200:
+            break
+        time.sleep(POLL_SEC)
+    else:
+        sys.exit("LiteLLM management API did not become ready")
     stored_key = secret_value(key_manifest, "api_key")
-    if master_key is None:
-        if stored_key is None:
-            write_secret(manifest_dst, OPENWEBUI_KEY_MANIFEST, OPENWEBUI_KEY_SECRET_NAME, {"api_key": secrets.token_hex(32)})
-        return
-    valid = stored_key is not None and openwebui_key_is_valid(stored_key)
+    valid = bool(stored_key and stored_key.startswith("sk-")) and openwebui_key_is_valid(stored_key)
     if valid is None:
         sys.exit("LiteLLM did not answer the OpenWebUI key probe")
     if valid:
@@ -366,9 +384,11 @@ def ensure_openwebui_key(manifest_dst: Path, master_key: str | None) -> None:
         OPENWEBUI_KEY_SECRET_NAME,
         {"api_key": mint_openwebui_key(master_key)},
     )
-    ms.run_kubectl(
-        "rollout", "restart", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE, check=False
-    )
+    ms.run_kubectl("apply", "-f", str(key_manifest))
+    if stored_key is None:
+        return
+    ms.run_kubectl("rollout", "restart", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE)
+    ms.run_kubectl("rollout", "status", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE, "--timeout=300s")
 
 
 def main() -> None:
@@ -383,12 +403,13 @@ def main() -> None:
     except subprocess.CalledProcessError as exc:
         sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")
     ms.run_kubectl("create", "namespace", OKSA_NAMESPACE, check=False)
+    manifest_dst.mkdir(parents=True, exist_ok=True, mode=0o700)
+    master_key = ensure_litellm_auth(manifest_dst)
     copy_manifests(manifest_src, manifest_dst)
     ensure_webui_secret(manifest_dst)
     ensure_postgresql_endpoints(manifest_dst)
     ensure_api_route(manifest_dst)
     ensure_litellm_db(manifest_dst)
-    master_key = ensure_litellm_auth(manifest_dst)
     ensure_openwebui_key(manifest_dst, master_key)
 
 
