@@ -717,12 +717,10 @@ def reconcile(dry_run: bool) -> None:
     prev_active = ms.read_first_line(active_model_file)
 
     if not dry_run:
-        if not active_name or (prev_active and prev_active != active_name):
-            unpub_ok = ms.sync_litellm_models(None, state_dir)
-            if not active_name and not unpub_ok:
-                warn("failed to unpublish stopped model from LiteLLM")
-                if disabled or require_selected_model:
-                    sys.exit(1)
+        if not active_name and not ms.sync_litellm_models(None, state_dir):
+            warn("failed to unpublish stopped model from LiteLLM")
+            if disabled or require_selected_model:
+                sys.exit(1)
         if disabled or bonsai_active or planned:
             if manifest_changed:
                 ms.atomic_write_text(manifest, empty_manifest)
@@ -740,11 +738,10 @@ def reconcile(dry_run: bool) -> None:
     if manifest_changed:
         ms.atomic_write_text(manifest, manifest_content)
     if active_name:
-        ms.atomic_write_text(active_model_file, f"{active_name}\n")
         if not dry_run and not ms.sync_litellm_models(active_name, state_dir):
             warn(f"failed to publish {active_name} to LiteLLM")
-            if require_selected_model:
-                sys.exit(1)
+            sys.exit(1)
+        ms.atomic_write_text(active_model_file, f"{active_name}\n")
     else:
         active_model_file.unlink(missing_ok=True)
 
