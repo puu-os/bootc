@@ -819,7 +819,7 @@ def get_litellm_master_key() -> str | None:
         if proc.returncode == 0 and proc.stdout.strip():
             import base64
             return base64.b64decode(proc.stdout.strip()).decode("utf-8").strip()
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return None
 
@@ -879,7 +879,11 @@ def litellm_user_create(
     max_budget: float | None = None,
     master_key: str | None = None,
 ) -> tuple[bool, dict | str]:
-    payload: dict[str, Any] = {"user_id": user_id}
+    if not isinstance(user_id, str) or not user_id.strip():
+        return False, "User ID is required"
+    if max_budget is not None and not (0 <= max_budget < float("inf")):
+        return False, "Budget must be finite and non-negative"
+    payload: dict[str, Any] = {"user_id": user_id, "auto_create_key": False}
     if email:
         payload["user_email"] = email
     if max_budget is not None:
@@ -892,20 +896,44 @@ def litellm_user_create(
 
 
 def litellm_user_list(master_key: str | None = None) -> tuple[bool, list[dict] | str]:
-    status, resp = litellm_api_call("GET", "/user/list", master_key=master_key)
-    if status == 200:
-        if isinstance(resp, list):
-            return True, resp
-        if isinstance(resp.get("users"), list):
-            return True, resp["users"]
-        if isinstance(resp.get("data"), list):
-            return True, resp["data"]
-        return True, []
-    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-    return False, str(err)
+    users = []
+    page = 1
+    while True:
+        status, resp = litellm_api_call(
+            "GET",
+            "/user/list?" + urllib.parse.urlencode({"page": page, "page_size": 100}),
+            master_key=master_key,
+        )
+        if status != 200:
+            err = resp.get("error") or resp.get("message") or f"HTTP {status}"
+            return False, str(err)
+        if isinstance(resp.get("data"), list) and "users" not in resp:
+            return True, [u for u in resp["data"] if isinstance(u, dict)]
+        batch = resp.get("users")
+        if not isinstance(batch, list) or not all(isinstance(u, dict) for u in batch):
+            return False, "Invalid LiteLLM user-list response"
+        users.extend(batch)
+        pages = resp.get("total_pages")
+        if type(pages) is not int or page >= pages:
+            return True, users
+        page += 1
 
 
 def litellm_user_delete(user_id: str, master_key: str | None = None) -> tuple[bool, str]:
+    if not isinstance(user_id, str) or not user_id.strip():
+        return False, "User ID is required"
+    ok, keys = litellm_key_list(user_id=user_id, master_key=master_key, include_service=True)
+    if not ok:
+        return False, str(keys)
+    if any(key.get("key_alias") == "open-webui" for key in keys):
+        return False, "This user owns the Open WebUI service key and cannot be deleted"
+    if keys:
+        tokens = [key.get("token") for key in keys]
+        if not all(isinstance(token, str) and token for token in tokens):
+            return False, "Invalid LiteLLM key-list response"
+        status, resp = litellm_api_call("POST", "/key/delete", payload={"keys": tokens}, master_key=master_key)
+        if status != 200:
+            return False, str(resp.get("error") or resp.get("message") or f"HTTP {status}")
     payload = {"user_ids": [user_id]}
     status, resp = litellm_api_call("POST", "/user/delete", payload=payload, master_key=master_key)
     if status == 200:
@@ -915,9 +943,11 @@ def litellm_user_delete(user_id: str, master_key: str | None = None) -> tuple[bo
 
 
 def litellm_user_info(user_id: str, master_key: str | None = None) -> tuple[bool, dict | str]:
-    quoted_id = urllib.parse.quote(user_id)
+    quoted_id = urllib.parse.quote(user_id, safe="")
     status, resp = litellm_api_call("GET", f"/user/info?user_id={quoted_id}", master_key=master_key)
     if status == 200:
+        if isinstance(resp.get("keys"), list):
+            resp["keys"] = [key for key in resp["keys"] if isinstance(key, dict) and key.get("key_alias") != "open-webui"]
         return True, resp
     err = resp.get("error") or resp.get("message") or f"HTTP {status}"
     return False, str(err)
@@ -931,11 +961,19 @@ def litellm_key_create(
     duration: str | None = None,
     master_key: str | None = None,
 ) -> tuple[bool, dict | str]:
+    if not isinstance(user_id, str) or not user_id.strip():
+        return False, "User ID is required"
+    if alias == "open-webui":
+        return False, "The open-webui alias is reserved for the service key"
+    if models is not None and (not isinstance(models, list) or not all(isinstance(m, str) and m.strip() for m in models)):
+        return False, "Models must be a list of non-empty model IDs"
+    if max_budget is not None and not (0 <= max_budget < float("inf")):
+        return False, "Budget must be finite and non-negative"
     payload: dict[str, Any] = {"user_id": user_id}
     if alias:
         payload["key_alias"] = alias
     if models:
-        payload["models"] = models
+        payload["models"] = list(dict.fromkeys(public_model_name(m) for m in models))
     if max_budget is not None:
         payload["max_budget"] = max_budget
     if duration:
@@ -947,29 +985,262 @@ def litellm_key_create(
     return False, str(err)
 
 
-def litellm_key_list(user_id: str | None = None, master_key: str | None = None) -> tuple[bool, list[dict] | str]:
-    endpoint = f"/key/list?user_id={urllib.parse.quote(user_id)}" if user_id else "/key/list"
-    status, resp = litellm_api_call("GET", endpoint, master_key=master_key)
-    if status == 200:
-        if isinstance(resp, list):
-            return True, resp
-        if isinstance(resp.get("keys"), list):
-            return True, resp["keys"]
-        if isinstance(resp.get("data"), list):
-            return True, resp["data"]
-        return True, []
-    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-    return False, str(err)
+def litellm_key_list(
+    user_id: str | None = None, master_key: str | None = None, *, include_service: bool = False,
+) -> tuple[bool, list[dict] | str]:
+    keys = []
+    page = 1
+    while True:
+        query = {"return_full_object": "true", "page": page, "size": 100}
+        if user_id:
+            query["user_id"] = user_id
+        status, resp = litellm_api_call("GET", "/key/list?" + urllib.parse.urlencode(query), master_key=master_key)
+        if status != 200:
+            return False, str(resp.get("error") or resp.get("message") or f"HTTP {status}")
+        batch = resp.get("keys")
+        pages = resp.get("total_pages")
+        if (not isinstance(batch, list) or not all(isinstance(key, dict) for key in batch)
+                or type(pages) is not int or pages < 0 or resp.get("current_page") != page):
+            return False, "Invalid LiteLLM key-list response"
+        keys.extend(batch)
+        if page >= pages:
+            return True, keys if include_service else [key for key in keys if key.get("key_alias") != "open-webui"]
+        page += 1
 
 
 def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tuple[bool, str]:
-    payload = {"keys": [key_or_alias]}
+    ok, keys = litellm_key_list(master_key=master_key, include_service=True)
+    if not ok:
+        return False, str(keys)
+    hashed = hashlib.sha256(key_or_alias.encode("utf-8")).hexdigest()
+    matches = [key for key in keys if key.get("token") in (key_or_alias, hashed)]
+    if not matches:
+        matches = [key for key in keys if key.get("key_alias") == key_or_alias]
+    if len(matches) != 1:
+        return False, "Key not found or alias is ambiguous; use the full key or its token ID"
+    key = matches[0]
+    if key.get("key_alias") == "open-webui":
+        return False, "The Open WebUI service key cannot be revoked here"
+    token = key.get("token")
+    if not isinstance(token, str) or not token:
+        return False, "Invalid LiteLLM key-list response"
+    payload = {"keys": [token]}
     status, resp = litellm_api_call("POST", "/key/delete", payload=payload, master_key=master_key)
     if status == 200:
         return True, f"Key {key_or_alias} revoked"
     err = resp.get("error") or resp.get("message") or f"HTTP {status}"
     return False, str(err)
 
+
+def _legacy_model_map(state_dir: Path = STATE_DIR) -> dict[str, str]:
+    mapping = {
+        CALIBRATION_MODEL: CALIBRATION_REPO,
+        f"prism-ml/{CALIBRATION_MODEL}": CALIBRATION_REPO,
+        CALIBRATION_REPO.rsplit("/", 1)[-1].lower(): CALIBRATION_REPO,
+    }
+    for internal, _, _ in read_models_list(state_dir / "models.list"):
+        public = public_model_name(internal, state_dir)
+        if public != internal:
+            mapping[internal] = public
+            mapping[internal.lower()] = public
+    return mapping
+
+
+def _map_model_ref(value: str, mapping: dict[str, str]) -> str:
+    return mapping.get(value) or mapping.get(value.lower()) or value
+
+
+def _policy_patch(obj: dict, mapping: dict[str, str]) -> tuple[bool, dict]:
+    patch: dict[str, Any] = {}
+    budget_map = obj.get("model_max_budget")
+    if isinstance(budget_map, dict) and any(
+        isinstance(k, str) and _map_model_ref(k, mapping) != k for k in budget_map
+    ):
+        return False, {}
+    models = obj.get("models")
+    if isinstance(models, list) and models and all(isinstance(m, str) for m in models):
+        migrated = list(dict.fromkeys(_map_model_ref(m, mapping) for m in models))
+        if migrated != models:
+            patch["models"] = migrated
+    aliases = obj.get("aliases")
+    if isinstance(aliases, dict) and aliases:
+        migrated_aliases = {
+            k: (_map_model_ref(v, mapping) if isinstance(v, str) else v)
+            for k, v in aliases.items()
+        }
+        if migrated_aliases != aliases:
+            patch["aliases"] = migrated_aliases
+    metadata = obj.get("metadata")
+    if isinstance(metadata, dict):
+        meta_budget = metadata.get("model_max_budget")
+        if isinstance(meta_budget, dict) and any(
+            isinstance(k, str) and _map_model_ref(k, mapping) != k for k in meta_budget
+        ):
+            return False, {}
+        new_meta = dict(metadata)
+        meta_changed = False
+        for field in ("model_rpm_limit", "model_tpm_limit"):
+            limits = metadata.get(field)
+            if not isinstance(limits, dict) or not limits:
+                continue
+            rekeyed = {}
+            for k, v in limits.items():
+                nk = _map_model_ref(k, mapping) if isinstance(k, str) else k
+                if nk in rekeyed and rekeyed[nk] != v:
+                    return False, {}
+                if nk != k and nk in limits and limits[nk] != v:
+                    return False, {}
+                rekeyed[nk] = v
+            if rekeyed != limits:
+                new_meta[field] = rekeyed
+                meta_changed = True
+        if meta_changed:
+            patch["metadata"] = new_meta
+    return True, patch
+
+
+def migrate_litellm_model_restrictions(
+    state_dir: Path = STATE_DIR,
+    master_key: str | None = None,
+) -> bool:
+    mapping = _legacy_model_map(state_dir)
+    ok, keys = litellm_key_list(master_key=master_key, include_service=True)
+    if not ok or not isinstance(keys, list):
+        return False
+    team_ids: set[str] = set()
+    for key_obj in keys:
+        tid = key_obj.get("team_id")
+        if isinstance(tid, str) and tid:
+            team_ids.add(tid)
+        valid, patch = _policy_patch(key_obj, mapping)
+        if not valid:
+            return False
+        if not patch:
+            continue
+        token = key_obj.get("token") or key_obj.get("key")
+        if not isinstance(token, str) or not token:
+            return False
+        status, _ = litellm_api_call("POST", "/key/update", payload={"key": token, **patch}, master_key=master_key)
+        if status != 200:
+            return False
+    ok, users = litellm_user_list(master_key=master_key)
+    if not ok or not isinstance(users, list):
+        return False
+    for user_obj in users:
+        for tid in user_obj.get("teams") or []:
+            if isinstance(tid, str) and tid:
+                team_ids.add(tid)
+        valid, patch = _policy_patch(user_obj, mapping)
+        if not valid:
+            return False
+        if not patch:
+            continue
+        uid = user_obj.get("user_id")
+        if not isinstance(uid, str) or not uid:
+            return False
+        status, _ = litellm_api_call("POST", "/user/update", payload={"user_id": uid, **patch}, master_key=master_key)
+        if status != 200:
+            return False
+    for tid in sorted(team_ids):
+        status, resp = litellm_api_call(
+            "GET", "/team/info?" + urllib.parse.urlencode({"team_id": tid}), master_key=master_key
+        )
+        if status != 200:
+            return False
+        team_obj = resp.get("team_info") if isinstance(resp.get("team_info"), dict) else resp
+        if not isinstance(team_obj, dict):
+            return False
+        valid, patch = _policy_patch(team_obj, mapping)
+        if not valid:
+            return False
+        if not patch:
+            continue
+        status, _ = litellm_api_call("POST", "/team/update", payload={"team_id": tid, **patch}, master_key=master_key)
+        if status != 200:
+            return False
+    return True
+
+
+def sync_litellm_models(
+    active_model: str | None,
+    state_dir: Path = STATE_DIR,
+    master_key: str | None = None,
+) -> bool:
+    if not migrate_litellm_model_restrictions(state_dir, master_key=master_key):
+        return False
+    status, resp = litellm_api_call("GET", "/model/info", master_key=master_key)
+    if status != 200 or not isinstance(resp.get("data"), list):
+        return False
+    expected = None
+    if active_model:
+        internal = CALIBRATION_MODEL if is_calibration_model(active_model) else active_model
+        public_name = public_model_name(internal, state_dir)
+        label = CALIBRATION_MODEL if internal == CALIBRATION_MODEL else model_id(internal)
+        service_name = CALIBRATION_MODEL if internal == CALIBRATION_MODEL else f"puu-vllm-{label}"
+        expected = {
+            "id": f"puu-runtime-{label}",
+            "model_name": public_name,
+            "model": f"openai/{public_name}",
+            "api_base": f"http://{service_name}.{OKSA_NAMESPACE}.svc.cluster.local:8000/v1",
+        }
+
+    def _matches(dep: dict) -> bool:
+        if expected is None:
+            return False
+        info = dep.get("model_info") if isinstance(dep.get("model_info"), dict) else {}
+        params = dep.get("litellm_params") if isinstance(dep.get("litellm_params"), dict) else {}
+        return (
+            info.get("id") == expected["id"]
+            and dep.get("model_name") == expected["model_name"]
+            and params.get("model") == expected["model"]
+            and params.get("api_base") == expected["api_base"]
+        )
+
+    kept = False
+    for dep in resp["data"]:
+        if not isinstance(dep, dict):
+            continue
+        info = dep.get("model_info") if isinstance(dep.get("model_info"), dict) else {}
+        dep_id = info.get("id")
+        if not isinstance(dep_id, str) or not dep_id.startswith("puu-runtime-"):
+            continue
+        if _matches(dep) and not kept:
+            kept = True
+            continue
+        del_status, _ = litellm_api_call("POST", "/model/delete", payload={"id": dep_id}, master_key=master_key)
+        if del_status != 200:
+            return False
+
+    if expected is not None and not kept:
+        new_status, _ = litellm_api_call(
+            "POST",
+            "/model/new",
+            payload={
+                "model_name": expected["model_name"],
+                "litellm_params": {
+                    "model": expected["model"],
+                    "api_base": expected["api_base"],
+                    "api_key": "none",
+                },
+                "model_info": {"id": expected["id"]},
+            },
+            master_key=master_key,
+        )
+        if new_status != 200:
+            return False
+
+    v_status, v_resp = litellm_api_call("GET", "/model/info", master_key=master_key)
+    if v_status != 200 or not isinstance(v_resp.get("data"), list):
+        return False
+    managed = [
+        dep for dep in v_resp["data"]
+        if isinstance(dep, dict)
+        and isinstance(dep.get("model_info"), dict)
+        and str(dep["model_info"].get("id") or "").startswith("puu-runtime-")
+    ]
+    if expected is None:
+        return len(managed) == 0
+    return len(managed) == 1 and _matches(managed[0])
 
 
 def collect_gpu_telemetry() -> list[dict]:
