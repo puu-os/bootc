@@ -25,16 +25,7 @@ import oksa_model_serving as ms
 state_dir = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 
 
-def resolve_helper(name: str) -> Path:
-    installed = libexec_dir / name
-    if installed.is_file():
-        return installed
-    sibling = Path(__file__).resolve().parent / name
-    if sibling.is_file():
-        return sibling
-    return installed
-
-
+resolve_helper = ms.resolve_helper
 discover_bin = resolve_helper("oksa-discover-vllm-models")
 planner_bin = resolve_helper("oksa-plan-vllm-workloads")
 preseed_bin = resolve_helper("oksa-preseed-vllm-models")
@@ -54,94 +45,19 @@ pull_state = {
 
 
 def control_files() -> tuple[Path, Path]:
-    selected = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
-    disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
-    return selected, disabled
+    return ms.control_files(state_dir)
 
 
 def run_discover() -> None:
-    if os.geteuid() == 0 and discover_bin.is_file() and os.access(discover_bin, os.X_OK):
-        subprocess.run([str(discover_bin)], check=False)
+    ms.run_discover(discover_bin)
 
 
 def check_capabilities(model_name: str) -> bool:
-    if not planner_bin.is_file() or not os.access(planner_bin, os.X_OK):
-        return False
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        check_dir = Path(tmp_dir)
-        manifests_dir = check_dir / "manifests"
-        manifests_dir.mkdir(parents=True, exist_ok=True)
-        env = dict(
-            os.environ,
-            PUU_K3S_MANIFEST_DIR=str(manifests_dir),
-            PUU_VLLM_SELECTED_MODEL=model_name,
-            PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
-            PUU_VLLM_IGNORE_SERVING_DISABLED="true",
-            PUU_VLLM_ACTIVE_MODEL_FILE=str(check_dir / "active-model"),
-        )
-        res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
-        return res.returncode == 0
-
-
-def get_models_metadata() -> dict[str, dict]:
-    models_json_path = state_dir / "models.json"
-    meta = {}
-    if models_json_path.is_file():
-        try:
-            data = json.loads(models_json_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict) and "name" in item:
-                        meta[item["name"]] = item
-        except (OSError, ValueError):
-            pass
-    return meta
+    return ms.check_capabilities(planner_bin, model_name)
 
 
 def collect_models_list() -> dict:
-    run_discover()
-    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
-    active_model = ms.read_first_line(active_model_file)
-    selected_file, disabled_file = control_files()
-    serving_enabled = not disabled_file.exists()
-    selected_model = ms.read_first_line(selected_file)
-    if selected_model:
-        try:
-            selected_model = ms.resolve_model_name(selected_model, state_dir)
-        except ValueError:
-            pass
-
-    meta_map = get_models_metadata()
-    builtin = ms.calibration_model_info()
-    builtin["selected"] = ms.is_calibration_model(selected_model) or (not selected_model and serving_enabled)
-    models = [builtin]
-    if builtin["active"]:
-        active_model = ms.CALIBRATION_MODEL
-    for name, path, env_path in ms.read_models_list(state_dir / "models.list"):
-        if ms.is_calibration_model(name):
-            continue
-        meta = meta_map.get(name, {})
-        cap = "ok" if check_capabilities(name) else "insufficient"
-        models.append({
-            "name": ms.public_model_name(name, state_dir),
-            "id": name,
-            "repo_id": meta.get("repo_id") or "-",
-            "storage_mib": meta.get("storage_mib") or 0,
-            "quantization": meta.get("quantization") or "none",
-            "capabilities": cap,
-            "active": (name == active_model),
-            "selected": (name == selected_model),
-        })
-
-    return {
-        "ok": True,
-        "active_model": ms.public_model_name(active_model, state_dir),
-        "selected_model": ms.public_model_name(selected_model, state_dir),
-        "serving_enabled": serving_enabled,
-        "models": models,
-    }
-
+    return ms.collect_models_list(state_dir, discover_bin, planner_bin)
 
 def background_pull_worker(repo_id: str, name: str | None, revision: str, force: bool) -> None:
     global pull_state
@@ -483,21 +399,24 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
                     or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
                 self.send_json(400, {"ok": False, "error": "Invalid model name"})
                 return
-            active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
-            if ms.read_first_line(active_model_file) == model_name:
+            with control_lock:
+                active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
                 selected_model_file, serving_disabled_file = control_files()
-                selected_model_file.unlink(missing_ok=True)
-                ms.atomic_write_text(serving_disabled_file, "")
-                subprocess.run([str(planner_bin)], capture_output=True)
+                if ms.read_first_line(active_model_file) == model_name:
+                    selected_model_file.unlink(missing_ok=True)
+                    ms.atomic_write_text(serving_disabled_file, "")
+                    subprocess.run([str(planner_bin)], capture_output=True)
+                elif ms.read_first_line(selected_model_file) in (model_name, ms.public_model_name(model_name, state_dir)):
+                    selected_model_file.unlink(missing_ok=True)
 
-            model_dir = ms.MODELS_DIR / model_name
-            public_name = ms.public_model_name(model_name, state_dir)
-            if model_dir.exists():
-                shutil.rmtree(model_dir)
-            env_file = state_dir / "models.d" / f"{model_name}.env"
-            env_file.unlink(missing_ok=True)
-            run_discover()
-            subprocess.run([str(planner_bin)], capture_output=True)
+                model_dir = ms.MODELS_DIR / model_name
+                public_name = ms.public_model_name(model_name, state_dir)
+                if model_dir.exists():
+                    shutil.rmtree(model_dir)
+                env_file = state_dir / "models.d" / f"{model_name}.env"
+                env_file.unlink(missing_ok=True)
+                run_discover()
+                subprocess.run([str(planner_bin)], capture_output=True)
             self.send_json(200, {"ok": True, "message": f"Model {public_name} deleted"})
             return
 

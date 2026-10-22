@@ -10,7 +10,6 @@ import re
 import subprocess
 import shutil
 import sys
-import tempfile
 import time
 
 libexec_dir = Path("/usr/libexec/puu")
@@ -24,62 +23,18 @@ def die(msg: str) -> None:
     sys.exit(f"error: {msg}")
 
 
-def resolve_helper(name: str) -> Path:
-    installed = libexec_dir / name
-    if installed.is_file():
-        return installed
-    sibling = Path(__file__).resolve().parent / name
-    if sibling.is_file():
-        return sibling
-    return installed
-
-
-def control_files(state_dir: Path) -> tuple[Path, Path]:
-    selected = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
-    disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
-    return selected, disabled
-
-
-def run_discover(discover_bin: Path) -> None:
-    if os.geteuid() == 0 and discover_bin.is_file() and os.access(discover_bin, os.X_OK):
-        subprocess.run([str(discover_bin)], check=False)
-
-
-def check_capabilities(planner_bin: Path, model_name: str) -> bool:
-    if not planner_bin.is_file() or not os.access(planner_bin, os.X_OK):
-        return False
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        check_dir = Path(tmp_dir)
-        manifests_dir = check_dir / "manifests"
-        manifests_dir.mkdir(parents=True, exist_ok=True)
-        env = dict(
-            os.environ,
-            PUU_K3S_MANIFEST_DIR=str(manifests_dir),
-            PUU_VLLM_SELECTED_MODEL=model_name,
-            PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
-            PUU_VLLM_IGNORE_SERVING_DISABLED="true",
-            PUU_VLLM_ACTIVE_MODEL_FILE=str(check_dir / "active-model"),
-        )
-        res = subprocess.run([str(planner_bin)], env=env, capture_output=True)
-        return res.returncode == 0
-
-
-def get_available_models(state_dir: Path) -> list[str]:
-    return [ms.CALIBRATION_MODEL] + [name for name, _, _ in ms.read_models_list(state_dir / "models.list")
-                                     if not ms.is_calibration_model(name)]
+resolve_helper = ms.resolve_helper
+control_files = ms.control_files
+run_discover = ms.run_discover
+check_capabilities = ms.check_capabilities
 
 
 def cmd_list(state_dir: Path, discover_bin: Path, planner_bin: Path) -> None:
-    run_discover(discover_bin)
-    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
-    active_model = ms.read_first_line(active_model_file)
-
+    data = ms.collect_models_list(state_dir, discover_bin, planner_bin)
     print(f"{'NAME':<40} {'CAPABILITIES':<12} ACTIVE")
-    for model_name in get_available_models(state_dir):
-        cap = "ok" if check_capabilities(planner_bin, model_name) else "insufficient"
-        act = "*" if model_name == active_model else ""
-        print(f"{ms.public_model_name(model_name, state_dir):<40} {cap:<12} {act}")
-
+    for m in data["models"]:
+        act = "*" if m["active"] else ""
+        print(f"{m['name']:<40} {m['capabilities']:<12} {act}")
 
 def cmd_start(state_dir: Path, discover_bin: Path, planner_bin: Path, model_name: str) -> None:
     run_discover(discover_bin)
@@ -116,33 +71,13 @@ def cmd_stop(state_dir: Path, planner_bin: Path) -> None:
 
 
 def cmd_model_list(state_dir: Path, discover_bin: Path, planner_bin: Path) -> None:
-    run_discover(discover_bin)
-    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
-    active_model = ms.read_first_line(active_model_file)
-    models_json_path = state_dir / "models.json"
-    models_meta = {}
-    if models_json_path.is_file():
-        try:
-            data = json.loads(models_json_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict) and "name" in item:
-                        models_meta[item["name"]] = item
-        except (OSError, ValueError):
-            pass
-
+    data = ms.collect_models_list(state_dir, discover_bin, planner_bin)
     print(f"{'NAME':<40} {'STORAGE_ID':<24} {'SIZE':<10} {'QUANT':<12} {'CAPABILITIES':<14} ACTIVE")
-    builtin = ms.calibration_model_info()
-    for name in get_available_models(state_dir):
-        meta = builtin if name == ms.CALIBRATION_MODEL else models_meta.get(name, {})
-        repo_id = ms.public_model_name(name, state_dir)
-        storage_mib = meta.get("storage_mib")
-        size_str = f"{storage_mib} MiB" if storage_mib else "-"
-        quant = meta.get("quantization") or "none"
-        cap = "ok" if check_capabilities(planner_bin, name) else "insufficient"
-        act = "*" if name == active_model else ""
-        print(f"{repo_id:<40} {name:<24} {size_str:<10} {quant:<12} {cap:<14} {act}")
-
+    for m in data["models"]:
+        size_str = f"{m['storage_mib']} MiB" if m.get("storage_mib") else "-"
+        quant = m.get("quantization") or "none"
+        act = "*" if m["active"] else ""
+        print(f"{m['name']:<40} {m['id']:<24} {size_str:<10} {quant:<12} {m['capabilities']:<14} {act}")
 
 def cmd_model_add(
     preseed_bin: Path,
@@ -189,9 +124,11 @@ def cmd_model_remove(
             or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
         die("Invalid model name")
     active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+    selected_model_file, _ = control_files(state_dir)
     if ms.read_first_line(active_model_file) == model_name:
         cmd_stop(state_dir, planner_bin)
-
+    elif ms.read_first_line(selected_model_file) in (model_name, ms.public_model_name(model_name, state_dir)):
+        selected_model_file.unlink(missing_ok=True)
     model_dir = ms.MODELS_DIR / model_name
     public_name = ms.public_model_name(model_name, state_dir)
     if not model_dir.exists():

@@ -173,6 +173,16 @@ subsets:
 
 def ensure_api_route(manifest_dst: Path) -> None:
     address = node_internal_ip()
+    existing = []
+    if HOSTS_FILE.is_file():
+        existing = [
+            line for line in HOSTS_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if not line.endswith("# puu-api")
+        ]
+    if not any(line.split()[:1] == ["127.0.0.1"] for line in existing if not line.lstrip().startswith("#")):
+        existing.insert(0, "127.0.0.1 localhost localhost.localdomain")
+    ms.atomic_write_text(HOSTS_FILE, "\n".join(existing) + "\n", 0o644)
+
     host_fqdns = ms.discover_host_fqdns()
     api_hostnames = [f"api.{fqdn}" for fqdn in host_fqdns]
     host_lines = "\n".join(f"    - {host}" for host in api_hostnames)
@@ -200,14 +210,6 @@ spec:
         0o644,
     )
 
-    existing = []
-    if HOSTS_FILE.is_file():
-        existing = [
-            line for line in HOSTS_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
-            if not line.endswith("# puu-api")
-        ]
-    if not any(line.split()[:1] == ["127.0.0.1"] for line in existing if not line.lstrip().startswith("#")):
-        existing.insert(0, "127.0.0.1 localhost localhost.localdomain")
     existing.append(f"{address} {' '.join(host_fqdns + api_hostnames)} # puu-api")
     ms.atomic_write_text(HOSTS_FILE, "\n".join(existing) + "\n", 0o644)
 

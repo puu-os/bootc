@@ -90,6 +90,100 @@ def calibration_model_info() -> dict:
         "removable": False,
     }
 
+
+def resolve_helper(name: str) -> Path:
+    installed = Path("/usr/libexec/puu") / name
+    if installed.is_file():
+        return installed
+    sibling = Path(__file__).resolve().parent / name
+    return sibling if sibling.is_file() else installed
+
+
+def control_files(state_dir: Path = STATE_DIR) -> tuple[Path, Path]:
+    selected = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
+    disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
+    return selected, disabled
+
+
+def run_discover(discover_bin: Path | None = None) -> None:
+    binary = discover_bin or resolve_helper("oksa-discover-vllm-models")
+    if os.geteuid() == 0 and binary.is_file() and os.access(binary, os.X_OK):
+        subprocess.run([str(binary)], check=False)
+
+
+def check_capabilities(planner_bin: Path, model_name: str) -> bool:
+    if not planner_bin.is_file() or not os.access(planner_bin, os.X_OK):
+        return False
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        check_dir = Path(tmp_dir)
+        manifests_dir = check_dir / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(
+            os.environ,
+            PUU_K3S_MANIFEST_DIR=str(manifests_dir),
+            PUU_VLLM_SELECTED_MODEL=model_name,
+            PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
+            PUU_VLLM_IGNORE_SERVING_DISABLED="true",
+            PUU_VLLM_ACTIVE_MODEL_FILE=str(check_dir / "active-model"),
+        )
+        return subprocess.run([str(planner_bin)], env=env, capture_output=True).returncode == 0
+
+
+def collect_models_list(
+    state_dir: Path = STATE_DIR,
+    discover_bin: Path | None = None,
+    planner_bin: Path | None = None,
+) -> dict:
+    run_discover(discover_bin)
+    planner = planner_bin or resolve_helper("oksa-plan-vllm-workloads")
+    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+    active_model = read_first_line(active_model_file)
+    selected_file, disabled_file = control_files(state_dir)
+    serving_enabled = not disabled_file.exists()
+    selected_model = read_first_line(selected_file)
+    if selected_model:
+        try:
+            selected_model = resolve_model_name(selected_model, state_dir)
+        except ValueError:
+            pass
+
+    meta_map = {}
+    models_json_path = state_dir / "models.json"
+    if models_json_path.is_file():
+        try:
+            data = json.loads(models_json_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                meta_map = {item["name"]: item for item in data if isinstance(item, dict) and "name" in item}
+        except (OSError, ValueError):
+            pass
+
+    builtin = calibration_model_info()
+    builtin["selected"] = is_calibration_model(selected_model) or (not selected_model and serving_enabled)
+    models = [builtin]
+    if builtin["active"]:
+        active_model = CALIBRATION_MODEL
+    for name, _, _ in read_models_list(state_dir / "models.list"):
+        if is_calibration_model(name):
+            continue
+        meta = meta_map.get(name, {})
+        models.append({
+            "name": public_model_name(name, state_dir),
+            "id": name,
+            "repo_id": meta.get("repo_id") or "-",
+            "storage_mib": meta.get("storage_mib") or 0,
+            "quantization": meta.get("quantization") or "none",
+            "capabilities": "ok" if check_capabilities(planner, name) else "insufficient",
+            "active": (name == active_model),
+            "selected": (name == selected_model),
+        })
+
+    return {
+        "ok": True,
+        "active_model": public_model_name(active_model, state_dir),
+        "selected_model": public_model_name(selected_model, state_dir),
+        "serving_enabled": serving_enabled,
+        "models": models,
+    }
 @contextmanager
 def preseed_publish_lock(models_dir: Path, exclusive: bool = False):
     lock_path = models_dir.parent / ".puu-preseed-publish.lock"
@@ -290,6 +384,7 @@ def discover_host_fqdns() -> list[str]:
     except OSError:
         pass
 
+    seen_domains: set[str] = set()
     for resolv_path in (Path("/etc/resolv.conf"), Path("/run/systemd/resolve/resolv.conf"), Path("/run/NetworkManager/resolv.conf")):
         try:
             lines = resolv_path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -298,23 +393,22 @@ def discover_host_fqdns() -> list[str]:
         for line in lines:
             parts = line.split("#", 1)[0].split()
             if len(parts) >= 2 and parts[0] in ("search", "domain"):
-                for domain in parts[1:]:
-                    candidate = f"{short_host}.{domain.strip().lstrip('.')}"
+                for raw_domain in parts[1:]:
+                    domain = raw_domain.strip().lstrip(".").lower()
+                    if not domain or domain in seen_domains:
+                        continue
+                    seen_domains.add(domain)
+                    candidate = f"{short_host}.{domain}"
                     try:
                         for entry in socket.getaddrinfo(candidate, None, flags=socket.AI_CANONNAME):
-                            add(entry[3] or candidate)
-                        add(candidate)
+                            add(entry[3])
                     except OSError:
-                        add(candidate)
+                        pass
+                    add(candidate)
 
     if not fqdns:
         fqdns.append(f"{short_host}.local")
     return fqdns
-
-
-def discover_api_hostnames() -> list[str]:
-    return [f"api.{fqdn}" for fqdn in discover_host_fqdns()]
-
 
 def primary_gateway_hosts() -> tuple[str, str]:
     fqdn = avahi_host_fqdn()
