@@ -478,7 +478,7 @@ spec:
                 $extra_args
           env:
             - name: PUU_VLLM_MODEL_NAME
-              value: {json.dumps(spec.name)}
+              value: {json.dumps(spec.repo_id or spec.name)}
             - name: PUU_VLLM_MODEL_PATH
               value: {json.dumps(spec.path)}
             - name: PUU_VLLM_BACKEND_PORT
@@ -637,6 +637,15 @@ def reconcile(dry_run: bool) -> None:
 
     if not selected_model:
         selected_model = ms.read_first_line(selected_model_file)
+    if selected_model:
+        try:
+            selected_model = ms.resolve_model_name(selected_model, state_dir)
+        except ValueError as err:
+            warn(str(err))
+            if require_selected_model:
+                sys.exit(1)
+            if not disabled:
+                return
 
     specs = [
         ms.ModelSpec.from_env(ms.parse_env_file(env_path), name=name, path=path)

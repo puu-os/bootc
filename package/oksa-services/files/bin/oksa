@@ -6,6 +6,7 @@ import argparse
 import os
 import json
 from pathlib import Path
+import re
 import subprocess
 import shutil
 import sys
@@ -64,7 +65,8 @@ def check_capabilities(planner_bin: Path, model_name: str) -> bool:
 
 
 def get_available_models(state_dir: Path) -> list[str]:
-    return [name for name, _, _ in ms.read_models_list(state_dir / "models.list")]
+    return [ms.CALIBRATION_MODEL] + [name for name, _, _ in ms.read_models_list(state_dir / "models.list")
+                                     if not ms.is_calibration_model(name)]
 
 
 def cmd_list(state_dir: Path, discover_bin: Path, planner_bin: Path) -> None:
@@ -76,14 +78,15 @@ def cmd_list(state_dir: Path, discover_bin: Path, planner_bin: Path) -> None:
     for model_name in get_available_models(state_dir):
         cap = "ok" if check_capabilities(planner_bin, model_name) else "insufficient"
         act = "*" if model_name == active_model else ""
-        print(f"{model_name:<40} {cap:<12} {act}")
+        print(f"{ms.public_model_name(model_name, state_dir):<40} {cap:<12} {act}")
 
 
 def cmd_start(state_dir: Path, discover_bin: Path, planner_bin: Path, model_name: str) -> None:
     run_discover(discover_bin)
-    models = get_available_models(state_dir)
-    if model_name not in models:
-        die(f"unknown model: {model_name}")
+    try:
+        model_name = ms.resolve_model_name(model_name, state_dir)
+    except ValueError as exc:
+        die(str(exc))
 
     if not check_capabilities(planner_bin, model_name):
         die("insufficient capabilities")
@@ -128,16 +131,17 @@ def cmd_model_list(state_dir: Path, discover_bin: Path, planner_bin: Path) -> No
         except (OSError, ValueError):
             pass
 
-    print(f"{'NAME':<24} {'REPO_ID':<32} {'SIZE':<10} {'QUANT':<12} {'CAPABILITIES':<14} ACTIVE")
-    for name, path, env_path in ms.read_models_list(state_dir / "models.list"):
-        meta = models_meta.get(name, {})
-        repo_id = meta.get("repo_id") or "-"
+    print(f"{'NAME':<40} {'STORAGE_ID':<24} {'SIZE':<10} {'QUANT':<12} {'CAPABILITIES':<14} ACTIVE")
+    builtin = ms.calibration_model_info()
+    for name in get_available_models(state_dir):
+        meta = builtin if name == ms.CALIBRATION_MODEL else models_meta.get(name, {})
+        repo_id = ms.public_model_name(name, state_dir)
         storage_mib = meta.get("storage_mib")
         size_str = f"{storage_mib} MiB" if storage_mib else "-"
         quant = meta.get("quantization") or "none"
         cap = "ok" if check_capabilities(planner_bin, name) else "insufficient"
         act = "*" if name == active_model else ""
-        print(f"{name:<24} {repo_id:<32} {size_str:<10} {quant:<12} {cap:<14} {act}")
+        print(f"{repo_id:<40} {name:<24} {size_str:<10} {quant:<12} {cap:<14} {act}")
 
 
 def cmd_model_add(
@@ -150,6 +154,9 @@ def cmd_model_add(
 ) -> None:
     if os.geteuid() != 0:
         die("oksa model add requires root privileges")
+    effective_name = re.sub(r"[^a-z0-9._-]+", "-", (name or repo_id.rsplit("/", 1)[-1]).lower()).strip("-")
+    if ms.is_calibration_model(repo_id) or ms.is_calibration_model(effective_name):
+        die("The preset model is installed automatically")
     if not preseed_bin.is_file() or not os.access(preseed_bin, os.X_OK):
         die(f"preseed helper not found: {preseed_bin}")
     cmd = [str(preseed_bin), "--repo-id", repo_id, "--revision", revision]
@@ -171,11 +178,22 @@ def cmd_model_remove(
 ) -> None:
     if os.geteuid() != 0:
         die("oksa model remove requires root privileges")
+    if ms.is_calibration_model(model_name):
+        die("The preset model cannot be deleted")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
+        try:
+            model_name = ms.resolve_model_name(model_name, state_dir)
+        except ValueError as exc:
+            die(str(exc))
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name)
+            or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
+        die("Invalid model name")
     active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
     if ms.read_first_line(active_model_file) == model_name:
         cmd_stop(state_dir, planner_bin)
 
     model_dir = ms.MODELS_DIR / model_name
+    public_name = ms.public_model_name(model_name, state_dir)
     if not model_dir.exists():
         die(f"model directory not found: {model_dir}")
     shutil.rmtree(model_dir)
@@ -183,7 +201,7 @@ def cmd_model_remove(
     env_file.unlink(missing_ok=True)
     run_discover(discover_bin)
     subprocess.run([str(planner_bin)], capture_output=True)
-    print(f"Removed model {model_name}")
+    print(f"Removed model {public_name}")
 
 
 def cmd_model_inspect(repo_id: str, revision: str = "main") -> None:
@@ -191,7 +209,6 @@ def cmd_model_inspect(repo_id: str, revision: str = "main") -> None:
     meta = ms.inspect_hf_model(repo_id, revision)
     if not meta:
         die(f"failed to fetch metadata for {repo_id}")
-    name = meta["model_name"]
     arch = ", ".join(meta["architectures"]) if meta["architectures"] else "unknown"
     dtype = meta["torch_dtype"] or "unknown"
     quant = meta["quantization"] or "none"
@@ -201,7 +218,7 @@ def cmd_model_inspect(repo_id: str, revision: str = "main") -> None:
     files_count = len(meta["files"])
     gated = "yes" if meta["gated"] else "no"
 
-    print(f"Model:                {name}")
+    print(f"Model:                {meta['repo_id']}")
     print(f"Repository:           {repo_id}")
     print(f"Revision:             {revision}")
     print(f"Architecture:         {arch}")
@@ -466,7 +483,7 @@ def main() -> None:
 
     add_parser = model_sub.add_parser("add", help="Add/download a model from Hugging Face")
     add_parser.add_argument("repo_id", help="Hugging Face repo ID (e.g. org/model)")
-    add_parser.add_argument("--name", help="Custom model name")
+    add_parser.add_argument("--name", help="Custom storage ID")
     add_parser.add_argument("--revision", default="main", help="Git revision (default: main)")
     add_parser.add_argument("--force", action="store_true", help="Download even if exceeding host capacity (for QSFP clustering)")
 

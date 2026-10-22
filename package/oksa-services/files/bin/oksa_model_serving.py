@@ -32,10 +32,30 @@ CALIBRATED_MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai
 
 
 def is_calibration_model(name: str) -> bool:
-    return name.lower() in (
+    return isinstance(name, str) and name.lower() in (
         CALIBRATION_MODEL, f"prism-ml/{CALIBRATION_MODEL}",
         CALIBRATION_REPO.lower(), CALIBRATION_REPO.rsplit("/", 1)[-1].lower(),
     )
+
+
+def public_model_name(name: str, state_dir: Path = STATE_DIR) -> str:
+    if is_calibration_model(name):
+        return CALIBRATION_REPO
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        return name
+    return parse_env_file(state_dir / "models.d" / f"{name}.env").get("PUU_VLLM_REPO_ID") or name
+
+
+def resolve_model_name(name: str, state_dir: Path = STATE_DIR) -> str:
+    if not isinstance(name, str) or not name:
+        raise ValueError("Model name must be a non-empty string")
+    if is_calibration_model(name):
+        return CALIBRATION_MODEL
+    matches = [internal for internal, _, _ in read_models_list(state_dir / "models.list")
+               if name in (internal, public_model_name(internal, state_dir))]
+    if len(matches) != 1:
+        raise ValueError(f"Unknown or ambiguous model: {name}")
+    return matches[0]
 
 
 def calibration_model_info() -> dict:
@@ -59,7 +79,8 @@ def calibration_model_info() -> dict:
                   if path.is_file() and not path.name.endswith(".incomplete"))
     status = deployment.get("status", {})
     return {
-        "name": CALIBRATION_MODEL,
+        "name": repo_id,
+        "id": CALIBRATION_MODEL,
         "repo_id": repo_id,
         "storage_mib": storage // (1024 * 1024),
         "quantization": "ternary",
@@ -677,6 +698,7 @@ def inspect_hf_model(
     if not isinstance(siblings, list):
         return None
 
+    repo_id = data.get("id") or repo_id
     files = []
     weight_bytes = 0
     config_entry = None
@@ -1061,8 +1083,7 @@ def collect_k8s_workloads() -> list[dict]:
 def collect_vllm_metrics(active_model: str) -> dict:
     if not active_model or active_model == "-":
         return {}
-    model_label = re.sub(r"[^a-z0-9]+", "-", active_model.lower()).strip("-")
-    service_name = CALIBRATION_MODEL if active_model == CALIBRATION_MODEL else f"puu-vllm-{model_label}"
+    service_name = CALIBRATION_MODEL if is_calibration_model(active_model) else f"puu-vllm-{model_id(active_model)}"
     try:
         proc = run_kubectl("get", "service", service_name, "-n", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False)
         if proc.returncode != 0 or not proc.stdout.strip():
@@ -1131,8 +1152,8 @@ def collect_serving_status() -> dict:
 
     return {
         "serving_enabled": serving_enabled,
-        "selected_model": selected_model,
-        "active_model": active_model,
+        "selected_model": public_model_name(selected_model),
+        "active_model": public_model_name(active_model),
         "host_memory": host_mem,
         "gpus": gpus,
         "workloads": workloads,
