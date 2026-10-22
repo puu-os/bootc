@@ -350,9 +350,11 @@ def chat_valid(response):
     return False
 
 
-def static_model_mapping(response):
+def static_model_mapping(response, zero_capacity=False):
     if not isinstance(response, dict) or not isinstance(response.get("data"), list):
         return False
+    if zero_capacity:
+        return True
     matches = [model for model in response["data"] if isinstance(model, dict) and model.get("model_name") == fs.SERVED_MODEL]
     return bool(matches) and any(
         model.get("litellm_params", {}).get("model") == "openai/" + fs.SERVED_MODEL
@@ -534,12 +536,14 @@ def verify(progress):
         progress.publish("model", "AI model runtime is ready.", "done")
     progress.publish("gateway", "Checking API gateway configuration.")
     mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
-    if not static_model_mapping(mapping):
+    if not static_model_mapping(mapping, zero_capacity):
         raise Pending("gateway", "Waiting for API gateway configuration.", True)
     progress.publish("gateway", "Checking API route.")
     models = http_request(address, 80, "/v1/models", api_host, key)
-    if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
-        isinstance(model, dict) and model.get("id") == fs.SERVED_MODEL for model in models["data"]
+    if not isinstance(models, dict) or not isinstance(models.get("data"), list) or (
+        not zero_capacity and not any(
+            isinstance(model, dict) and model.get("id") == fs.SERVED_MODEL for model in models["data"]
+        )
     ):
         raise Pending("gateway", "Waiting for API routes to become active.")
     progress.publish("gateway", "API gateway and routes are ready.", "done")
@@ -560,7 +564,7 @@ def verify(progress):
             raise Pending("verification", "Waiting for verification response.")
     progress.publish("verification", "Verifying configuration.")
     mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
-    if not static_model_mapping(mapping):
+    if not static_model_mapping(mapping, zero_capacity):
         raise Pending("verification", "Verifying configuration changes.")
     progress.publish("verification", "Rechecking configuration.")
     if snapshot(progress)[3] != fingerprint:
