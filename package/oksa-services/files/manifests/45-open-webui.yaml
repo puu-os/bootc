@@ -27,9 +27,14 @@ spec:
             - |
               python3 - <<'PY'
               from contextlib import closing
+              import glob
               import json
+              import os
               from pathlib import Path
+              import re
               import sqlite3
+              import textwrap
+              import urllib.parse
 
               data_dir = Path("/app/backend/data")
               database = data_dir / "webui.db"
@@ -82,9 +87,182 @@ spec:
                                   if updated != value:
                                       parent[keys[-1]] = updated
                                       changed = True
+                              if table == "config" and isinstance(data, dict):
+                                  rag = data.get("rag")
+                                  if isinstance(rag, dict):
+                                      web = rag.get("web")
+                                      if isinstance(web, dict) and isinstance(web.get("search"), dict):
+                                          search = web["search"]
+                                          for k, v in (
+                                              ("enable", True),
+                                              ("engine", "duckduckgo"),
+                                              ("bypass_embedding_and_retrieval", True),
+                                              ("bypass_web_loader", True),
+                                          ):
+                                              if search.get(k) != v:
+                                                  search[k] = v
+                                                  changed = True
+                                      if "template" in rag:
+                                          rag.pop("template", None)
+                                          changed = True
+                                  task = data.get("task")
+                                  if isinstance(task, dict) and isinstance(task.get("query"), dict) and "prompt_template" in task["query"]:
+                                      task["query"].pop("prompt_template", None)
+                                      changed = True
                               if changed:
                                   db.execute(f'UPDATE "{table}" SET "{column}"=? WHERE id=?', (json.dumps(data), row_id))
+                      if "model" in tables:
+                          for row_id, base_id, name in db.execute('SELECT id, base_model_id, name FROM "model"').fetchall():
+                              new_id, new_base, new_name = rename(row_id), rename(base_id), rename(name)
+                              if (new_id, new_base, new_name) != (row_id, base_id, name):
+                                  if new_id != row_id and db.execute('SELECT 1 FROM "model" WHERE id=?', (new_id,)).fetchone():
+                                      db.execute('DELETE FROM "model" WHERE id=?', (row_id,))
+                                  else:
+                                      db.execute('UPDATE "model" SET id=?, base_model_id=?, name=? WHERE id=?', (new_id, new_base, new_name, row_id))
                   marker.touch()
+
+              for p in glob.glob("/app/build/_app/immutable/chunks/*.js"):
+                  try:
+                      with open(p, "r") as f:
+                          c = f.read()
+                      if "https://www.gravatar.com/avatar/" in c and 'n.startsWith("http://")' not in c:
+                          c = c.replace(
+                              'n.startsWith("https://www.gravatar.com/avatar/")||n.startsWith("data:")||n.startsWith("/")',
+                              'n.startsWith("https://www.gravatar.com/avatar/")||n.startsWith("http://")||n.startsWith("https://")||n.startsWith("data:")||n.startsWith("/")',
+                          )
+                          c = c.replace(
+                              '<img draggable="false" data-cy="image"/>',
+                              '<img draggable="false" data-cy="image" referrerpolicy="no-referrer"/>',
+                          )
+                          c = c.replace(
+                              '<img class=" mx-auto h-full object-scale-down select-none" draggable="false"/>',
+                              '<img class=" mx-auto h-full object-scale-down select-none" draggable="false" referrerpolicy="no-referrer"/>',
+                          )
+                          with open(p, "w") as f:
+                              f.write(c)
+                  except Exception:
+                      pass
+
+              ddg_path = Path("/app/backend/open_webui/retrieval/web/duckduckgo.py")
+              if ddg_path.exists():
+                  try:
+                      ddg_code = ddg_path.read_text()
+                      if "_search_web_images" not in ddg_code:
+                          ddg_code = ddg_code.replace(
+                              "from __future__ import annotations\n",
+                              "from __future__ import annotations\n\nimport json\nimport re\nimport urllib.parse\n",
+                          )
+                          helper = textwrap.dedent('''
+                              _IMAGE_QUERY_RE = re.compile(
+                                  r'\\b(images?|photos?|pictures?|pics?|illustrations?|diagrams?|visuals?|kuva|kuvat|valokuva|valokuvat|bild|bilder)\\b|look like|looks like',
+                                  re.IGNORECASE,
+                              )
+
+                              def _search_web_images(query: str, count: int) -> list[SearchResult]:
+                                  term = re.sub(
+                                      r'\\b(show\\s+me|find\\s+me|give\\s+me|search\\s+for|look\\s+up|images?|photos?|pictures?|pics?|illustrations?|diagrams?|visuals?|kuva|kuvat|valokuva|valokuvat|bild|bilder|from|on|in|of|the|a|an|internet|web|online)\\b|look\\s+like|looks\\s+like',
+                                      ' ',
+                                      query,
+                                      flags=re.IGNORECASE,
+                                  ).strip()
+                                  term = ' '.join(term.split()) or query.strip()
+                                  results: list[SearchResult] = []
+                                  seen: set[str] = set()
+                                  headers = {'User-Agent': 'PuuOS-OpenWebUI/1.0 (https://puu.lan; support@puu.lan)'}
+
+                                  try:
+                                      q = urllib.parse.quote(f"filetype:bitmap {term}")
+                                      w_url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch={q}&gsrlimit={count}&prop=imageinfo&iiprop=url%7Cmime&iiurlwidth=1280&format=json"
+                                      req = urllib.request.Request(w_url, headers=headers)
+                                      with urllib.request.urlopen(req, timeout=5) as r:
+                                          cdata = json.loads(r.read().decode())
+                                      pages = sorted(cdata.get('query', {}).get('pages', {}).values(), key=lambda item: item.get('index', 999))
+                                      for p in pages:
+                                          info = p.get('imageinfo', [{}])[0]
+                                          src = info.get('thumburl') or info.get('url')
+                                          mime = info.get('mime', '')
+                                          title = p.get('title', 'Image').replace('File:', '').rsplit('.', 1)[0]
+                                          if src and src not in seen and (mime.startswith('image/') or src.lower().split('?')[0].endswith(('.jpg', '.jpeg', '.png', '.webp', '.svg', '.gif'))):
+                                              seen.add(src)
+                                              results.append(
+                                                  SearchResult(
+                                                      link=f"https://commons.wikimedia.org/wiki/{urllib.parse.quote(p.get('title', '').replace(' ', '_'))}",
+                                                      title=title,
+                                                      snippet=f"![{title}]({src})\\nDirect image: {src}",
+                                                  )
+                                              )
+                                  except Exception as e:
+                                      log.debug(f"Wikimedia commons image search error: {e}")
+
+                                  if len(results) < count:
+                                      try:
+                                          needed = count - len(results)
+                                          img_url = f"https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote(term)}&gsrlimit={min(needed, 5)}&prop=pageimages|extracts&piprop=original|thumbnail&pithumbsize=1280&exintro=1&explaintext=1&exchars=200&format=json"
+                                          req2 = urllib.request.Request(img_url, headers=headers)
+                                          with urllib.request.urlopen(req2, timeout=5) as r:
+                                              pdata = json.loads(r.read().decode())
+                                          pages = sorted(pdata.get('query', {}).get('pages', {}).values(), key=lambda item: item.get('index', 999))
+                                          for p in pages:
+                                              src = p.get('original', {}).get('source') or p.get('thumbnail', {}).get('source')
+                                              title = p.get('title', term)
+                                              extract = p.get('extract', '')
+                                              if src and src not in seen and src.lower().split('?')[0].endswith(('.jpg', '.jpeg', '.png', '.webp', '.svg', '.gif')):
+                                                  seen.add(src)
+                                                  results.append(
+                                                      SearchResult(
+                                                          link=f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}",
+                                                          title=title,
+                                                          snippet=f"![{title}]({src})\\n{extract}\\nDirect image: {src}".strip(),
+                                                      )
+                                                  )
+                                      except Exception as e:
+                                          log.debug(f"Wikipedia image search error: {e}")
+
+                                  return results
+                          ''').strip()
+                          ddg_code = ddg_code.replace("def search_duckduckgo(", helper + "\n\ndef search_duckduckgo(")
+                          branch = textwrap.dedent('''
+                              if _IMAGE_QUERY_RE.search(query):
+                                  img_results = _search_web_images(query, count)
+                                  if img_results:
+                                      return img_results[:count]
+                          ''').strip()
+                          indented_branch = textwrap.indent(branch, "    ")
+                          target_pos = "    # The ddgs library (primp-based) does not auto-detect proxy env vars."
+                          ddg_code = ddg_code.replace(target_pos, indented_branch + "\n\n" + target_pos)
+                          ddg_path.write_text(ddg_code)
+                  except Exception:
+                      pass
+
+              mw_path = Path("/app/backend/open_webui/utils/middleware.py")
+              if mw_path.exists():
+                  try:
+                      mw_code = mw_path.read_text()
+                      if "_IMAGE_QUERY_RE" not in mw_code:
+                          q_target = "    await event_emitter(\n        {\n            'type': 'status',\n            'data': {\n                'action': 'web_search_queries_generated',"
+                          q_patch = (
+                              "    from open_webui.retrieval.web.duckduckgo import _IMAGE_QUERY_RE\n"
+                              "    if user_message and _IMAGE_QUERY_RE.search(user_message):\n"
+                              "        queries = [q if _IMAGE_QUERY_RE.search(q) else f'{q} photo' for q in queries]\n\n"
+                              + q_target
+                          )
+                          mw_code = mw_code.replace(q_target, q_patch, 1)
+                          d_target = "            elif results.get('docs'):\n                # Invoked when bypass embedding and retrieval is set to True\n                docs = results['docs']\n"
+                          d_patch = (
+                              d_target
+                              + "                image_files = []\n"
+                              + "                for doc in docs:\n"
+                              + "                    for m in re.finditer(r'^Direct image:\\s*(\\S+)', doc.get('content', ''), re.MULTILINE):\n"
+                              + "                        img_url = m.group(1).strip()\n"
+                              + "                        if img_url and not any(f['url'] == img_url for f in image_files):\n"
+                              + "                            image_files.append({'type': 'image', 'url': img_url, 'name': doc.get('metadata', {}).get('title') or 'Image'})\n"
+                              + "                if image_files:\n"
+                              + "                    await event_emitter({'type': 'files', 'data': {'files': image_files[:3]}})\n"
+                          )
+                          mw_code = mw_code.replace(d_target, d_patch, 1)
+                          mw_path.write_text(mw_code)
+                  except Exception:
+                      pass
               PY
               exec bash /app/backend/start.sh
           env:
@@ -116,10 +294,35 @@ spec:
               value: "duckduckgo"
             - name: BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
               value: "True"
+            - name: BYPASS_WEB_SEARCH_WEB_LOADER
+              value: "True"
             - name: USER_AGENT
               value: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
             - name: DEFAULT_MODEL_METADATA
               value: '{"capabilities":{"web_search":true},"defaultFeatureIds":["web_search"]}'
+            - name: RAG_TEMPLATE
+              value: |
+                ### Task:
+                Respond to the user query using the provided context, incorporating inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (e.g., <source id="1">).
+
+                ### Guidelines:
+                - If you don't know the answer, clearly state that.
+                - If uncertain, ask the user for clarification.
+                - Respond in the same language as the user's query.
+                - If the context is unreadable or of poor quality, inform the user and provide the best possible answer.
+                - If the answer isn't present in the context but you possess the knowledge, explain this to the user and provide the answer using your own understanding.
+                - When the user asks for an image, photo, or picture and <context> contains markdown images (such as ![title](https://...)), include the markdown image ![title](https://...) directly in your response so the image is displayed. Never say you cannot display or show images when markdown images are present in <context>.
+                - **Only include inline citations using [id] (e.g., [1], [2]) when the <source> tag includes an id attribute.**
+                - Do not cite if the <source> tag does not contain an id attribute.
+                - Do not use XML tags in your response.
+                - Ensure citations are concise and directly related to the information provided.
+
+                ### Output:
+                Provide a clear and direct response to the user's query, including inline citations in the format [id] only when the <source> tag with id attribute is present in the context.
+
+                <context>
+                {{CONTEXT}}
+                </context>
             - name: QUERY_GENERATION_PROMPT_TEMPLATE
               value: |
                 ### Task:
@@ -134,6 +337,7 @@ spec:
                 - Be concise and focused on composing high-quality search queries, avoiding unnecessary elaboration, commentary, or assumptions.
                 - Today's date is: {{CURRENT_DATE}}.
                 - Always prioritize providing actionable and broad queries that maximize informational coverage.
+                - When the user requests images, photos, or pictures, explicitly include "photo" or "picture" in the search query.
 
                 ### Output:
                 Strictly return in JSON format: 
@@ -177,7 +381,6 @@ metadata:
   labels:
     app.kubernetes.io/name: open-webui
 spec:
-  type: ClusterIP
   selector:
     app.kubernetes.io/name: open-webui
   ports:
