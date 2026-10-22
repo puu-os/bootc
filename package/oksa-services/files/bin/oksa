@@ -306,14 +306,15 @@ def cmd_user_info(user_id: str) -> None:
     print(f"Budget:   {budget}")
     print(f"Keys:     {len(keys)} active")
     if keys:
-        print(f"  {'ALIAS':<20} {'KEY':<32} {'SPEND':<10} {'EXPIRES'}")
+        print(f"  {'ID':<14} {'ALIAS':<20} {'KEY':<24} {'SPEND':<10} {'EXPIRES'}")
         for k in keys:
             if isinstance(k, dict):
+                kid = str(k.get("token") or "")[:12] or "-"
                 alias = k.get("key_alias") or "-"
                 token = k.get("key_name") or "-"
                 kspend = f"${k.get('spend', 0):.2f}" if "spend" in k else "-"
                 exp = k.get("expires") or "never"
-                print(f"  {alias:<20} {token:<32} {kspend:<10} {exp}")
+                print(f"  {kid:<14} {alias:<20} {token:<24} {kspend:<10} {exp}")
 
 
 def cmd_key_create(
@@ -353,8 +354,9 @@ def cmd_key_list(user_id: str | None = None) -> None:
     if not keys:
         print("No API keys found.")
         return
-    print(f"{'ALIAS':<20} {'KEY PREFIX':<18} {'USER':<18} {'MODELS':<20} {'SPEND':<10} {'BUDGET':<10} EXPIRES")
+    print(f"{'ID':<14} {'ALIAS':<20} {'KEY PREFIX':<18} {'USER':<18} {'MODELS':<20} {'SPEND':<10} {'BUDGET':<10} EXPIRES")
     for k in keys:
+        kid = str(k.get("token") or "")[:12] or "-"
         alias = k.get("key_alias") or "-"
         token_prefix = k.get("key_name") or "-"
         uid = k.get("user_id") or "-"
@@ -365,7 +367,7 @@ def cmd_key_list(user_id: str | None = None) -> None:
         spend = f"${k.get('spend', 0):.2f}" if "spend" in k else "-"
         budget = f"${k.get('max_budget'):.2f}" if k.get("max_budget") is not None else "unlimited"
         exp = k.get("expires") or "never"
-        print(f"{alias:<20} {token_prefix:<18} {uid:<18} {models_str:<20} {spend:<10} {budget:<10} {exp}")
+        print(f"{kid:<14} {alias:<20} {token_prefix:<18} {uid:<18} {models_str:<20} {spend:<10} {budget:<10} {exp}")
 
 
 def cmd_key_revoke(key_or_alias: str) -> None:
