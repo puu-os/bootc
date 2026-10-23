@@ -55,9 +55,6 @@ Network settings are available, and TTY/SSH can be used for recovery. When
 setup completes, Continue returns to the login screen and the next login
 opens GNOME.
 
-Systems without a suitable NVIDIA GPU complete setup with local inference
-disabled.
-
 To calibrate again:
 
 ```sh

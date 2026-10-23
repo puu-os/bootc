@@ -94,6 +94,7 @@ spec:
             - "1"
             - --max-num-batched-tokens
             - "512"
+            - --enable-chunked-prefill
             - --gpu-memory-utilization
             - "0.5"
             - --kv-cache-dtype
