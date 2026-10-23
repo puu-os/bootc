@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import signal
+from statistics import median
 import subprocess
 import time
 
@@ -21,8 +22,7 @@ PROBE_PATH = Path(__file__).with_name("oksa-calibration-probe")
 POD = "bonsai-calibration"
 NAMESPACE = "oksa"
 MAX_TRIALS = 40
-MAX_CONTEXT = 262144
-MAX_SEQUENCES = 8
+MAX_CONTEXT = 8192
 MAX_SECONDS = 4 * 60 * 60
 
 
@@ -184,6 +184,11 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
                             raise ValueError(f"Invalid probe metric: {key}")
                     if metrics["kv_cache_tokens"] < context * sequences or metrics["minimum_host_available_bytes"] < reserve:
                         raise ValueError("Calibration probe exceeded its memory bounds")
+                    samples = metrics.get("tokens_per_second_samples")
+                    if (not isinstance(samples, list) or len(samples) != 3
+                            or any(type(sample) not in (int, float) or not 0 < sample < 1e18 for sample in samples)
+                            or metrics["tokens_per_second"] != median(samples)):
+                        raise ValueError("Invalid probe throughput samples")
                 return value
             if deadline_exceeded:
                 raise CalibrationTimeout("Calibration pod time budget exhausted")
@@ -193,25 +198,6 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
         raise CalibrationTimeout("Calibration probe deadline exceeded")
     finally:
         delete_probe()
-
-
-def search_limit(test, maximum):
-    passed = 1
-    failed = maximum + 1
-    candidate = 2
-    while candidate <= maximum:
-        if not test(candidate):
-            failed = candidate
-            break
-        passed = candidate
-        candidate *= 2
-    while failed - passed > 1:
-        candidate = (passed + failed) // 2
-        if test(candidate):
-            passed = candidate
-        else:
-            failed = candidate
-    return passed
 
 
 def kv_cache_tokens(trial):
@@ -248,14 +234,18 @@ def calibrate(manifest, node, identity, fingerprint):
     trials = result["trials"]
     best = None
 
-    def test(context, sequences, utilization):
-        nonlocal best
+    def measure(context, sequences, utilization):
         if len(trials) >= MAX_TRIALS or time.monotonic() >= deadline:
             raise CalibrationTimeout("Calibration search budget exhausted")
         value = run_trial(deployment, node, context, sequences, utilization, budget, reserve, deadline, len(trials) + 1)
         trials.append(value)
         if value["status"] == "timeout":
             raise CalibrationTimeout(value["reason"])
+        return value
+
+    def test(context, sequences, utilization):
+        nonlocal best
+        value = measure(context, sequences, utilization)
         if value["status"] == "passed":
             best = value
             return True
@@ -268,12 +258,20 @@ def calibrate(manifest, node, identity, fingerprint):
         else:
             return result
         context = search_context(lambda tokens: test(tokens, 1, utilization), trials)
-        search_limit(lambda count: test(context, count, utilization),
-                     max(1, min(MAX_SEQUENCES, kv_cache_tokens(best) // context)))
+        baseline = best["metrics"]["tokens_per_second"]
+        cache_tokens = kv_cache_tokens(best)
+        for sequences in (2, 4, 8):
+            if context * sequences > cache_tokens:
+                break
+            value = measure(context, sequences, utilization)
+            if value["status"] == "passed":
+                throughput = value["metrics"]["tokens_per_second"]
+                if throughput / baseline >= 1.1 and throughput > best["metrics"]["tokens_per_second"]:
+                    best = value
     except CalibrationTimeout as error:
         if best is None:
             raise CalibrationTimeout(f"{error}; no profile passed. Restart calibration manually to retry.") from error
-        publish("running", f"{error}; applying the last successfully measured profile.")
+        publish("running", f"{error}; applying the best verified profile.")
     context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
     result.update(reason="measured", completed_at=time.time(), metrics=best["metrics"], limits=dict(
         max_model_len=context, max_num_seqs=sequences, max_num_batched_tokens=min(8192, context * sequences),

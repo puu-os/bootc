@@ -58,6 +58,14 @@ opens GNOME.
 Systems without a suitable NVIDIA GPU complete setup with local inference
 disabled.
 
+Calibration targets up to 8,192 context tokens and tests 1, 2, 4 and 8
+simultaneous requests within the measured KV cache budget. Each profile
+runs one warmup and three full-context rounds generating 32 tokens per
+request. Higher concurrency is selected only when its median aggregate
+output throughput improves by at least 10% over the single-request
+baseline at the same context length. This favors multi-user throughput
+over maximum context length; the score includes prompt processing.
+
 To calibrate again:
 
 ```sh
