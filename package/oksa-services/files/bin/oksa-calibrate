@@ -21,6 +21,8 @@ PROBE_PATH = Path(__file__).with_name("oksa-calibration-probe")
 POD = "bonsai-calibration"
 NAMESPACE = "oksa"
 MAX_TRIALS = 40
+MAX_CONTEXT = 262144
+MAX_SEQUENCES = 8
 MAX_SECONDS = 4 * 60 * 60
 
 
@@ -215,6 +217,27 @@ def search_limit(test, maximum):
     return passed
 
 
+def kv_cache_tokens(trial):
+    tokens = (trial.get("metrics") or {}).get("kv_cache_tokens")
+    return tokens if type(tokens) is int else 0
+
+
+def search_context(test, trials):
+    passed, failed = 512, MAX_CONTEXT + 512
+    while True:
+        bound = min(MAX_CONTEXT, kv_cache_tokens(trials[-1]) // 512 * 512) + 512
+        measured = passed < bound <= failed
+        if measured:
+            failed = bound
+        if failed - passed <= 512:
+            return passed
+        candidate = failed - 512 if measured else (passed + failed) // 1024 * 512
+        if test(candidate):
+            passed = candidate
+        else:
+            failed = candidate
+
+
 def calibrate(manifest, node, identity, fingerprint):
     memory = memory_info()
     reserve = max(2 * 1024**3, memory["MemTotal"] // 5)
@@ -247,8 +270,9 @@ def calibrate(manifest, node, identity, fingerprint):
                 break
         else:
             return result
-        context = 512 * search_limit(lambda blocks: test(blocks * 512, 1, utilization), 512)
-        search_limit(lambda count: test(context, count, utilization), 8)
+        context = search_context(lambda tokens: test(tokens, 1, utilization), trials)
+        search_limit(lambda count: test(context, count, utilization),
+                     max(1, min(MAX_SEQUENCES, kv_cache_tokens(best) // context)))
     except CalibrationTimeout as error:
         if best is None:
             raise CalibrationTimeout(f"{error}; no profile passed. Restart calibration manually to retry.") from error
