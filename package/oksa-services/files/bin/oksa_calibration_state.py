@@ -78,6 +78,15 @@ def valid_result(value):
     completed = value.get("completed_at")
     if type(completed) not in (int, float) or not 0 < completed < 1e12:
         return False
+    search_complete = value.get("search_complete")
+    incomplete_reasons = value.get("incomplete_reasons")
+    if type(search_complete) is not bool or not isinstance(incomplete_reasons, list):
+        return False
+    if any(not isinstance(reason, str) or reason not in ("candidate-timeout", "global-time-budget", "trial-budget")
+           for reason in incomplete_reasons):
+        return False
+    if len(incomplete_reasons) != len(set(incomplete_reasons)) or search_complete != (not incomplete_reasons):
+        return False
     limits = value.get("limits")
     if not isinstance(limits, dict) or set(limits) != set(ZERO_LIMITS):
         return False
@@ -88,7 +97,7 @@ def valid_result(value):
     if type(utilization) not in (int, float) or not math.isfinite(utilization):
         return False
     if limits == ZERO_LIMITS:
-        return value.get("reason") == ("insufficient-memory" if identity["gpus"] else "no-gpu")
+        return search_complete and value.get("reason") == ("insufficient-memory" if identity["gpus"] else "no-gpu")
     metrics = value.get("metrics", {})
     if not isinstance(metrics, dict):
         return False

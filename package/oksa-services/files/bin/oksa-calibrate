@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import signal
+from statistics import median
 import subprocess
 import time
 
@@ -22,7 +23,6 @@ POD = "bonsai-calibration"
 NAMESPACE = "oksa"
 MAX_TRIALS = 40
 MAX_CONTEXT = 262144
-MAX_SEQUENCES = 8
 MAX_SECONDS = 4 * 60 * 60
 
 
@@ -30,7 +30,9 @@ from oksa_model_serving import label_namespace, render_manifest
 
 
 class CalibrationTimeout(TimeoutError):
-    pass
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
 
 
 def publish(state, message, fingerprint=""):
@@ -69,14 +71,14 @@ def kubectl(*args, payload=None):
 
 
 def set_limits(command, limits):
-    command = list(command)
+    command = [arg for arg in command if arg.split("=", 1)[0] not in (
+        "--enable-prefix-caching", "--no-enable-prefix-caching",
+        "--enable-chunked-prefill", "--no-enable-chunked-prefill")]
     for flag, key in (("--max-model-len", "max_model_len"), ("--max-num-seqs", "max_num_seqs"),
                       ("--max-num-batched-tokens", "max_num_batched_tokens"),
                       ("--gpu-memory-utilization", "gpu_memory_utilization")):
         command[command.index(flag) + 1] = str(limits[key])
-    if "--no-enable-prefix-caching" not in command:
-        command.append("--no-enable-prefix-caching")
-    return command
+    return command + ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
 
 
 def deployment_of(manifest):
@@ -143,14 +145,23 @@ def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, r
 
 def run_trial(deployment, node, context, sequences, utilization, memory_bytes, reserve, deadline, trial_number):
     started = time.monotonic()
-    seconds = max(1, min(2100, int(deadline - started)))
+    seconds = min(2100, int(deadline - started))
+    if seconds < 1:
+        raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
+    trial_deadline = started + seconds
     message = (f"Trial {trial_number}/{MAX_TRIALS}: testing {context} context tokens, "
                f"{sequences} simultaneous requests; GPU-memory budget {utilization:.0%}.")
     publish("running", message)
     pod = probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds)
+
+    def timed_out(message):
+        if time.monotonic() >= deadline:
+            raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
+        return dict(status="timeout", reason=message, context=context,
+                    sequences=sequences, utilization=utilization)
+
     try:
         kubectl("create", "-f", "-", "-o", "json", payload=pod)
-        trial_deadline = min(deadline, started + seconds + 60)
         next_update = started + 10
         while time.monotonic() < trial_deadline:
             if time.monotonic() >= next_update:
@@ -171,7 +182,7 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
                                 sequences=sequences, utilization=utilization)
                 value = json.loads(terminated.get("message") or "{}")
                 if deadline_exceeded and (not value or value.get("reason") == "InterruptedError: probe interrupted by signal 15"):
-                    raise CalibrationTimeout("Calibration pod time budget exhausted")
+                    return timed_out("Calibration pod time budget exhausted")
                 if value.get("status") not in ("passed", "capacity", "timeout"):
                     raise RuntimeError(f"Calibration probe failed: {value or terminated}")
                 if terminated.get("exitCode") != 0:
@@ -187,34 +198,22 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
                             raise ValueError(f"Invalid probe metric: {key}")
                     if metrics["kv_cache_tokens"] < context * sequences or metrics["minimum_host_available_bytes"] < reserve:
                         raise ValueError("Calibration probe exceeded its memory bounds")
+                    samples = metrics.get("tokens_per_second_samples")
+                    if (not isinstance(samples, list) or len(samples) != 3
+                            or any(type(sample) not in (int, float) or not 0 < sample < 1e18 for sample in samples)
+                            or metrics["tokens_per_second"] != median(samples)):
+                        raise ValueError("Invalid probe throughput samples")
+                if time.monotonic() >= trial_deadline:
+                    return timed_out("Calibration candidate time budget exhausted")
                 return value
             if deadline_exceeded:
-                raise CalibrationTimeout("Calibration pod time budget exhausted")
+                return timed_out("Calibration pod time budget exhausted")
             if current.get("status", {}).get("phase") in ("Failed", "Succeeded"):
                 raise RuntimeError(f"Calibration pod ended without a probe result: {current.get('status')}")
             time.sleep(2)
-        raise CalibrationTimeout("Calibration probe deadline exceeded")
+        return timed_out("Calibration candidate time budget exhausted")
     finally:
         delete_probe()
-
-
-def search_limit(test, maximum):
-    passed = 1
-    failed = maximum + 1
-    candidate = 2
-    while candidate <= maximum:
-        if not test(candidate):
-            failed = candidate
-            break
-        passed = candidate
-        candidate *= 2
-    while failed - passed > 1:
-        candidate = (passed + failed) // 2
-        if test(candidate):
-            passed = candidate
-        else:
-            failed = candidate
-    return passed
 
 
 def kv_cache_tokens(trial):
@@ -224,18 +223,23 @@ def kv_cache_tokens(trial):
 
 def search_context(test, trials):
     passed, failed = 512, MAX_CONTEXT + 512
+    cache_tokens = kv_cache_tokens(trials[-1])
     while True:
-        bound = min(MAX_CONTEXT, kv_cache_tokens(trials[-1]) // 512 * 512) + 512
+        bound = min(MAX_CONTEXT, cache_tokens // 512 * 512) + 512
         measured = passed < bound <= failed
         if measured:
             failed = bound
         if failed - passed <= 512:
             return passed
         candidate = failed - 512 if measured else (passed + failed) // 1024 * 512
-        if test(candidate):
+        outcome = test(candidate)
+        if outcome == "passed":
             passed = candidate
-        else:
+            cache_tokens = kv_cache_tokens(trials[-1])
+        elif outcome in ("capacity", "timeout"):
             failed = candidate
+        else:
+            raise ValueError(f"Invalid context trial outcome: {outcome}")
 
 
 def calibrate(manifest, node, identity, fingerprint):
@@ -243,7 +247,8 @@ def calibrate(manifest, node, identity, fingerprint):
     reserve = max(2 * 1024**3, memory["MemTotal"] // 5)
     budget = max(0, memory["MemAvailable"] - reserve)
     result = dict(schema=1, model=MODEL, state="complete", fingerprint=fingerprint, identity=identity,
-                  completed_at=time.time(), reason="insufficient-memory", limits=dict(ZERO_LIMITS), trials=[])
+                  completed_at=time.time(), reason="insufficient-memory", limits=dict(ZERO_LIMITS), trials=[],
+                  search_complete=True, incomplete_reasons=[])
     if not budget:
         return result
     deployment = deployment_of(manifest)
@@ -251,32 +256,54 @@ def calibrate(manifest, node, identity, fingerprint):
     trials = result["trials"]
     best = None
 
-    def test(context, sequences, utilization):
-        nonlocal best
-        if len(trials) >= MAX_TRIALS or time.monotonic() >= deadline:
-            raise CalibrationTimeout("Calibration search budget exhausted")
+    def mark_incomplete(reason):
+        result["search_complete"] = False
+        if reason not in result["incomplete_reasons"]:
+            result["incomplete_reasons"].append(reason)
+
+    def measure(context, sequences, utilization):
+        if time.monotonic() >= deadline:
+            raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
+        if len(trials) >= MAX_TRIALS:
+            raise CalibrationTimeout("trial-budget", "Calibration trial budget exhausted")
         value = run_trial(deployment, node, context, sequences, utilization, budget, reserve, deadline, len(trials) + 1)
         trials.append(value)
         if value["status"] == "timeout":
-            raise CalibrationTimeout(value["reason"])
+            mark_incomplete("candidate-timeout")
+            publish("running", "Candidate timed out; capacity is inconclusive. Continuing calibration within the remaining budget.")
+        return value
+
+    def test(context, sequences, utilization):
+        nonlocal best
+        value = measure(context, sequences, utilization)
         if value["status"] == "passed":
             best = value
-            return True
-        return False
+        return value["status"]
 
     try:
         for utilization in (0.9, 0.85, 0.7, 0.5):
-            if test(512, 1, utilization):
+            if test(512, 1, utilization) == "passed":
                 break
         else:
+            if not result["search_complete"]:
+                raise CalibrationTimeout("candidate-timeout", "No profile passed before candidate timeouts")
             return result
         context = search_context(lambda tokens: test(tokens, 1, utilization), trials)
-        search_limit(lambda count: test(context, count, utilization),
-                     max(1, min(MAX_SEQUENCES, kv_cache_tokens(best) // context)))
+        baseline = best["metrics"]["tokens_per_second"]
+        cache_tokens = kv_cache_tokens(best)
+        for sequences in (2, 4, 8):
+            if context * sequences > cache_tokens:
+                break
+            value = measure(context, sequences, utilization)
+            if value["status"] == "passed":
+                throughput = value["metrics"]["tokens_per_second"]
+                if throughput / baseline >= 1.1 and throughput > best["metrics"]["tokens_per_second"]:
+                    best = value
     except CalibrationTimeout as error:
         if best is None:
-            raise CalibrationTimeout(f"{error}; no profile passed. Restart calibration manually to retry.") from error
-        publish("running", f"{error}; applying the last successfully measured profile.")
+            raise CalibrationTimeout(error.reason, f"{error}; no profile passed. Restart calibration manually to retry.") from error
+        mark_incomplete(error.reason)
+        publish("running", f"{error}; applying the best verified profile. Maximum capacity was not established.")
     context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
     result.update(reason="measured", completed_at=time.time(), metrics=best["metrics"], limits=dict(
         max_model_len=context, max_num_seqs=sequences, max_num_batched_tokens=min(8192, context * sequences),
@@ -350,11 +377,12 @@ def run(force=False):
         except (FileNotFoundError, ValueError):
             pass
     if (cached is not None and valid_result(cached) and cached["fingerprint"] == fingerprint
-            and cached["reason"] != "insufficient-memory"):
+            and cached["search_complete"] and cached["reason"] != "insufficient-memory"):
         result = cached
     elif not identity["gpus"]:
         result = dict(schema=1, model=MODEL, state="complete", fingerprint=fingerprint, identity=identity,
-                      completed_at=time.time(), reason="no-gpu", limits=dict(ZERO_LIMITS), trials=[])
+                      completed_at=time.time(), reason="no-gpu", limits=dict(ZERO_LIMITS), trials=[],
+                      search_complete=True, incomplete_reasons=[])
     else:
         result = calibrate(manifest, node, identity, fingerprint)
     if not valid_result(result):
@@ -362,8 +390,15 @@ def run(force=False):
     atomic_record(RESULT_PATH, result)
     apply_profile(manifest, result, node)
     limits = result["limits"]
-    message = (f"Measured {limits['max_model_len']} context tokens and {limits['max_num_seqs']} simultaneous requests."
-               if limits["max_num_seqs"] else f"Calibration complete with zero limits: {result['reason']}.")
+    if not result["search_complete"]:
+        reasons = ", ".join(reason.replace("-", " ") for reason in result["incomplete_reasons"])
+        message = (f"Calibration incomplete: {reasons}. Using verified profile: "
+                   f"{limits['max_model_len']} context tokens, {limits['max_num_seqs']} simultaneous requests; "
+                   "maximum not established. Run oksa-calibrate --force to retry.")
+    elif limits["max_num_seqs"]:
+        message = f"Measured {limits['max_model_len']} context tokens and {limits['max_num_seqs']} simultaneous requests."
+    else:
+        message = f"Calibration complete with zero limits: {result['reason']}."
     publish("complete", message, fingerprint)
     print(message, flush=True)
 

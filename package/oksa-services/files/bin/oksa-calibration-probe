@@ -10,6 +10,7 @@ import queue
 import re
 import select
 import signal
+from statistics import median
 import subprocess
 import sys
 import tempfile
@@ -48,7 +49,9 @@ def candidate_command(command, context, sequences, utilization):
     while index < len(command):
         arg = command[index]
         option = arg.split("=", 1)[0]
-        if option in replacements or option in ("--enable-prefix-caching", "--no-enable-prefix-caching"):
+        if option in replacements or option in (
+                "--enable-prefix-caching", "--no-enable-prefix-caching",
+                "--enable-chunked-prefill", "--no-enable-chunked-prefill"):
             if option in replacements and "=" not in arg:
                 if index + 1 >= len(command) or command[index + 1].startswith("--"):
                     raise ValueError(f"missing value for {option}")
@@ -58,10 +61,10 @@ def candidate_command(command, context, sequences, utilization):
         index += 1
     for option, value in replacements.items():
         result.extend((option, value))
-    return result + ["--no-enable-prefix-caching"]
+    return result + ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
 
 
-def http_request(path, payload=None, timeout=300):
+def http_request(path, payload=None, *, timeout):
     connection = http.client.HTTPConnection("127.0.0.1", 8000, timeout=timeout)
     try:
         body = json.dumps(payload).encode() if payload is not None else None
@@ -76,12 +79,12 @@ def http_request(path, payload=None, timeout=300):
         connection.close()
 
 
-def start_request(results, path, payload=None, barrier=None, timeout=300):
+def start_request(results, path, payload=None, barrier=None, *, timeout):
     def request():
         try:
             if barrier is not None:
                 barrier.wait(timeout=timeout)
-            results.put((http_request(path, payload, timeout), None))
+            results.put((http_request(path, payload, timeout=timeout), None))
         except Exception as error:
             results.put((None, error))
     threading.Thread(target=request, daemon=True).start()
@@ -179,16 +182,18 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
     def receive(results, deadline):
         while True:
             monitor(check_deadline=False)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProbeTimeout("Startup/request deadline exceeded")
             try:
                 value, error = results.get_nowait()
             except queue.Empty:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ProbeTimeout("Startup/request deadline exceeded")
                 try:
                     value, error = results.get(timeout=min(0.2, remaining))
                 except queue.Empty:
                     continue
+            if time.monotonic() >= deadline:
+                raise ProbeTimeout("Startup/request deadline exceeded")
             if error is not None:
                 if (isinstance(error, TimeoutError) or
                         isinstance(error, threading.BrokenBarrierError) and time.monotonic() >= deadline):
@@ -247,53 +252,57 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
         metrics["kv_cache_tokens"] = min(int(value.replace(",", "")) for value in matches)
         if context * sequences > metrics["kv_cache_tokens"]:
             raise CapacityError("context * sequences exceeds GPU KV cache token budget")
-        deadline = min(trial_deadline, time.monotonic() + 300)
-        models = json.loads(fetch("/v1/models", deadline))["data"]
+        models = json.loads(fetch("/v1/models", trial_deadline))["data"]
         if not models or not isinstance(models[0]["id"], str):
             raise RuntimeError("no served model ID")
-        before = preemptions(deadline)
-        inference_log_offset = os.fstat(log.fileno()).st_size
-        barrier = threading.Barrier(sequences + 1)
-        results = queue.Queue()
-        for index in range(sequences):
+        samples = []
+        for round_number in range(4):
+            before = preemptions(trial_deadline)
+            inference_log_offset = os.fstat(log.fileno()).st_size
+            barrier = threading.Barrier(sequences + 1)
+            results = queue.Queue()
+            for index in range(sequences):
+                monitor()
+                if time.monotonic() >= trial_deadline:
+                    raise ProbeTimeout("Inference setup deadline exceeded")
+                payload = {"model": models[0]["id"], "prompt": [100 + index] * (context - 32),
+                           "max_tokens": 32, "ignore_eos": True, "temperature": 0}
+                start_request(results, "/v1/completions", payload, barrier,
+                              timeout=max(0.001, trial_deadline - time.monotonic()))
+            started = time.monotonic()
+            try:
+                barrier.wait(timeout=min(1, max(0.001, trial_deadline - started)))
+            except threading.BrokenBarrierError as error:
+                if time.monotonic() >= trial_deadline:
+                    raise ProbeTimeout("Inference barrier deadline exceeded") from error
+                raise
+            for _ in range(sequences):
+                status, data = receive(results, trial_deadline)
+                if status != 200:
+                    failure_log = os.pread(log.fileno(), LOG_LIMIT, inference_log_offset).decode(errors="replace")
+                    if status == 500 and MEMORY_ERRORS.search(failure_log + data.decode(errors="replace")):
+                        raise CapacityError("completion reported memory capacity exhaustion")
+                    raise RuntimeError(f"completion returned HTTP {status}: {data[:256]!r}")
+                response = json.loads(data)
+                choices = response.get("choices")
+                usage = response.get("usage", {})
+                if (not isinstance(choices, list) or len(choices) != 1 or
+                        not isinstance(choices[0], dict) or not isinstance(choices[0].get("text"), str) or
+                        usage.get("prompt_tokens") != context - 32 or usage.get("completion_tokens") != 32):
+                    raise RuntimeError("completion choices or token usage failed validation")
+            elapsed = time.monotonic() - started
+            after = preemptions(trial_deadline)
+            if any(value > before.get(labels, 0) for labels, value in after.items()):
+                raise CapacityError("vLLM preemptions increased during concurrent inference")
+            if any(labels not in after or after[labels] < value for labels, value in before.items()):
+                raise RuntimeError("vLLM preemption counters disappeared or reset")
             monitor()
-            if time.monotonic() >= deadline:
-                raise ProbeTimeout("Inference setup deadline exceeded")
-            payload = {"model": models[0]["id"], "prompt": [100 + index] * (context - 32),
-                       "max_tokens": 32, "ignore_eos": True, "temperature": 0}
-            start_request(results, "/v1/completions", payload, barrier,
-                          max(0.001, deadline - time.monotonic()))
-        started = time.monotonic()
-        try:
-            barrier.wait(timeout=min(1, max(0.001, deadline - started)))
-        except threading.BrokenBarrierError as error:
-            if time.monotonic() >= deadline:
-                raise ProbeTimeout("Inference barrier deadline exceeded") from error
-            raise
-        for _ in range(sequences):
-            status, data = receive(results, deadline)
-            if status != 200:
-                failure_log = os.pread(log.fileno(), LOG_LIMIT, inference_log_offset).decode(errors="replace")
-                if status == 500 and MEMORY_ERRORS.search(failure_log + data.decode(errors="replace")):
-                    raise CapacityError("completion reported memory capacity exhaustion")
-                raise RuntimeError(f"completion returned HTTP {status}: {data[:256]!r}")
-            response = json.loads(data)
-            choices = response.get("choices")
-            usage = response.get("usage", {})
-            if (not isinstance(choices, list) or len(choices) != 1 or
-                    not isinstance(choices[0], dict) or not isinstance(choices[0].get("text"), str) or
-                    usage.get("prompt_tokens") != context - 32 or usage.get("completion_tokens") != 32):
-                raise RuntimeError("completion choices or token usage failed validation")
-        elapsed = time.monotonic() - started
-        after = preemptions(deadline)
-        if any(value > before.get(labels, 0) for labels, value in after.items()):
-            raise CapacityError("vLLM preemptions increased during concurrent inference")
-        if any(labels not in after or after[labels] < value for labels, value in before.items()):
-            raise RuntimeError("vLLM preemption counters disappeared or reset")
-        monitor()
-        if time.monotonic() >= deadline:
-            raise ProbeTimeout("Inference deadline exceeded")
-        metrics["tokens_per_second"] = sequences * 32 / elapsed
+            if time.monotonic() >= trial_deadline:
+                raise ProbeTimeout("Inference deadline exceeded")
+            if round_number:
+                samples.append(sequences * 32 / elapsed)
+        metrics["tokens_per_second_samples"] = samples
+        metrics["tokens_per_second"] = median(samples)
     finally:
         if child is not None:
             try:
@@ -311,6 +320,8 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
                         child.stdout.close()
             if log_errors:
                 raise RuntimeError(log_errors[0])
+    if time.monotonic() >= trial_deadline:
+        raise ProbeTimeout("Trial time budget exhausted during cleanup")
 
 
 def run():
@@ -342,7 +353,7 @@ def run():
             finally:
                 if sys.exc_info()[0] is not None:
                     print(log_text(log)[-8192:], file=sys.stderr)
-        record.update(status="passed", reason="concurrent full-context inference completed without preemptions")
+        record.update(status="passed", reason="warmup and three full-context inference rounds completed without preemptions")
     except CapacityError as error:
         record.update(status="capacity", reason=str(error)[:400])
     except ProbeTimeout as error:
