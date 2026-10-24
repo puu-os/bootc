@@ -604,7 +604,6 @@ tr:hover { background-color: var(--bg-subtle); }
 .form-error { color: var(--danger); margin-top: 10px; font-size: 0.8125rem; }
 .model-access { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
 .model-access label { display: block; margin: 6px 0; }
-.model-options { max-height: 160px; overflow-y: auto; }
 .modal {
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -687,6 +686,139 @@ tr:hover { background-color: var(--bg-subtle); }
   font-size: 0.8125rem;
   display: none;
   z-index: 2000;
+}
+.users-layout {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.users-layout > * { min-width: 0; }
+#all-keys[aria-pressed="true"] { color: var(--primary); border-color: var(--primary); }
+.user-detail-summary:empty { display: none; }
+@media (max-width: 900px) {
+  .users-layout { grid-template-columns: minmax(0, 1fr); }
+}
+.user-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 560px;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+.user-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: border-color 0.1s ease, background-color 0.1s ease;
+  text-align: left;
+}
+.user-item:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+}
+.user-item.active {
+  border-color: var(--primary);
+  background: var(--primary-subtle);
+}
+.user-item-id {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-item-email {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-item-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.spend-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+.spend-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 2px;
+}
+.spend-bar-fill.warn { background: var(--warning); }
+.spend-bar-fill.danger { background: var(--danger); }
+.user-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.user-detail-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.user-summary-box {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.user-summary-box .label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.model-access .model-chip {
+  display: inline-flex;
+  margin: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.model-access .model-chip[hidden] { display: none; }
+.model-chip input {
+  margin: 0;
+  width: auto;
+  cursor: pointer;
 }
 </style>
 </head>
@@ -792,42 +924,36 @@ tr:hover { background-color: var(--bg-subtle); }
   </div>
 
   <div id="tab-users" class="tab-content">
-    <div class="card" style="margin-bottom: 24px;">
-      <div class="action-bar">
-        <h2>Users</h2>
-        <button class="btn btn-sm" onclick="openUserModal()">Create User</button>
-      </div>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>User ID</th><th>Email</th><th>Spend</th><th>Budget</th><th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="users-body">
-            <tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Loading users...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="action-bar">
-        <h2>API Keys</h2>
-        <button class="btn btn-sm" onclick="openKeyModal()">Create Key</button>
-      </div>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Spend</th><th>Budget</th><th>Expires</th><th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="keys-body">
-            <tr><td colspan="8" style="text-align:center; color:var(--text-muted);">Loading API keys...</td></tr>
-          </tbody>
-        </table>
-      </div>
+    <div class="users-layout">
+      <aside class="card" aria-label="User roster">
+        <div class="action-bar">
+          <h2>Users</h2>
+          <button class="btn btn-sm" onclick="openUserModal()">Create User</button>
+        </div>
+        <button class="btn btn-secondary" id="all-keys" aria-pressed="true" onclick="selectUser(null)">All Keys</button>
+        <p id="users-status" role="status">Loading users...</p>
+        <div id="user-list" class="user-list"></div>
+      </aside>
+      <section class="card" aria-labelledby="access-title">
+        <div class="user-detail-header">
+          <div>
+            <h2 id="access-title">All API Keys</h2>
+            <p id="access-email" class="metric-sub"></p>
+          </div>
+          <div id="user-actions"></div>
+        </div>
+        <div id="user-summary" class="user-detail-summary"></div>
+        <div class="action-bar">
+          <p id="keys-count" class="metric-sub" role="status"></p>
+          <button class="btn btn-sm" onclick="openKeyModal(selectedUserId ?? '')">Create Key</button>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead><tr><th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Spend / Budget</th><th>Expires</th><th>Actions</th></tr></thead>
+            <tbody id="keys-body"><tr><td colspan="7">Loading API keys...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </div>
 </div>
@@ -909,9 +1035,21 @@ tr:hover { background-color: var(--bg-subtle); }
       </div>
       <fieldset class="model-access">
         <legend>Model access</legend>
-        <label><input type="radio" name="model-access" id="key-all-models" value="all" checked> All models (including future models)</label>
-        <label><input type="radio" name="model-access" id="key-selected-models" value="selected"> Selected models</label>
-        <div id="key-models" class="model-options" hidden></div>
+        <div class="input-group">
+          <label for="key-model-access">Allowed models</label>
+          <select id="key-model-access">
+            <option value="all">All models (including future models)</option>
+            <option value="selected">Selected models only</option>
+          </select>
+        </div>
+        <div id="key-model-selector" hidden>
+          <div class="input-group">
+            <label for="key-model-search">Find models</label>
+            <input type="search" id="key-model-search" placeholder="Filter installed models">
+          </div>
+          <p id="key-model-count" role="status">0 models selected</p>
+          <div id="key-models" class="model-chips"></div>
+        </div>
       </fieldset>
       <div class="input-group">
         <label for="key-spend">Budget (USD, optional)</label>
@@ -1154,12 +1292,13 @@ async function openKeyModal(userId = '') {
   users.replaceChildren();
   users.disabled = true;
   models.replaceChildren();
-  models.hidden = true;
+  document.getElementById('key-model-selector').hidden = true;
+  document.getElementById('key-model-count').textContent = '0 models selected';
   document.getElementById('key-submit').disabled = true;
   error.textContent = 'Loading users and installed models...';
   openDialog('key-modal');
   try {
-    const [u, m] = await Promise.all([api('/api/users'), api('/api/models')]);
+    const [u, m] = await Promise.all([cachedUsers === null ? api('/api/users') : Promise.resolve({users: cachedUsers}), api('/api/models')]);
     if (modal.load !== load) return;
     if (!Array.isArray(u.users) || !Array.isArray(m.models)) throw new Error('Invalid users or models response');
     const placeholder = document.createElement('option');
@@ -1173,9 +1312,11 @@ async function openKeyModal(userId = '') {
       users.append(option);
     });
     users.value = userId;
-    users.disabled = false;
+    users.disabled = !!userId;
+    if (userId && users.value !== userId) throw new Error('Selected user is no longer available. Refresh the user roster.');
     m.models.forEach(model => {
       const label = document.createElement('label');
+      label.className = 'model-chip';
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.value = model.name;
@@ -1221,10 +1362,18 @@ document.addEventListener('keydown', event => {
   }
 });
 
-['key-all-models', 'key-selected-models'].forEach(id => {
-  document.getElementById(id).addEventListener('change', () => {
-    document.getElementById('key-models').hidden = document.getElementById('key-all-models').checked;
+document.getElementById('key-model-access').addEventListener('change', () => {
+  document.getElementById('key-model-selector').hidden = document.getElementById('key-model-access').value === 'all';
+});
+document.getElementById('key-model-search').addEventListener('input', event => {
+  const query = event.target.value.toLowerCase();
+  document.querySelectorAll('#key-models label').forEach(label => {
+    label.hidden = !label.textContent.toLowerCase().includes(query);
   });
+});
+document.getElementById('key-models').addEventListener('change', () => {
+  const count = document.querySelectorAll('#key-models input:checked').length;
+  document.getElementById('key-model-count').textContent = count + ' models selected';
 });
 
 async function runInspect() {
@@ -1322,19 +1471,76 @@ function actionButton(cell, text, danger, action) {
   cell.append(button);
 }
 
+let cachedUsers = null;
+let selectedUserId = null;
+let keyCounts = null;
+let usersLoad = 0;
+let keysLoad = 0;
+
+function budgetMarkup(spend, budget) {
+  const used = Number(spend ?? 0);
+  const limit = budget == null ? null : Number(budget);
+  if (!Number.isFinite(used) || (limit !== null && (!Number.isFinite(limit) || limit < 0))) return 'Budget unavailable';
+  const text = '$' + used.toFixed(2) + ' / ' + (limit === null ? 'Unlimited' : '$' + limit.toFixed(2));
+  if (limit === null) return text;
+  const percent = limit === 0 ? 100 : Math.max(0, used / limit * 100);
+  const state = percent >= 100 ? 'danger' : percent >= 80 ? 'warn' : '';
+  const status = percent >= 100 ? 'Limit reached' : percent >= 80 ? 'Approaching limit' : Math.round(percent) + '% used';
+  return text + '<div class="spend-bar" aria-hidden="true"><div class="spend-bar-fill ' + state + '" style="width:' + Math.min(100, percent) + '%"></div></div><span class="metric-sub">' + status + '</span>';
+}
+
+function renderUsers() {
+  const list = document.getElementById('user-list');
+  list.replaceChildren();
+  (cachedUsers || []).forEach(user => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'user-item' + (selectedUserId === user.user_id ? ' active' : '');
+    button.setAttribute('aria-pressed', String(selectedUserId === user.user_id));
+    const activeCount = keyCounts?.get(user.user_id) || 0;
+    const count = keyCounts === null ? 'Keys unavailable' : activeCount === 1 ? '1 active key' : activeCount + ' active keys';
+    button.innerHTML = '<span class="user-item-id">' + escapeHTML(user.user_id) + '</span><span class="user-item-email">' + escapeHTML(user.user_email || 'No email') + '</span><span class="user-item-meta" title="Unexpired, unblocked managed keys; quotas may still restrict usage">' + count + '</span><div>' + budgetMarkup(user.spend, user.max_budget) + '</div>';
+    button.addEventListener('click', () => selectUser(user.user_id));
+    list.append(button);
+  });
+  document.getElementById('all-keys').setAttribute('aria-pressed', String(selectedUserId === null));
+  const user = (cachedUsers || []).find(user => user.user_id === selectedUserId);
+  document.getElementById('access-title').textContent = user ? user.user_id : 'All API Keys';
+  document.getElementById('access-email').textContent = user?.user_email || '';
+  const summary = document.getElementById('user-summary');
+  summary.replaceChildren();
+  if (user) {
+    const box = document.createElement('div');
+    box.className = 'user-summary-box';
+    box.innerHTML = '<div class="label">Spend / Budget</div>' + budgetMarkup(user.spend, user.max_budget);
+    summary.append(box);
+  }
+  const actions = document.getElementById('user-actions');
+  actions.replaceChildren();
+  if (user) actionButton(actions, 'Delete User', true, button => deleteUser(user.user_id, button));
+}
+
+function selectUser(userId) {
+  selectedUserId = userId;
+  renderUsers();
+  loadKeys();
+}
+
 async function loadUsers() {
-  const body = document.getElementById('users-body');
+  const load = ++usersLoad;
+  const status = document.getElementById('users-status');
+  status.textContent = 'Loading users...';
   try {
     const d = await api('/api/users');
+    if (load !== usersLoad) return;
     if (!Array.isArray(d.users)) throw new Error('Invalid users response');
-    body.replaceChildren();
-    if (!d.users.length) tableMessage(body, 5, 'No users');
-    d.users.forEach(u => {
-      const actions = tableRow(body, [u.user_id, u.user_email || '-', '$' + Number(u.spend || 0).toFixed(2), u.max_budget != null ? '$' + Number(u.max_budget).toFixed(2) : 'unlimited']);
-      actionButton(actions, 'Create Key', false, () => openKeyModal(u.user_id));
-      actionButton(actions, 'Delete', true, button => deleteUser(u.user_id, button));
-    });
-  } catch (err) { tableMessage(body, 5, 'Unable to load users: ' + err.message); }
+    cachedUsers = d.users;
+    if (selectedUserId !== null && !cachedUsers.some(user => user.user_id === selectedUserId)) selectUser(null);
+    renderUsers();
+    status.textContent = cachedUsers.length ? '' : 'No users. Create a user to issue API keys.';
+  } catch (err) {
+    if (load === usersLoad) status.textContent = 'Unable to refresh users: ' + err.message;
+  }
 }
 
 document.getElementById('user-form').addEventListener('submit', event => {
@@ -1374,6 +1580,7 @@ async function deleteUser(uid, button) {
   try {
     await api('/api/users/' + encodeURIComponent(uid), {method: 'DELETE'});
     showToast('Removed user and their API keys');
+    if (selectedUserId === uid) selectedUserId = null;
     loadUsers();
     loadKeys();
   } catch (err) { alert(err.message); }
@@ -1382,18 +1589,39 @@ async function deleteUser(uid, button) {
 
 async function loadKeys() {
   const body = document.getElementById('keys-body');
+  const load = ++keysLoad;
+  const userId = selectedUserId;
+  tableMessage(body, 7, 'Loading API keys...');
   try {
-    const d = await api('/api/keys');
-    if (!Array.isArray(d.keys)) throw new Error('Invalid keys response');
+    const path = userId === null ? '/api/keys' : '/api/keys?user_id=' + encodeURIComponent(userId);
+    const [d, all] = await Promise.all([api(path), userId !== null ? api('/api/keys') : Promise.resolve(null)]);
+    if (load !== keysLoad) return;
+    if (!Array.isArray(d.keys) || (all && !Array.isArray(all.keys))) throw new Error('Invalid keys response');
+    const countKeys = userId === null ? d.keys : all?.keys;
+    if (countKeys) {
+      keyCounts = new Map();
+      countKeys.forEach(key => {
+        if (key.blocked || (key.expires && Date.parse(key.expires) <= Date.now())) return;
+        keyCounts.set(key.user_id, (keyCounts.get(key.user_id) || 0) + 1);
+      });
+      renderUsers();
+    }
     body.replaceChildren();
-    if (!d.keys.length) tableMessage(body, 8, 'No active API keys found');
+    document.getElementById('keys-count').textContent = d.keys.length === 1 ? '1 key' : d.keys.length + ' keys';
+    if (!d.keys.length) tableMessage(body, 7, 'No API keys found');
     d.keys.forEach(k => {
       const models = Array.isArray(k.models) && k.models.length ? k.models.join(', ') : 'All models (including future models)';
-      const actions = tableRow(body, [k.key_alias || '-', k.key_name || '-', k.user_id || '-', models, '$' + Number(k.spend || 0).toFixed(2), k.max_budget != null ? '$' + Number(k.max_budget).toFixed(2) : 'unlimited', k.expires || 'never']);
+      const actions = tableRow(body, [k.key_alias || '-', k.key_name || '-', k.user_id || '-', models, '', k.expires || 'never']);
+      actions.parentElement.cells[4].innerHTML = budgetMarkup(k.spend, k.max_budget);
       actionButton(actions, 'Revoke', true, button => revokeKey(k.token, button));
       if (!k.token) actions.lastElementChild.disabled = true;
     });
-  } catch (err) { tableMessage(body, 8, 'Unable to load API keys: ' + err.message); }
+  } catch (err) {
+    if (load !== keysLoad) return;
+    keyCounts = null;
+    renderUsers();
+    tableMessage(body, 7, 'Unable to load API keys: ' + err.message);
+  }
 }
 
 document.getElementById('key-form').addEventListener('submit', event => {
@@ -1407,9 +1635,10 @@ async function submitCreateKey() {
   if (button.disabled || form.dataset.busy || !form.reportValidity()) return;
   const uid = document.getElementById('key-user-id').value;
   const alias = document.getElementById('key-alias').value.trim() || undefined;
-  const selected = document.getElementById('key-selected-models').checked;
+  const selected = document.getElementById('key-model-access').value === 'selected';
   const models = selected ? Array.from(document.querySelectorAll('#key-models input:checked'), checkbox => checkbox.value) : [];
   const error = document.getElementById('key-error');
+  if (!uid) { error.textContent = 'Select a user.'; return; }
   if (selected && !models.length) { error.textContent = 'Select at least one model, or choose All models.'; return; }
   const spend = document.getElementById('key-spend').value || undefined;
   const duration = document.getElementById('key-duration').value.trim() || undefined;
