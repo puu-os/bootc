@@ -115,7 +115,7 @@ def background_pull_worker(repo_id: str, name: str | None, revision: str, force:
 
 
 class OksaWebHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "OksaWeb/1.0"
+    server_version = "OKSAWeb/1.0"
 
     def send_json(self, status: int, data: dict) -> None:
         payload = json.dumps(data).encode("utf-8")
@@ -428,7 +428,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Oksa Web</title>
+<title>OKSA Web</title>
 <style>
 :root {
   --bg-base: #181825;
@@ -610,7 +610,7 @@ tr:hover { background-color: rgba(255,255,255,0.02); }
 
 <header>
   <div class="brand">
-    <h1>Oksa Web</h1>
+    <h1>OKSA Web</h1>
   </div>
 </header>
 
@@ -1392,7 +1392,7 @@ loadMonitoring();
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Oksa Web")
+    parser = argparse.ArgumentParser(description="OKSA Web")
     parser.add_argument("--host", default="0.0.0.0", help="Listen host address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8088, help="Listen port (default: 8088)")
     args = parser.parse_args()
@@ -1402,11 +1402,11 @@ def main() -> None:
 
     server_address = (args.host, args.port)
     httpd = ThreadedHTTPServer(server_address, OksaWebHandler)
-    print(f"Oksa Web service listening on http://{args.host}:{args.port}")
+    print(f"OKSA Web service listening on http://{args.host}:{args.port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down Oksa Web service.")
+        print("\nShutting down OKSA Web service.")
         httpd.server_close()
 
 
