@@ -501,6 +501,16 @@ header {
 }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand h1 { font-size: 1.1rem; font-weight: 700; letter-spacing: 0.02em; color: var(--text); }
+.header-meta { display: flex; align-items: center; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
+.status-indicator { display: inline-flex; align-items: center; gap: 6px; }
+.status-indicator::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--success);
+}
 nav {
   display: flex;
   gap: 4px;
@@ -532,6 +542,8 @@ nav {
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.metric-card h2 { margin-bottom: 8px; }
+.metric-card .metric-sub { margin-top: 2px; min-height: 1em; }
 .card {
   background-color: var(--bg-surface);
   border: 1px solid var(--border);
@@ -541,6 +553,15 @@ nav {
 .card h2 { font-size: 0.95rem; font-weight: 600; margin-bottom: 12px; color: var(--text); }
 .metric-value { font-size: 1.5rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.2; }
 .metric-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+.metric-value.warn { color: var(--warning); }
+.metric-value.crit { color: var(--danger); }
+.bar { display: inline-flex; align-items: center; gap: 8px; min-width: 90px; white-space: nowrap; }
+.bar-track { display: inline-block; width: 64px; height: 5px; background-color: var(--bg-subtle); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; vertical-align: middle; }
+.bar-fill { display: block; height: 100%; background-color: var(--primary); }
+.bar-fill.warn { background-color: var(--warning); }
+.bar-fill.crit { background-color: var(--danger); }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.status-indicator.offline::before { background-color: var(--danger); }
 .table-container { overflow-x: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.8125rem; }
 th {
@@ -885,6 +906,10 @@ tr:hover { background-color: var(--bg-subtle); }
   <div class="brand">
     <h1>OKSA Web</h1>
   </div>
+  <div class="header-meta">
+    <span class="status-indicator" id="host-status">Host Online</span>
+    <span id="mon-updated" role="status"></span>
+  </div>
 </header>
 
 <nav>
@@ -896,22 +921,22 @@ tr:hover { background-color: var(--bg-subtle); }
 <div class="container">
   <div id="tab-monitoring" class="tab-content active">
     <div class="grid">
-      <div class="card">
+      <div class="card metric-card">
         <h2>Host Memory</h2>
         <div class="metric-value" id="host-mem-val">-</div>
         <div class="metric-sub" id="host-mem-sub"></div>
       </div>
-      <div class="card">
+      <div class="card metric-card">
         <h2>Model</h2>
         <div class="metric-value" id="active-model-val">-</div>
         <div class="metric-sub" id="active-model-sub"></div>
       </div>
-      <div class="card">
+      <div class="card metric-card">
         <h2>Inference Requests</h2>
         <div class="metric-value" id="inf-requests-val">-</div>
         <div class="metric-sub" id="inf-requests-sub">Running / Waiting</div>
       </div>
-      <div class="card">
+      <div class="card metric-card">
         <h2>KV Cache Usage</h2>
         <div class="metric-value" id="kv-cache-val">-</div>
       </div>
@@ -923,11 +948,11 @@ tr:hover { background-color: var(--bg-subtle); }
         <table>
           <thead>
             <tr>
-              <th>Index</th><th>GPU</th><th>Usage</th><th>VRAM Used</th><th>VRAM Total</th><th>Temperature</th><th>Power</th>
+              <th>Index</th><th>GPU</th><th class="num">Usage</th><th>VRAM Used / Total</th><th class="num">Temperature</th><th class="num">Power</th>
             </tr>
           </thead>
           <tbody id="gpus-body">
-            <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No GPU data</td></tr>
+            <tr><td colspan="6" style="text-align:center; color:var(--text-muted);">No GPU data</td></tr>
           </tbody>
         </table>
       </div>
@@ -939,7 +964,7 @@ tr:hover { background-color: var(--bg-subtle); }
         <table>
           <thead>
             <tr>
-              <th>Pod</th><th>Status</th><th>Ready</th><th>Restarts</th>
+              <th>Pod</th><th>Status</th><th>Ready</th><th class="num">Restarts</th>
             </tr>
           </thead>
           <tbody id="workloads-body">
@@ -1181,56 +1206,93 @@ function switchTab(tab) {
   if (tab === 'users') { loadUsers(); loadKeys(); }
 }
 
+function metricLevel(pct) {
+  return pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : 'ok';
+}
+
+function setMetricLevel(id, level) {
+  const el = document.getElementById(id);
+  el.classList.toggle('warn', level === 'warn');
+  el.classList.toggle('crit', level === 'crit');
+}
+
+function usageBar(pct) {
+  const level = metricLevel(pct);
+  return '<span class="bar"><span class="bar-track"><span class="bar-fill' + (level !== 'ok' ? ' ' + level : '') + '" style="width:' + Math.min(Math.round(pct), 100) + '%"></span></span>' + Math.round(pct) + '%</span>';
+}
+
 async function loadMonitoring() {
+  const hostStatus = document.getElementById('host-status');
+  const updated = document.getElementById('mon-updated');
   try {
     const res = await fetch('/api/status');
     const data = await res.json();
-    if (!data.ok) return;
-    const s = data.status;
+    if (!data.ok) throw new Error('status unavailable');
+    const s = data.status || {};
 
-    if (s.host_memory) {
-      document.getElementById('host-mem-val').textContent = s.host_memory.used_mib + ' / ' + s.host_memory.total_mib + ' MiB';
-      document.getElementById('host-mem-sub').textContent = s.host_memory.used_pct + '% memory used';
+    hostStatus.textContent = 'Host Online';
+    hostStatus.classList.remove('offline');
+
+    const mem = s.host_memory;
+    if (mem) {
+      document.getElementById('host-mem-val').textContent = mem.used_mib + ' / ' + mem.total_mib + ' MiB';
+      document.getElementById('host-mem-sub').textContent = mem.used_pct + '% memory used';
+      setMetricLevel('host-mem-val', metricLevel(mem.used_pct || 0));
     }
 
     document.getElementById('active-model-val').textContent = s.active_model || 'None';
     document.getElementById('active-model-sub').textContent = 'Selected: ' + (s.selected_model || 'None');
 
     const m = s.metrics || {};
-    document.getElementById('inf-requests-val').textContent = (m.running_requests || 0) + ' / ' + (m.waiting_requests || 0);
-    document.getElementById('kv-cache-val').textContent = (m.kv_cache_usage_pct || 0) + '%';
+    const waiting = m.waiting_requests || 0;
+    document.getElementById('inf-requests-val').textContent = (m.running_requests || 0) + ' / ' + waiting;
+    setMetricLevel('inf-requests-val', waiting > 0 ? 'warn' : 'ok');
+    document.getElementById('inf-requests-sub').textContent = waiting > 0 ? 'Running / Waiting (queued)' : 'Running / Waiting';
+
+    const kvPct = m.kv_cache_usage_pct || 0;
+    document.getElementById('kv-cache-val').textContent = kvPct + '%';
+    setMetricLevel('kv-cache-val', metricLevel(kvPct));
 
     const gBody = document.getElementById('gpus-body');
+    gBody.replaceChildren();
     if (s.gpus && s.gpus.length > 0) {
-      gBody.innerHTML = s.gpus.map(g => `
-        <tr>
-          <td>[${escapeHTML(g.index)}]</td>
-          <td><strong>${escapeHTML(g.name || 'NVIDIA')}</strong></td>
-          <td>${escapeHTML(g.gpu_util_pct || 0)}%</td>
-          <td>${Math.round(g.memory_used_mib || 0)} MiB</td>
-          <td>${Math.round(g.memory_total_mib || 0)} MiB</td>
-          <td>${escapeHTML(g.temperature_c || 0)}°C</td>
-          <td>${g.power_w ? Number(g.power_w).toFixed(1) + 'W' : '-'}</td>
-        </tr>
-      `).join('');
+      s.gpus.forEach(g => {
+        const row = tableRow(gBody, ['[' + (g.index ?? '-') + ']', g.name || 'NVIDIA', '', '', '', '']).parentElement;
+        row.cells[2].innerHTML = usageBar(g.gpu_util_pct || 0);
+        const vramPct = g.memory_total_mib ? (g.memory_used_mib || 0) / g.memory_total_mib * 100 : 0;
+        row.cells[3].innerHTML = usageBar(vramPct) + ' ' + Math.round(g.memory_used_mib || 0) + ' / ' + Math.round(g.memory_total_mib || 0) + ' MiB';
+        row.cells[4].textContent = (g.temperature_c || 0) + '°C';
+        row.cells[5].textContent = g.power_w ? Number(g.power_w).toFixed(1) + ' W' : '-';
+        row.cells[4].classList.add('num');
+        row.cells[5].classList.add('num');
+      });
     } else {
-      gBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No GPU data</td></tr>';
+      tableMessage(gBody, 6, 'No GPU data');
     }
 
     const wBody = document.getElementById('workloads-body');
+    wBody.replaceChildren();
     if (s.workloads && s.workloads.length > 0) {
-      wBody.innerHTML = s.workloads.map(w => `
-        <tr>
-          <td>${escapeHTML(w.name)}</td>
-          <td><span class="pill ${w.phase === 'Running' ? 'ok' : 'insufficient'}">${escapeHTML(w.phase)}</span></td>
-          <td>${w.ready ? 'Yes' : 'No'}</td>
-          <td>${escapeHTML(w.restarts || 0)}</td>
-        </tr>
-      `).join('');
+      s.workloads.forEach(w => {
+        const row = tableRow(wBody, [w.name, '', '', '']).parentElement;
+        const pill = document.createElement('span');
+        pill.className = 'pill ' + (w.phase === 'Running' ? 'ok' : 'insufficient');
+        pill.textContent = w.phase;
+        row.cells[1].replaceChildren(pill);
+        row.cells[2].textContent = w.ready ? 'Yes' : 'No';
+        row.cells[3].textContent = String(w.restarts || 0);
+        row.cells[3].classList.add('num');
+      });
     } else {
-      wBody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No workloads reported</td></tr>';
+      tableMessage(wBody, 4, 'No workloads reported');
     }
-  } catch (err) {}
+
+    updated.textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch (err) {
+    hostStatus.textContent = 'Host Unreachable';
+    hostStatus.classList.add('offline');
+    updated.textContent = 'Last update failed';
+  }
 }
 
 let cachedModels = null;
