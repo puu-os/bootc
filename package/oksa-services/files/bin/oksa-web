@@ -687,6 +687,63 @@ tr:hover { background-color: var(--bg-subtle); }
   display: none;
   z-index: 2000;
 }
+.pull-log {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.inspect-result {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 14px;
+}
+.inspect-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.inspect-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.8125rem;
+}
+.inspect-cell .label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.inspect-fit {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.8125rem;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.inspect-fit.insufficient { color: var(--text); }
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+.checkbox-row input { width: auto; margin: 0; }
 .users-layout {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
@@ -894,11 +951,14 @@ tr:hover { background-color: var(--bg-subtle); }
   </div>
 
   <div id="tab-models" class="tab-content">
-    <div class="card" style="margin-bottom: 24px;">
+    <div id="models-card" class="card" style="margin-bottom: 24px;">
       <div class="action-bar">
-        <h2>Models</h2>
-        <div>
-          <button class="btn btn-secondary btn-sm" onclick="stopServing()">Stop</button>
+        <div class="action-bar-heading">
+          <h2>Models</h2>
+          <p id="models-summary" class="metric-sub">Loading catalog...</p>
+        </div>
+        <div class="action-bar-actions">
+          <button class="btn btn-secondary btn-sm" id="models-stop" onclick="stopServing(this)" disabled>Stop</button>
           <button class="btn btn-sm" onclick="openAddModal()">Download</button>
         </div>
       </div>
@@ -906,20 +966,24 @@ tr:hover { background-color: var(--bg-subtle); }
         <table>
           <thead>
             <tr>
-              <th>Name</th><th>Repository</th><th>Size</th><th>Quantization</th><th>Compatibility</th><th>Active</th><th>Actions</th>
+              <th>Name</th><th>Repository</th><th>Storage</th><th>Quantization</th><th>State</th><th>Actions</th>
             </tr>
           </thead>
           <tbody id="models-body">
-            <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">Loading models...</td></tr>
+            <tr><td colspan="6">Loading models...</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <div id="pull-status-card" class="card" style="display:none; border-color:var(--primary);">
-      <h2>Download</h2>
-      <p id="pull-repo-text" style="font-weight:600; margin-bottom:8px;"></p>
-      <div style="background:var(--bg-card); padding:12px; border-radius:6px; font-family:monospace; font-size:0.8rem;" id="pull-log-text"></div>
+    <div id="pull-status-card" class="card" style="display:none;">
+      <div class="action-bar">
+        <h2>Download Activity</h2>
+        <button class="btn btn-secondary btn-sm" id="pull-log-toggle" onclick="togglePullLog()" hidden>Show Log</button>
+      </div>
+      <p id="pull-repo-text" style="font-weight:600;"></p>
+      <p id="pull-summary" class="metric-sub" role="status"></p>
+      <div class="pull-log" id="pull-log-text" hidden></div>
     </div>
   </div>
 
@@ -959,39 +1023,42 @@ tr:hover { background-color: var(--bg-subtle); }
 </div>
 
 <div id="add-modal" class="modal-overlay">
-  <div class="modal">
-    <h3>Download Model</h3>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-title" tabindex="-1">
+    <h3 id="add-title">Download Model</h3>
     <div class="input-group">
-      <label>Hugging Face Repository</label>
+      <label for="add-repo">Hugging Face Repository</label>
       <input type="text" id="add-repo" placeholder="mistralai/Mistral-7B-Instruct-v0.3">
     </div>
     <div class="input-group">
-      <label>Storage ID (optional)</label>
+      <label for="add-name">Storage ID (optional)</label>
       <input type="text" id="add-name" placeholder="mistral-7b">
     </div>
     <div class="input-group">
-      <label>Revision</label>
+      <label for="add-rev">Revision</label>
       <input type="text" id="add-rev" value="main">
     </div>
 
-    <div id="inspect-result" style="display:none; background:var(--bg-card); padding:12px; border-radius:6px; margin-bottom:14px; font-size:0.85rem;">
-      <p id="inspect-arch"></p>
-      <p id="inspect-storage"></p>
-      <p id="inspect-vram"></p>
-      <div id="inspect-fit" style="margin-top:8px;"></div>
+    <div id="inspect-result" class="inspect-result" hidden>
+      <div class="inspect-grid">
+        <div class="inspect-cell"><span class="label">Architecture</span><span id="inspect-arch">-</span></div>
+        <div class="inspect-cell"><span class="label">Storage</span><span id="inspect-storage">-</span></div>
+        <div class="inspect-cell"><span class="label">Estimated RAM/VRAM</span><span id="inspect-vram">-</span></div>
+      </div>
+      <div id="inspect-fit" class="inspect-fit"></div>
     </div>
 
     <div class="input-group" id="force-group" style="display:none;">
-      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-        <input type="checkbox" id="add-force" style="width:auto;">
-        Download despite compatibility warning
+      <label class="checkbox-row">
+        <input type="checkbox" id="add-force">
+        <span>Download despite compatibility warning</span>
       </label>
     </div>
 
+    <p id="add-error" class="form-error" role="alert"></p>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('add-modal')">Cancel</button>
-      <button class="btn btn-secondary" onclick="runInspect()">Check Compatibility</button>
-      <button class="btn" id="btn-pull" onclick="startPull()" disabled>Download</button>
+      <button class="btn btn-secondary" onclick="runInspect(this)">Check Compatibility</button>
+      <button class="btn" id="btn-pull" onclick="startPull(this)" disabled>Download</button>
     </div>
   </div>
 </div>
@@ -1166,102 +1233,131 @@ async function loadMonitoring() {
   } catch (err) {}
 }
 
+let cachedModels = null;
+
 async function loadModels() {
   try {
-    const res = await fetch('/api/models');
-    const data = await res.json();
-    if (!data.ok) return;
-
+    const data = await api('/api/models');
+    cachedModels = data.models || [];
     const mBody = document.getElementById('models-body');
-    if (data.models && data.models.length > 0) {
-      mBody.innerHTML = data.models.map(m => `
-        <tr>
-          <td><strong>${escapeHTML(m.name)}</strong></td>
-          <td>${escapeHTML(m.repo_id)}</td>
-          <td>${escapeHTML(m.storage_mib)} MiB</td>
-          <td>${escapeHTML(m.quantization)}</td>
-          <td><span class="pill ${m.capabilities === 'ok' ? 'ok' : 'insufficient'}">${escapeHTML(m.capabilities)}</span></td>
-          <td>${m.active ? '<span class="pill active">Active</span>' : '-'}</td>
-          <td>
-            ${m.active ?
-              `<button class="btn btn-sm btn-secondary" onclick="stopServing()">Stop</button>` :
-              `<button class="btn btn-sm" data-start="${escapeHTML(m.id)}">Start</button>`}
-            ${m.removable !== false ? `<button class="btn btn-sm btn-danger" style="margin-left:6px;" data-remove="${escapeHTML(m.id)}">Delete</button>` : ''}
-          </td>
-        </tr>
-      `).join('');
-      mBody.querySelectorAll('[data-start]').forEach(button => button.addEventListener('click', () => startModel(button.dataset.start)));
-      mBody.querySelectorAll('[data-remove]').forEach(button => button.addEventListener('click', () => removeModel(button.dataset.remove)));
-    } else {
-      mBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No models installed</td></tr>';
-    }
-
+    mBody.replaceChildren();
+    const active = cachedModels.find(model => model.active);
+    document.getElementById('models-stop').disabled = !active;
+    document.getElementById('models-summary').textContent = active
+      ? 'Serving ' + active.name
+      : data.serving_enabled === false
+        ? 'Serving is stopped. No model is loaded.'
+        : 'No model is serving.';
+    if (!cachedModels.length) { tableMessage(mBody, 6, 'No models installed'); return checkPullStatus(); }
+    cachedModels.forEach(model => {
+      const row = mBody.insertRow();
+      row.insertCell().innerHTML = '<strong>' + escapeHTML(model.name) + '</strong>';
+      row.insertCell().textContent = model.repo_id;
+      row.insertCell().textContent = formatMiB(model.storage_mib);
+      row.insertCell().textContent = model.quantization || 'none';
+      const state = row.insertCell();
+      const statePill = document.createElement('span');
+      statePill.className = 'pill ' + (model.active ? 'active' : model.capabilities === 'ok' ? 'ok' : 'insufficient');
+      statePill.textContent = model.active ? 'Serving' : model.capabilities === 'ok' ? 'Ready' : 'Insufficient VRAM';
+      state.append(statePill);
+      const actions = row.insertCell();
+      if (model.active) actionButton(actions, 'Stop', false, button => stopServing(button));
+      else actionButton(actions, 'Start', false, button => startModel(model.id, button));
+      if (model.removable !== false) actionButton(actions, 'Delete', true, button => removeModel(model.id, button));
+    });
     checkPullStatus();
-  } catch (err) {}
+  } catch (err) {
+    tableMessage(document.getElementById('models-body'), 6, 'Unable to load models: ' + err.message);
+  }
 }
+
+function formatMiB(value) {
+  const mib = Number(value) || 0;
+  if (!mib) return '-';
+  return mib >= 1024 ? (mib / 1024).toFixed(1) + ' GiB' : Math.round(mib) + ' MiB';
+}
+
+let pullWasRunning = false;
 
 async function checkPullStatus() {
   try {
-    const res = await fetch('/api/models/pull/status');
-    const data = await res.json();
-    if (!data.ok) return;
+    const data = await api('/api/models/pull/status');
     const p = data.pull;
     const pCard = document.getElementById('pull-status-card');
-    if (p && p.running) {
+    if (p && (p.running || p.complete || p.error)) {
       pCard.style.display = 'block';
-      document.getElementById('pull-repo-text').textContent = 'Downloading ' + p.repo_id + '...';
-      document.getElementById('pull-log-text').textContent = p.progress;
-    } else if (p && p.complete) {
-      pCard.style.display = 'block';
-      document.getElementById('pull-repo-text').textContent = 'Completed ' + p.repo_id;
-      document.getElementById('pull-log-text').textContent = p.progress;
+      document.getElementById('pull-repo-text').textContent = p.running
+        ? 'Downloading ' + p.repo_id
+        : p.error ? 'Download failed' : 'Completed ' + p.repo_id;
+      const summary = document.getElementById('pull-summary');
+      summary.textContent = p.running ? 'In progress' : p.error ? 'The download stopped early. Review the log.' : 'The model is now available in the catalog.';
+      summary.style.color = p.error ? 'var(--danger)' : '';
+      updatePullLog(p.progress || p.error || '');
+      if (pullWasRunning && !p.running) loadModels();
+      pullWasRunning = !!p.running;
     } else {
       pCard.style.display = 'none';
     }
   } catch (err) {}
 }
 
-async function startModel(name) {
+function updatePullLog(text) {
+  const log = document.getElementById('pull-log-text');
+  if (text && log.textContent !== text) log.textContent = text;
+  document.getElementById('pull-log-toggle').hidden = !log.textContent;
+}
+
+function togglePullLog() {
+  const log = document.getElementById('pull-log-text');
+  log.hidden = !log.hidden;
+  document.getElementById('pull-log-toggle').textContent = log.hidden ? 'Show Log' : 'Hide Log';
+}
+
+async function startModel(name, button) {
+  if (button) button.disabled = true;
   try {
-    const res = await fetch('/api/models/start', {
+    const d = await api('/api/models/start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: name})
     });
-    const d = await res.json();
-    if (d.ok) { showToast(d.message); loadModels(); }
-    else { alert(d.error || 'Failed to start model'); }
-  } catch (err) { alert(err); }
+    showToast(d.message);
+    await loadModels();
+  } catch (err) { alert(err.message); }
+  finally { if (button) button.disabled = false; }
 }
 
-async function stopServing() {
+async function stopServing(button) {
+  if (button) button.disabled = true;
   try {
-    const res = await fetch('/api/models/stop', {
+    const d = await api('/api/models/stop', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({})
     });
-    const d = await res.json();
-    if (d.ok) { showToast(d.message); loadModels(); }
-    else { alert(d.error || 'Failed to stop serving'); }
-  } catch (err) { alert(err); }
+    showToast(d.message);
+    await loadModels();
+  } catch (err) { alert(err.message); }
+  finally { if (button) button.disabled = false; }
 }
 
-async function removeModel(name) {
+async function removeModel(name, button) {
   if (!confirm('Remove model ' + name + '?')) return;
+  if (button) button.disabled = true;
   try {
-    const res = await fetch('/api/models/' + encodeURIComponent(name), { method: 'DELETE' });
-    const d = await res.json();
-    if (d.ok) { showToast(d.message); loadModels(); }
-    else { alert(d.error || 'Failed to remove model'); }
-  } catch (err) { alert(err); }
+    const d = await api('/api/models/' + encodeURIComponent(name), { method: 'DELETE' });
+    showToast(d.message);
+    await loadModels();
+  } catch (err) { alert(err.message); }
+  finally { if (button) button.disabled = false; }
 }
 
 function openAddModal() {
-  document.getElementById('inspect-result').style.display = 'none';
+  document.getElementById('add-error').textContent = '';
+  document.getElementById('inspect-result').hidden = true;
   document.getElementById('force-group').style.display = 'none';
   document.getElementById('btn-pull').disabled = true;
-  document.getElementById('add-modal').classList.add('open');
+  openDialog('add-modal');
 }
 
 function openDialog(id) {
@@ -1376,67 +1472,63 @@ document.getElementById('key-models').addEventListener('change', () => {
   document.getElementById('key-model-count').textContent = count + ' models selected';
 });
 
-async function runInspect() {
+async function runInspect(button) {
   const repo = document.getElementById('add-repo').value.trim();
   const rev = document.getElementById('add-rev').value.trim() || 'main';
-  if (!repo) { alert('Please enter a repository ID'); return; }
-
-  showToast('Checking compatibility...');
+  const error = document.getElementById('add-error');
+  if (!repo) { error.textContent = 'Enter a Hugging Face repository ID.'; return; }
+  error.textContent = '';
+  if (button) button.disabled = true;
   try {
-    const res = await fetch('/api/models/inspect', {
+    const d = await api('/api/models/inspect', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({repo_id: repo, revision: rev})
     });
-    const d = await res.json();
-    if (!d.ok) { alert(d.error || 'Compatibility check failed'); return; }
-
     const m = d.metadata;
-    document.getElementById('inspect-arch').textContent = 'Architecture: ' + (m.architectures ? m.architectures.join(', ') : 'unknown');
-    document.getElementById('inspect-storage').textContent = 'Storage: ~' + m.storage_mib + ' MiB';
-    document.getElementById('inspect-vram').textContent = 'Estimated RAM/VRAM: ~' + m.estimated_memory_mib + ' MiB';
-
-    const fitDiv = document.getElementById('inspect-fit');
+    document.getElementById('inspect-arch').textContent = m.architectures?.length ? m.architectures.join(', ') : 'unknown';
+    document.getElementById('inspect-storage').textContent = formatMiB(m.storage_mib);
+    document.getElementById('inspect-vram').textContent = formatMiB(m.estimated_memory_mib);
+    const fit = document.getElementById('inspect-fit');
     const forceGroup = document.getElementById('force-group');
     const btnPull = document.getElementById('btn-pull');
-
+    fit.className = 'inspect-fit';
     if (d.fits) {
-      fitDiv.innerHTML = '<span class="pill ok">Enough memory</span>';
+      fit.innerHTML = '<span class="pill ok">Fits available memory</span>';
       forceGroup.style.display = 'none';
       btnPull.disabled = false;
     } else {
-      fitDiv.innerHTML = '<span class="pill insufficient">Not compatible</span> ' + escapeHTML(d.reason);
+      fit.className = 'inspect-fit insufficient';
+      fit.innerHTML = '<span class="pill insufficient">Insufficient memory</span> <span>' + escapeHTML(d.reason) + '</span>';
       forceGroup.style.display = 'block';
       const forceCheck = document.getElementById('add-force');
       forceCheck.checked = false;
       forceCheck.onchange = () => { btnPull.disabled = !forceCheck.checked; };
       btnPull.disabled = true;
     }
-    document.getElementById('inspect-result').style.display = 'block';
-  } catch (err) { alert(err); }
+    document.getElementById('inspect-result').hidden = false;
+  } catch (err) { error.textContent = err.message; }
+  finally { if (button) button.disabled = false; }
 }
 
-async function startPull() {
+async function startPull(button) {
   const repo = document.getElementById('add-repo').value.trim();
   const name = document.getElementById('add-name').value.trim() || undefined;
   const rev = document.getElementById('add-rev').value.trim() || 'main';
   const force = document.getElementById('add-force').checked;
-
+  const error = document.getElementById('add-error');
+  if (button) button.disabled = true;
   try {
-    const res = await fetch('/api/models/pull', {
+    const d = await api('/api/models/pull', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({repo_id: repo, name: name, revision: rev, force: force})
     });
-    const d = await res.json();
-    if (d.ok) {
-      closeModal('add-modal');
-      showToast(d.message);
-      loadModels();
-    } else {
-      alert(d.error || 'Failed to start download');
-    }
-  } catch (err) { alert(err); }
+    closeModal('add-modal');
+    showToast(d.message);
+    await loadModels();
+  } catch (err) { error.textContent = err.message; }
+  finally { if (button) button.disabled = false; }
 }
 
 async function api(path, options) {
