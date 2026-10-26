@@ -21,6 +21,7 @@ for directory in (Path(__file__).resolve().parent, libexec_dir):
     if directory.is_dir() and str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 import oksa_model_serving as ms
+import oksa_settings as settings
 
 state_dir = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 
@@ -207,6 +208,16 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "pull": state_copy})
             return
 
+        if path == "/api/settings":
+            contact = settings.stored_contact()
+            self.send_json(200, {
+                "ok": True,
+                "settings": {settings.CONTACT_KEY: contact},
+                "effective_user_agent": settings.render_user_agent(contact),
+                "manifest_applied": settings.user_agent_manifest().is_file(),
+            })
+            return
+
         self.send_json(404, {"ok": False, "error": "Not Found"})
 
     def do_POST(self) -> None:
@@ -356,6 +367,35 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(500, {"ok": False, "error": "Failed to stop model workload"})
                 return
             self.send_json(200, {"ok": True, "message": "Model serving stopped"})
+            return
+
+        if path == "/api/settings":
+            raw_contact = body.get(settings.CONTACT_KEY, "")
+            if not isinstance(raw_contact, str):
+                self.send_json(400, {"ok": False, "error": "Contact must be a string"})
+                return
+            try:
+                contact = settings.validate_contact(raw_contact)
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "error": str(exc)})
+                return
+            store = settings.load()
+            if contact:
+                store[settings.CONTACT_KEY] = contact
+            else:
+                store.pop(settings.CONTACT_KEY, None)
+            try:
+                settings.save(store)
+            except OSError as exc:
+                self.send_json(500, {"ok": False, "error": f"Failed to store settings: {exc}"})
+                return
+            applied = settings.apply_user_agent(contact)
+            self.send_json(200, {
+                "ok": True,
+                "settings": {settings.CONTACT_KEY: contact},
+                "effective_user_agent": settings.render_user_agent(contact),
+                "applied": applied,
+            })
             return
 
         self.send_json(404, {"ok": False, "error": "Not Found"})
@@ -916,6 +956,7 @@ tr:hover { background-color: var(--bg-subtle); }
   <button class="nav-tab active" onclick="switchTab('monitoring')">Monitoring</button>
   <button class="nav-tab" onclick="switchTab('models')">Models</button>
   <button class="nav-tab" onclick="switchTab('users')">Users & API Keys</button>
+  <button class="nav-tab" onclick="switchTab('settings')">Settings</button>
 </nav>
 
 <div class="container">
@@ -1043,6 +1084,27 @@ tr:hover { background-color: var(--bg-subtle); }
           </table>
         </div>
       </section>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="tab-content">
+    <div class="card">
+      <div class="action-bar">
+        <div class="action-bar-heading">
+          <h2>Outbound HTTP Contact</h2>
+          <p class="metric-sub">Contact published in outbound User-Agent headers, for example when Open WebUI queries Wikimedia image search.</p>
+        </div>
+        <div class="action-bar-actions">
+          <button class="btn btn-secondary btn-sm" id="settings-clear" onclick="clearSettings(this)">Clear</button>
+          <button class="btn btn-sm" id="settings-save" onclick="saveSettings(this)">Save</button>
+        </div>
+      </div>
+      <div class="input-group">
+        <label for="settings-contact">Contact</label>
+        <input type="text" id="settings-contact" placeholder="https://helpdesk.example.org" autocomplete="off" spellcheck="false">
+      </div>
+      <p class="metric-sub" id="settings-effective">Effective User-Agent: -</p>
+      <p id="settings-error" class="form-error" role="alert"></p>
     </div>
   </div>
 </div>
@@ -1204,6 +1266,7 @@ function switchTab(tab) {
   if (tab === 'monitoring') loadMonitoring();
   if (tab === 'models') loadModels();
   if (tab === 'users') { loadUsers(); loadKeys(); }
+  if (tab === 'settings') loadSettings();
 }
 
 function metricLevel(pct) {
@@ -1844,6 +1907,50 @@ async function copyKey() {
     selection.addRange(range);
     document.getElementById('copy-status').textContent = 'Automatic copy unavailable. Key selected; press Ctrl+C or use your browser’s Copy command.';
   }
+}
+
+function showEffectiveUserAgent(value) {
+  document.getElementById('settings-effective').textContent = 'Effective User-Agent: ' + value;
+}
+
+async function loadSettings() {
+  const input = document.getElementById('settings-contact');
+  const error = document.getElementById('settings-error');
+  error.textContent = '';
+  try {
+    const data = await api('/api/settings');
+    input.value = (data.settings && data.settings.http_user_agent_contact) || '';
+    showEffectiveUserAgent(data.effective_user_agent || '-');
+  } catch (err) {
+    error.textContent = err.message;
+  }
+}
+
+async function storeSettings(contact, button) {
+  const error = document.getElementById('settings-error');
+  if (button.disabled) return;
+  button.disabled = true;
+  error.textContent = '';
+  try {
+    const data = await api('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({http_user_agent_contact: contact})
+    });
+    document.getElementById('settings-contact').value = (data.settings && data.settings.http_user_agent_contact) || '';
+    showEffectiveUserAgent(data.effective_user_agent || '-');
+    showToast(data.applied ? 'Saved outbound HTTP contact' : 'Saved outbound HTTP contact (applies at next install)');
+  } catch (err) { error.textContent = err.message; }
+  finally { button.disabled = false; }
+}
+
+function saveSettings(button) {
+  storeSettings(document.getElementById('settings-contact').value.trim(), button);
+}
+
+function clearSettings(button) {
+  document.getElementById('settings-contact').value = '';
+  storeSettings('', button);
 }
 
 setInterval(() => {
