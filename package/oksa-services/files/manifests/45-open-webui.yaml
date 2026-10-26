@@ -176,7 +176,7 @@ spec:
                                   term = ' '.join(term.split()) or query.strip()
                                   results: list[SearchResult] = []
                                   seen: set[str] = set()
-                                  headers = {'User-Agent': 'PuuOS-OpenWebUI/1.0 (https://puu.lan; support@puu.lan)'}
+                                  headers = {'User-Agent': 'PuuOS-OpenWebUI/1.0'}
 
                                   try:
                                       q = urllib.parse.quote(f"filetype:bitmap {term}")
