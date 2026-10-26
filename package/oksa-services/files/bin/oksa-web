@@ -255,6 +255,10 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(400, {"ok": False, "error": "user_id is required"})
                 return
             alias = body.get("alias")
+            if not isinstance(alias, str) or not alias.strip():
+                self.send_json(400, {"ok": False, "error": "alias is required"})
+                return
+            alias = alias.strip()
             models = body.get("models")
             if isinstance(models, str):
                 models = [m.strip() for m in models.split(",") if m.strip()]
@@ -663,8 +667,6 @@ tr:hover { background-color: var(--bg-subtle); }
 .btn-secondary:hover { background-color: var(--bg-subtle); border-color: var(--border-strong); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .form-error { color: var(--danger); margin-top: 10px; font-size: 0.8125rem; }
-.model-access { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
-.model-access label { display: block; margin: 6px 0; }
 .modal {
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -829,7 +831,7 @@ tr:hover { background-color: var(--bg-subtle); }
   overflow-y: auto;
   padding: 4px;
 }
-.model-access .model-chip {
+.model-chip {
   display: inline-flex;
   margin: 0;
   align-items: center;
@@ -841,7 +843,7 @@ tr:hover { background-color: var(--bg-subtle); }
   font-size: 0.75rem;
   cursor: pointer;
 }
-.model-access .model-chip[hidden] { display: none; }
+.model-chip[hidden] { display: none; }
 .model-chip input {
   margin: 0;
   width: auto;
@@ -1090,27 +1092,24 @@ tr:hover { background-color: var(--bg-subtle); }
         <select id="key-user-id" required disabled></select>
       </div>
       <div class="input-group">
-        <label for="key-alias">Name (optional)</label>
-        <input type="text" id="key-alias" placeholder="dev-key">
+        <label for="key-alias">Name</label>
+        <input type="text" id="key-alias" placeholder="dev-key" required>
       </div>
-      <fieldset class="model-access">
-        <legend>Model access</legend>
+      <div class="input-group">
+        <label for="key-model-access">Allowed models</label>
+        <select id="key-model-access">
+          <option value="all">All models (including future models)</option>
+          <option value="selected">Selected models only</option>
+        </select>
+      </div>
+      <div id="key-model-selector" hidden>
         <div class="input-group">
-          <label for="key-model-access">Allowed models</label>
-          <select id="key-model-access">
-            <option value="all">All models (including future models)</option>
-            <option value="selected">Selected models only</option>
-          </select>
+          <label for="key-model-search">Find models</label>
+          <input type="search" id="key-model-search" placeholder="Filter installed models">
         </div>
-        <div id="key-model-selector" hidden>
-          <div class="input-group">
-            <label for="key-model-search">Find models</label>
-            <input type="search" id="key-model-search" placeholder="Filter installed models">
-          </div>
-          <p id="key-model-count" role="status">0 models selected</p>
-          <div id="key-models" class="model-chips"></div>
-        </div>
-      </fieldset>
+        <p id="key-model-count" role="status">0 models selected</p>
+        <div id="key-models" class="model-chips"></div>
+      </div>
       <div class="input-group">
         <label for="key-spend">Budget (USD, optional)</label>
         <input type="number" min="0" step="0.01" id="key-spend" placeholder="50.00">
@@ -1727,11 +1726,12 @@ async function submitCreateKey() {
   const button = document.getElementById('key-submit');
   if (button.disabled || form.dataset.busy || !form.reportValidity()) return;
   const uid = document.getElementById('key-user-id').value;
-  const alias = document.getElementById('key-alias').value.trim() || undefined;
+  const alias = document.getElementById('key-alias').value.trim();
   const selected = document.getElementById('key-model-access').value === 'selected';
   const models = selected ? Array.from(document.querySelectorAll('#key-models input:checked'), checkbox => checkbox.value) : [];
   const error = document.getElementById('key-error');
   if (!uid) { error.textContent = 'Select a user.'; return; }
+  if (!alias) { error.textContent = 'Key name is required.'; return; }
   if (selected && !models.length) { error.textContent = 'Select at least one model, or choose All models.'; return; }
   const spend = document.getElementById('key-spend').value || undefined;
   const duration = document.getElementById('key-duration').value.trim() || undefined;
