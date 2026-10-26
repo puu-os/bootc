@@ -805,68 +805,6 @@ tr:hover { background-color: var(--bg-subtle); }
   font-size: 0.8125rem;
 }
 .checkbox-row input { width: auto; margin: 0; }
-.users-layout {
-  display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-.users-layout > * { min-width: 0; }
-#all-keys[aria-pressed="true"] { color: var(--primary); border-color: var(--primary); }
-.user-detail-summary:empty { display: none; }
-@media (max-width: 900px) {
-  .users-layout { grid-template-columns: minmax(0, 1fr); }
-}
-.user-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 560px;
-  overflow-y: auto;
-  margin-top: 10px;
-}
-.user-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-surface);
-  cursor: pointer;
-  transition: border-color 0.1s ease, background-color 0.1s ease;
-  text-align: left;
-}
-.user-item:hover {
-  background: var(--bg-subtle);
-  border-color: var(--border-strong);
-}
-.user-item.active {
-  border-color: var(--primary);
-  background: var(--primary-subtle);
-}
-.user-item-id {
-  font-weight: 600;
-  font-size: 0.85rem;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.user-item-email {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.user-item-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
 .spend-bar {
   width: 100%;
   height: 4px;
@@ -882,35 +820,6 @@ tr:hover { background-color: var(--bg-subtle); }
 }
 .spend-bar-fill.warn { background: var(--warning); }
 .spend-bar-fill.danger { background: var(--danger); }
-.user-detail-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border);
-}
-.user-detail-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
-}
-.user-summary-box {
-  background: var(--bg-subtle);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 14px;
-}
-.user-summary-box .label {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  font-weight: 600;
-}
 .model-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1054,36 +963,33 @@ tr:hover { background-color: var(--bg-subtle); }
   </div>
 
   <div id="tab-users" class="tab-content">
-    <div class="users-layout">
-      <aside class="card" aria-label="User roster">
-        <div class="action-bar">
-          <h2>Users</h2>
-          <button class="btn btn-sm" onclick="openUserModal()">Create User</button>
-        </div>
-        <button class="btn btn-secondary" id="all-keys" aria-pressed="true" onclick="selectUser(null)">All Keys</button>
-        <p id="users-status" role="status">Loading users...</p>
-        <div id="user-list" class="user-list"></div>
-      </aside>
-      <section class="card" aria-labelledby="access-title">
-        <div class="user-detail-header">
-          <div>
-            <h2 id="access-title">All API Keys</h2>
-            <p id="access-email" class="metric-sub"></p>
-          </div>
-          <div id="user-actions"></div>
-        </div>
-        <div id="user-summary" class="user-detail-summary"></div>
-        <div class="action-bar">
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="action-bar">
+        <h2>Users</h2>
+        <button class="btn btn-sm" onclick="openUserModal()">Create User</button>
+      </div>
+      <p id="users-status" role="status">Loading users...</p>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>User ID</th><th>Email</th><th>Active Keys</th><th>Spend / Budget</th><th>Actions</th></tr></thead>
+          <tbody id="users-body"><tr><td colspan="5">Loading users...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="action-bar">
+        <div class="action-bar-heading">
+          <h2>API Keys</h2>
           <p id="keys-count" class="metric-sub" role="status"></p>
-          <button class="btn btn-sm" onclick="openKeyModal(selectedUserId ?? '')">Create Key</button>
         </div>
-        <div class="table-container">
-          <table>
-            <thead><tr><th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Spend / Budget</th><th>Expires</th><th>Actions</th></tr></thead>
-            <tbody id="keys-body"><tr><td colspan="7">Loading API keys...</td></tr></tbody>
-          </table>
-        </div>
-      </section>
+        <button class="btn btn-sm" onclick="openKeyModal()">Create Key</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Spend / Budget</th><th>Expires</th><th>Actions</th></tr></thead>
+          <tbody id="keys-body"><tr><td colspan="7">Loading API keys...</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -1500,7 +1406,7 @@ function openUserModal() {
   openDialog('user-modal');
 }
 
-async function openKeyModal(userId = '') {
+async function openKeyModal() {
   const form = document.getElementById('key-form');
   if (form.dataset.busy) return;
   form.reset();
@@ -1532,9 +1438,7 @@ async function openKeyModal(userId = '') {
       option.textContent = user.user_id + (user.user_email ? ' — ' + user.user_email : '');
       users.append(option);
     });
-    users.value = userId;
-    users.disabled = !!userId;
-    if (userId && users.value !== userId) throw new Error('Selected user is no longer available. Refresh the user roster.');
+    users.disabled = !u.users.length;
     m.models.forEach(model => {
       const label = document.createElement('label');
       label.className = 'model-chip';
@@ -1689,7 +1593,6 @@ function actionButton(cell, text, danger, action) {
 }
 
 let cachedUsers = null;
-let selectedUserId = null;
 let keyCounts = null;
 let usersLoad = 0;
 let keysLoad = 0;
@@ -1707,40 +1610,20 @@ function budgetMarkup(spend, budget) {
 }
 
 function renderUsers() {
-  const list = document.getElementById('user-list');
-  list.replaceChildren();
-  (cachedUsers || []).forEach(user => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'user-item' + (selectedUserId === user.user_id ? ' active' : '');
-    button.setAttribute('aria-pressed', String(selectedUserId === user.user_id));
-    const activeCount = keyCounts?.get(user.user_id) || 0;
-    const count = keyCounts === null ? 'Keys unavailable' : activeCount === 1 ? '1 active key' : activeCount + ' active keys';
-    button.innerHTML = '<span class="user-item-id">' + escapeHTML(user.user_id) + '</span><span class="user-item-email">' + escapeHTML(user.user_email || 'No email') + '</span><span class="user-item-meta" title="Unexpired, unblocked managed keys; quotas may still restrict usage">' + count + '</span><div>' + budgetMarkup(user.spend, user.max_budget) + '</div>';
-    button.addEventListener('click', () => selectUser(user.user_id));
-    list.append(button);
-  });
-  document.getElementById('all-keys').setAttribute('aria-pressed', String(selectedUserId === null));
-  const user = (cachedUsers || []).find(user => user.user_id === selectedUserId);
-  document.getElementById('access-title').textContent = user ? user.user_id : 'All API Keys';
-  document.getElementById('access-email').textContent = user?.user_email || '';
-  const summary = document.getElementById('user-summary');
-  summary.replaceChildren();
-  if (user) {
-    const box = document.createElement('div');
-    box.className = 'user-summary-box';
-    box.innerHTML = '<div class="label">Spend / Budget</div>' + budgetMarkup(user.spend, user.max_budget);
-    summary.append(box);
+  const body = document.getElementById('users-body');
+  body.replaceChildren();
+  const users = cachedUsers || [];
+  if (!users.length) {
+    tableMessage(body, 5, 'No users. Create a user to issue API keys.');
+    return;
   }
-  const actions = document.getElementById('user-actions');
-  actions.replaceChildren();
-  if (user) actionButton(actions, 'Delete User', true, button => deleteUser(user.user_id, button));
-}
-
-function selectUser(userId) {
-  selectedUserId = userId;
-  renderUsers();
-  loadKeys();
+  users.forEach(user => {
+    const activeCount = keyCounts?.get(user.user_id) || 0;
+    const count = keyCounts === null ? 'Unavailable' : String(activeCount);
+    const actions = tableRow(body, [user.user_id, user.user_email || '-', count, '']);
+    actions.parentElement.cells[3].innerHTML = budgetMarkup(user.spend, user.max_budget);
+    actionButton(actions, 'Delete', true, button => deleteUser(user.user_id, button));
+  });
 }
 
 async function loadUsers() {
@@ -1752,9 +1635,8 @@ async function loadUsers() {
     if (load !== usersLoad) return;
     if (!Array.isArray(d.users)) throw new Error('Invalid users response');
     cachedUsers = d.users;
-    if (selectedUserId !== null && !cachedUsers.some(user => user.user_id === selectedUserId)) selectUser(null);
     renderUsers();
-    status.textContent = cachedUsers.length ? '' : 'No users. Create a user to issue API keys.';
+    status.textContent = '';
   } catch (err) {
     if (load === usersLoad) status.textContent = 'Unable to refresh users: ' + err.message;
   }
@@ -1797,7 +1679,6 @@ async function deleteUser(uid, button) {
   try {
     await api('/api/users/' + encodeURIComponent(uid), {method: 'DELETE'});
     showToast('Removed user and their API keys');
-    if (selectedUserId === uid) selectedUserId = null;
     loadUsers();
     loadKeys();
   } catch (err) { alert(err.message); }
@@ -1807,22 +1688,17 @@ async function deleteUser(uid, button) {
 async function loadKeys() {
   const body = document.getElementById('keys-body');
   const load = ++keysLoad;
-  const userId = selectedUserId;
   tableMessage(body, 7, 'Loading API keys...');
   try {
-    const path = userId === null ? '/api/keys' : '/api/keys?user_id=' + encodeURIComponent(userId);
-    const [d, all] = await Promise.all([api(path), userId !== null ? api('/api/keys') : Promise.resolve(null)]);
+    const d = await api('/api/keys');
     if (load !== keysLoad) return;
-    if (!Array.isArray(d.keys) || (all && !Array.isArray(all.keys))) throw new Error('Invalid keys response');
-    const countKeys = userId === null ? d.keys : all?.keys;
-    if (countKeys) {
-      keyCounts = new Map();
-      countKeys.forEach(key => {
-        if (key.blocked || (key.expires && Date.parse(key.expires) <= Date.now())) return;
-        keyCounts.set(key.user_id, (keyCounts.get(key.user_id) || 0) + 1);
-      });
-      renderUsers();
-    }
+    if (!Array.isArray(d.keys)) throw new Error('Invalid keys response');
+    keyCounts = new Map();
+    d.keys.forEach(key => {
+      if (key.blocked || (key.expires && Date.parse(key.expires) <= Date.now())) return;
+      keyCounts.set(key.user_id, (keyCounts.get(key.user_id) || 0) + 1);
+    });
+    renderUsers();
     body.replaceChildren();
     document.getElementById('keys-count').textContent = d.keys.length === 1 ? '1 key' : d.keys.length + ' keys';
     if (!d.keys.length) tableMessage(body, 7, 'No API keys found');
