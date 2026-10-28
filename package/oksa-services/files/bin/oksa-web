@@ -278,10 +278,10 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/models/inspect":
             repo_id = body.get("repo_id")
-            if not repo_id:
-                self.send_json(400, {"ok": False, "error": "repo_id is required"})
-                return
             revision = body.get("revision", "main")
+            if not isinstance(repo_id, str) or not repo_id.strip() or not isinstance(revision, str) or not revision.strip():
+                self.send_json(400, {"ok": False, "error": "Repository and revision must be non-empty strings"})
+                return
             meta = ms.inspect_hf_model(repo_id, revision)
             if not meta:
                 self.send_json(404, {"ok": False, "error": f"Failed to fetch metadata for {repo_id}"})
@@ -309,8 +309,11 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             if ms.is_calibration_model(repo_id) or ms.is_calibration_model(effective_name):
                 self.send_json(403, {"ok": False, "error": "The calibration model is installed automatically"})
                 return
-            revision = body.get("revision", "main")
-            force = bool(body.get("force", False))
+            revision = body.get("revision")
+            force = body.get("force", False)
+            if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision) or type(force) is not bool:
+                self.send_json(400, {"ok": False, "error": "Download requires an inspected commit revision and a Boolean override"})
+                return
 
             with pull_lock:
                 if pull_state["running"]:
@@ -1124,41 +1127,34 @@ tr:hover { background-color: var(--bg-subtle); }
 <div id="add-modal" class="modal-overlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-title" tabindex="-1">
     <h3 id="add-title">Download Model</h3>
-    <div class="input-group">
-      <label for="add-repo">Hugging Face Repository</label>
-      <input type="text" id="add-repo" placeholder="mistralai/Mistral-7B-Instruct-v0.3">
-    </div>
-    <div class="input-group">
-      <label for="add-name">Storage ID (optional)</label>
-      <input type="text" id="add-name" placeholder="mistral-7b">
-    </div>
-    <div class="input-group">
-      <label for="add-rev">Revision</label>
-      <input type="text" id="add-rev" value="main">
-    </div>
-
-    <div id="inspect-result" class="inspect-result" hidden>
-      <div class="inspect-grid">
-        <div class="inspect-cell"><span class="label">Architecture</span><span id="inspect-arch">-</span></div>
-        <div class="inspect-cell"><span class="label">Storage</span><span id="inspect-storage">-</span></div>
-        <div class="inspect-cell"><span class="label">Estimated RAM/VRAM</span><span id="inspect-vram">-</span></div>
+    <form id="download-form">
+      <div class="input-group">
+        <label for="add-repo">Hugging Face Repository</label>
+        <input type="text" id="add-repo" placeholder="mistralai/Mistral-7B-Instruct-v0.3" required>
       </div>
-      <div id="inspect-fit" class="inspect-fit"></div>
-    </div>
-
-    <div class="input-group" id="force-group" style="display:none;">
-      <label class="checkbox-row">
-        <input type="checkbox" id="add-force">
-        <span>Download despite compatibility warning</span>
-      </label>
-    </div>
-
-    <p id="add-error" class="form-error" role="alert"></p>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeModal('add-modal')">Cancel</button>
-      <button class="btn btn-secondary" onclick="runInspect(this)">Check Compatibility</button>
-      <button class="btn" id="btn-pull" onclick="startPull(this)" disabled>Download</button>
-    </div>
+      <div class="input-group">
+        <label for="add-name">Storage ID (optional)</label>
+        <input type="text" id="add-name" placeholder="mistral-7b">
+      </div>
+      <div class="input-group">
+        <label for="add-rev">Revision</label>
+        <input type="text" id="add-rev" value="main">
+      </div>
+      <div id="inspect-result" class="inspect-result" hidden>
+        <div class="inspect-grid">
+          <div class="inspect-cell"><span class="label">Target</span><span id="inspect-target"></span></div>
+          <div class="inspect-cell"><span class="label">Architecture</span><span id="inspect-arch">-</span></div>
+          <div class="inspect-cell"><span class="label">Storage</span><span id="inspect-storage">-</span></div>
+          <div class="inspect-cell"><span class="label">Estimated RAM/VRAM</span><span id="inspect-vram">-</span></div>
+        </div>
+        <div id="inspect-fit" class="inspect-fit" role="status"></div>
+      </div>
+      <p id="add-error" class="form-error" role="alert"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="download-cancel" onclick="closeModal('add-modal')">Cancel</button>
+        <button type="submit" class="btn" id="btn-pull">Download</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -1535,10 +1531,9 @@ async function removeModel(name, button) {
 }
 
 function openAddModal() {
-  document.getElementById('add-error').textContent = '';
-  document.getElementById('inspect-result').hidden = true;
-  document.getElementById('force-group').style.display = 'none';
-  document.getElementById('btn-pull').disabled = true;
+  const modal = document.getElementById('add-modal');
+  if (modal.dataset.busy === 'starting') return;
+  modal.resetInspection();
   openDialog('add-modal');
 }
 
@@ -1612,6 +1607,7 @@ async function openKeyModal() {
 function closeModal(id) {
   const modal = document.getElementById(id);
   if (modal.querySelector('form')?.dataset.busy) return;
+  if (id === 'add-modal') modal.resetInspection();
   modal.classList.remove('open');
   modal.load = null;
   if (id === 'key-result-modal') {
@@ -1658,63 +1654,130 @@ document.getElementById('key-models').addEventListener('change', () => {
   document.getElementById('key-model-count').textContent = count + ' models selected';
 });
 
-async function runInspect(button) {
-  const repo = document.getElementById('add-repo').value.trim();
-  const rev = document.getElementById('add-rev').value.trim() || 'main';
-  const error = document.getElementById('add-error');
-  if (!repo) { error.textContent = 'Enter a Hugging Face repository ID.'; return; }
-  error.textContent = '';
-  if (button) button.disabled = true;
-  try {
-    const d = await api('/api/models/inspect', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo_id: repo, revision: rev})
-    });
-    const m = d.metadata;
-    document.getElementById('inspect-arch').textContent = m.architectures?.length ? m.architectures.join(', ') : 'unknown';
-    document.getElementById('inspect-storage').textContent = formatMiB(m.storage_mib);
-    document.getElementById('inspect-vram').textContent = formatMiB(m.estimated_memory_mib);
-    const fit = document.getElementById('inspect-fit');
-    const forceGroup = document.getElementById('force-group');
-    const btnPull = document.getElementById('btn-pull');
-    fit.className = 'inspect-fit';
-    if (d.fits) {
-      fit.innerHTML = '<span class="pill ok">Fits available memory</span>';
-      forceGroup.style.display = 'none';
-      btnPull.disabled = false;
-    } else {
-      fit.className = 'inspect-fit insufficient';
-      fit.innerHTML = '<span class="pill insufficient">Insufficient memory</span> <span>' + escapeHTML(d.reason) + '</span>';
-      forceGroup.style.display = 'block';
-      const forceCheck = document.getElementById('add-force');
-      forceCheck.checked = false;
-      forceCheck.onchange = () => { btnPull.disabled = !forceCheck.checked; };
-      btnPull.disabled = true;
-    }
-    document.getElementById('inspect-result').hidden = false;
-  } catch (err) { error.textContent = err.message; }
-  finally { if (button) button.disabled = false; }
+{
+  const modal = document.getElementById('add-modal');
+  const form = document.getElementById('download-form');
+  const button = document.getElementById('btn-pull');
+  modal.resetInspection = () => {
+    modal.controller?.abort();
+    modal.controller = null;
+    modal.load = Symbol();
+    modal.inspection = null;
+    delete modal.dataset.busy;
+    delete form.dataset.busy;
+    form.setAttribute('aria-busy', 'false');
+    form.querySelectorAll('input, button').forEach(control => { control.disabled = false; });
+    button.textContent = 'Download';
+    button.classList.remove('btn-danger');
+    document.getElementById('inspect-result').hidden = true;
+    document.getElementById('add-error').textContent = '';
+  };
+  form.addEventListener('input', () => {
+    if (modal.dataset.busy !== 'starting') modal.resetInspection();
+  });
+  button.addEventListener('click', event => {
+    if (event.detail > 1) event.preventDefault();
+  });
+  form.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && event.repeat) event.preventDefault();
+  });
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    startPull(button);
+  });
 }
 
 async function startPull(button) {
-  const repo = document.getElementById('add-repo').value.trim();
-  const name = document.getElementById('add-name').value.trim() || undefined;
-  const rev = document.getElementById('add-rev').value.trim() || 'main';
-  const force = document.getElementById('add-force').checked;
+  const modal = document.getElementById('add-modal');
+  const form = document.getElementById('download-form');
+  const dialog = modal.querySelector('[role="dialog"]');
+  if (modal.dataset.busy || !modal.classList.contains('open')) return;
+  const snapshot = () => ({
+    repo_id: document.getElementById('add-repo').value.trim(),
+    name: document.getElementById('add-name').value.trim() || undefined,
+    revision: document.getElementById('add-rev').value.trim() || 'main'
+  });
+  const input = snapshot();
+  const key = JSON.stringify(input);
   const error = document.getElementById('add-error');
-  if (button) button.disabled = true;
+  if (!input.repo_id) { error.textContent = 'Enter a Hugging Face repository ID.'; return; }
+  const confirmed = modal.inspection?.key === key ? modal.inspection : null;
+  modal.inspection = null;
+  const load = Symbol();
+  modal.load = load;
+  const current = () => modal.load === load && modal.classList.contains('open') && JSON.stringify(snapshot()) === key;
+  const controller = new AbortController();
+  modal.controller = controller;
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  modal.dataset.busy = 'checking';
+  form.setAttribute('aria-busy', 'true');
+  error.textContent = '';
+  const buttonFocused = document.activeElement === button;
+  button.disabled = true;
+  if (buttonFocused) dialog.focus();
+  button.textContent = confirmed ? 'Starting download…' : 'Checking compatibility…';
+  if (!confirmed) document.getElementById('inspect-result').hidden = true;
+  let starting = false;
   try {
+    let target = confirmed?.target;
+    if (!confirmed) {
+      const d = await api('/api/models/inspect', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, signal: controller.signal,
+        body: JSON.stringify({repo_id: input.repo_id, revision: input.revision})
+      });
+      if (!current()) return;
+      const m = d.metadata;
+      if (typeof d.fits !== 'boolean' || !m || typeof m.repo_id !== 'string' || !m.repo_id || typeof m.resolved_revision !== 'string' || !/^[0-9a-f]{40}$/i.test(m.resolved_revision)) throw new Error('The compatibility check did not resolve an exact model revision. Retry Download.');
+      target = {repo_id: m.repo_id, name: input.name, revision: m.resolved_revision};
+      if (!d.fits) {
+        modal.inspection = {key, target};
+        const targetText = document.getElementById('inspect-target');
+        targetText.textContent = m.repo_id + ' @ ' + m.resolved_revision.slice(0, 12);
+        targetText.title = m.resolved_revision;
+        document.getElementById('inspect-arch').textContent = Array.isArray(m.architectures) && m.architectures.length ? m.architectures.join(', ') : 'unknown';
+        document.getElementById('inspect-storage').textContent = formatMiB(m.storage_mib);
+        document.getElementById('inspect-vram').textContent = formatMiB(m.estimated_memory_mib);
+        const fit = document.getElementById('inspect-fit');
+        fit.className = 'inspect-fit insufficient';
+        fit.textContent = typeof d.reason === 'string' ? d.reason : 'This model exceeds the available memory.';
+        document.getElementById('inspect-result').hidden = false;
+        return;
+      }
+    }
+    if (!current()) return;
+    starting = true;
+    modal.dataset.busy = 'starting';
+    form.dataset.busy = 'true';
+    form.querySelectorAll('input, button').forEach(control => { control.disabled = true; });
+    dialog.focus();
+    button.textContent = 'Starting download…';
     const d = await api('/api/models/pull', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo_id: repo, name: name, revision: rev, force: force})
+      method: 'POST', headers: {'Content-Type': 'application/json'}, signal: controller.signal,
+      body: JSON.stringify({...target, force: Boolean(confirmed)})
     });
+    delete form.dataset.busy;
     closeModal('add-modal');
     showToast(d.message);
     await loadModels();
-  } catch (err) { error.textContent = err.message; }
-  finally { if (button) button.disabled = false; }
+  } catch (err) {
+    if (modal.load === load) {
+      error.textContent = starting && (err.name === 'AbortError' || err instanceof TypeError)
+        ? 'Could not confirm whether the download started. Check Download Activity before retrying.'
+        : err.name === 'AbortError' ? 'The compatibility check timed out. Retry Download.' : err.message;
+    }
+  } finally {
+    clearTimeout(timeout);
+    if (modal.load === load) {
+      delete modal.dataset.busy;
+      delete form.dataset.busy;
+      modal.controller = null;
+      form.setAttribute('aria-busy', 'false');
+      form.querySelectorAll('input, button').forEach(control => { control.disabled = false; });
+      button.textContent = modal.inspection ? 'Download anyway' : 'Download';
+      button.classList.toggle('btn-danger', Boolean(modal.inspection));
+      if (document.activeElement === dialog) button.focus();
+    }
+  }
 }
 
 async function api(path, options) {
