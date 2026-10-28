@@ -1686,8 +1686,10 @@ async function api(path, options) {
   const response = await fetch(path, options);
   const data = await response.json();
   if (!response.ok || !data.ok) {
-    const error = data.error;
-    throw new Error(typeof error === 'string' ? error : error ? JSON.stringify(error) : 'Request failed: ' + response.status);
+    const message = data.error;
+    const error = new Error(typeof message === 'string' ? message : message ? JSON.stringify(message) : 'Request failed: ' + response.status);
+    error.result = data;
+    throw error;
   }
   return data;
 }
@@ -1969,13 +1971,18 @@ const usersView = {
       await api('/api/keys/' + encodeURIComponent(key.token), {method: 'DELETE'});
       showToast('API key revoked');
       await this.refresh();
+    } catch (err) {
+      await this.refresh();
+      const message = err.result ? err.message
+        : 'API key revocation for user ' + uid + ' was not confirmed. The key may still grant access. Refresh the key list before retrying. ' + err.message;
+      if (this.selected === uid) document.getElementById('keys-error').textContent = message;
+      else showToast(message);
+    } finally {
+      button.disabled = false;
       if (restoreFocus && this.selected === uid && currentTab === 'users' && !document.querySelector('.modal-overlay.open')) {
         document.getElementById('user-create-key').focus();
       }
-    } catch (err) {
-      if (this.selected === uid) document.getElementById('keys-error').textContent = err.message;
-      else showToast(err.message);
-    } finally { button.disabled = false; }
+    }
   }
 };
 
