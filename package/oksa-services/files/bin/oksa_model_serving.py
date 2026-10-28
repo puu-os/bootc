@@ -6,7 +6,9 @@ from contextlib import contextmanager
 import dataclasses
 import fcntl
 import hashlib
+import http.client
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -902,7 +904,7 @@ def generate_serving_env_text(meta: dict, model_path: Path | str) -> str:
 _litellm_cache: dict[str, str | None] = {}
 
 
-def get_litellm_master_key() -> str | None:
+def get_litellm_master_key(timeout: float | None = None) -> str | None:
     env_key = os.environ.get("PUU_LITELLM_MASTER_KEY")
     if env_key:
         return env_key.strip()
@@ -921,6 +923,7 @@ def get_litellm_master_key() -> str | None:
                 ["systemd-creds", "decrypt", str(encrypted_store), "-"],
                 capture_output=True,
                 check=False,
+                timeout=timeout,
             )
             if res.returncode == 0:
                 key = res.stdout.decode("utf-8").strip()
@@ -931,7 +934,8 @@ def get_litellm_master_key() -> str | None:
     if _litellm_cache.get("master_key"):
         return _litellm_cache["master_key"]
     try:
-        proc = run_kubectl("get", "secret", "puu-litellm-masterkey", "-n", OKSA_NAMESPACE, "-o", "jsonpath={.data.masterkey}", check=False)
+        proc = run_kubectl("get", "secret", "puu-litellm-masterkey", "-n", OKSA_NAMESPACE,
+                           "-o", "jsonpath={.data.masterkey}", check=False, timeout=timeout)
         if proc.returncode == 0 and proc.stdout.strip():
             import base64
             key = base64.b64decode(proc.stdout.strip()).decode("utf-8").strip()
@@ -943,7 +947,7 @@ def get_litellm_master_key() -> str | None:
     return None
 
 
-def litellm_base_url() -> str:
+def litellm_base_url(timeout: float | None = None) -> str:
     env_url = os.environ.get("PUU_LITELLM_API_URL")
     if env_url:
         return env_url.rstrip("/")
@@ -951,7 +955,8 @@ def litellm_base_url() -> str:
         return str(_litellm_cache["base_url"])
     try:
         proc = run_kubectl(
-            "get", "service", "litellm", "--namespace", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False
+            "get", "service", "litellm", "--namespace", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}",
+            check=False, timeout=timeout
         )
         if proc.returncode == 0 and proc.stdout.strip():
             url = f"http://{proc.stdout.strip()}:4000"
@@ -968,9 +973,10 @@ def litellm_api_call(
     payload: dict | None = None,
     master_key: str | None = None,
     timeout_sec: int = 15,
+    subprocess_timeout: float | None = None,
 ) -> tuple[int, dict]:
-    base_url = litellm_base_url()
-    key = master_key if master_key is not None else get_litellm_master_key()
+    base_url = litellm_base_url(timeout=subprocess_timeout)
+    key = master_key if master_key is not None else get_litellm_master_key(timeout=subprocess_timeout)
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -1368,10 +1374,10 @@ def sync_litellm_models(
     return len(managed) == 1 and _matches(managed[0])
 
 
-def collect_gpu_telemetry() -> list[dict]:
+def collect_gpu_telemetry() -> list[dict] | None:
     nvidia_smi = shutil.which("nvidia-smi")
     if not nvidia_smi:
-        return []
+        return None
     try:
         proc = subprocess.run(
             [
@@ -1384,131 +1390,190 @@ def collect_gpu_telemetry() -> list[dict]:
             check=False,
             timeout=5,
         )
-        if proc.returncode != 0:
-            return []
-        gpus = []
-        for line in proc.stdout.splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 7:
-                try:
-                    gpus.append({
-                        "index": int(parts[0]),
-                        "name": parts[1],
-                        "gpu_util_pct": float(parts[2]),
-                        "memory_used_mib": float(parts[3]),
-                        "memory_total_mib": float(parts[4]),
-                        "temperature_c": float(parts[5]),
-                        "power_w": float(parts[6]),
-                    })
-                except ValueError:
-                    pass
-        return gpus
     except (subprocess.SubprocessError, OSError):
-        return []
+        return None
+    if proc.returncode != 0:
+        return None
+    gpus = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 7:
+            return None
+        gpu = {}
+        try:
+            gpu["index"] = int(parts[0])
+        except ValueError:
+            pass
+        if parts[1] and parts[1] != "N/A":
+            gpu["name"] = parts[1]
+        for key, raw in zip(
+            ("gpu_util_pct", "memory_used_mib", "memory_total_mib", "temperature_c", "power_w"),
+            parts[2:],
+        ):
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if math.isfinite(value):
+                gpu[key] = value
+        gpus.append(gpu)
+    return gpus
 
 
 def collect_host_memory() -> dict:
-    total_kb = 0
-    avail_kb = 0
     try:
-        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
-            if line.startswith("MemTotal:"):
-                total_kb = int(line.split()[1])
-            elif line.startswith("MemAvailable:"):
-                avail_kb = int(line.split()[1])
-    except (OSError, ValueError, IndexError):
-        pass
-    total_mib = total_kb // 1024
-    avail_mib = avail_kb // 1024
-    used_mib = max(0, total_mib - avail_mib)
-    return {
-        "total_mib": total_mib,
-        "used_mib": used_mib,
-        "available_mib": avail_mib,
-        "used_pct": round((used_mib / total_mib * 100.0), 1) if total_mib > 0 else 0.0,
-    }
-
-
-def collect_k8s_workloads() -> list[dict]:
-    try:
-        proc = run_kubectl("get", "pods", "-n", OKSA_NAMESPACE, "-o", "json", check=False)
-        if proc.returncode != 0:
-            return []
-        data = json.loads(proc.stdout)
-        items = data.get("items", [])
-        workloads = []
-        for item in items:
-            meta = item.get("metadata", {})
-            name = meta.get("name", "")
-            status = item.get("status", {})
-            phase = status.get("phase", "Unknown")
-            conditions = status.get("conditions", [])
-            ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
-            container_statuses = status.get("containerStatuses", [])
-            restarts = sum(c.get("restartCount", 0) for c in container_statuses)
-            start_time = status.get("startTime", "")
-            workloads.append({
-                "name": name,
-                "phase": phase,
-                "ready": ready,
-                "restarts": restarts,
-                "start_time": start_time,
-            })
-        return workloads
-    except Exception:
-        return []
-
-
-def collect_vllm_metrics(active_model: str) -> dict:
-    if not active_model or active_model == "-":
+        lines = Path("/proc/meminfo").read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeError):
         return {}
+    values = {}
+    for line in lines:
+        parts = line.split()
+        if not parts or parts[0] not in ("MemTotal:", "MemAvailable:"):
+            continue
+        try:
+            value = int(parts[1])
+        except (ValueError, IndexError):
+            continue
+        if value >= 0 and len(parts) == 3 and parts[2] == "kB":
+            values[parts[0]] = value
+    memory = {}
+    total_kb = values.get("MemTotal:")
+    avail_kb = values.get("MemAvailable:")
+    if total_kb is not None:
+        memory["total_mib"] = total_kb // 1024
+    if avail_kb is not None:
+        memory["available_mib"] = avail_kb // 1024
+    if total_kb is not None and avail_kb is not None and avail_kb <= total_kb:
+        used_kb = total_kb - avail_kb
+        memory["used_mib"] = used_kb // 1024
+        if total_kb > 0:
+            memory["used_pct"] = round(used_kb / total_kb * 100.0, 1)
+    return memory
+
+
+def collect_k8s_workloads() -> list[dict] | None:
+    try:
+        proc = run_kubectl("get", "pods", "-n", OKSA_NAMESPACE, "--request-timeout=5s",
+                           "-o", "json", check=False, timeout=10)
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return None
+    workloads = []
+    for item in data["items"]:
+        if not isinstance(item, dict):
+            return None
+        meta = item.get("metadata", {})
+        status = item.get("status", {})
+        if not isinstance(meta, dict) or not isinstance(status, dict):
+            return None
+        conditions = status.get("conditions")
+        ready = None
+        if isinstance(conditions, list) and all(isinstance(c, dict) for c in conditions):
+            if any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions):
+                ready = True
+            elif not conditions or any(c.get("type") == "Ready" and c.get("status") == "False" for c in conditions):
+                ready = False
+        container_statuses = status.get("containerStatuses")
+        restarts = None
+        if isinstance(container_statuses, list) and all(
+            isinstance(c, dict) and type(c.get("restartCount")) is int and c["restartCount"] >= 0
+            for c in container_statuses
+        ):
+            restarts = sum(c["restartCount"] for c in container_statuses)
+        workloads.append({
+            "name": meta.get("name", ""),
+            "phase": status.get("phase", "Unknown"),
+            "ready": ready,
+            "restarts": restarts,
+            "start_time": status.get("startTime", ""),
+        })
+    return workloads
+
+
+def collect_vllm_metrics(active_model: str) -> tuple[str, dict]:
+    if not active_model or active_model == "-":
+        return "no-model", {}
     service_name = CALIBRATION_MODEL if is_calibration_model(active_model) else f"puu-vllm-{model_id(active_model)}"
     try:
-        proc = run_kubectl("get", "service", service_name, "-n", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False)
-        if proc.returncode != 0 or not proc.stdout.strip():
-            return {}
-        cluster_ip = proc.stdout.strip()
-        metrics_url = f"http://{cluster_ip}:8000/metrics"
-        req = urllib.request.Request(metrics_url, headers={"User-Agent": "puu-oksa/1.0"})
+        proc = run_kubectl("get", "service", service_name, "-n", OKSA_NAMESPACE, "--request-timeout=5s",
+                           "-o", "jsonpath={.spec.clusterIP}", check=False, timeout=10)
+    except (subprocess.SubprocessError, OSError):
+        return "unavailable", {}
+    cluster_ip = proc.stdout.strip()
+    if proc.returncode != 0 or not cluster_ip or cluster_ip == "None":
+        return "unavailable", {}
+    host = f"[{cluster_ip}]" if ":" in cluster_ip else cluster_ip
+    base_url = f"http://{host}:8000"
+    model_status = "unavailable"
+    req = urllib.request.Request(f"{base_url}/health", headers={"User-Agent": "puu-oksa/1.0"})
+    try:
         with urllib.request.urlopen(req, timeout=3) as resp:
+            model_status = "ready" if resp.status == 200 else "not-ready"
+    except urllib.error.HTTPError as exc:
+        model_status = "unavailable" if exc.code in (401, 403, 404) else "not-ready"
+        exc.close()
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
+        pass
+    req = urllib.request.Request(f"{base_url}/metrics", headers={"User-Agent": "puu-oksa/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status != 200:
+                return model_status, {}
             raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return model_status, {}
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
+        return model_status, {}
 
-        parsed = {}
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) >= 2:
-                key, val_str = parts[0], parts[1]
-                try:
-                    val = float(val_str)
-                    if "num_requests_running" in key:
-                        parsed["running_requests"] = int(val)
-                    elif "num_requests_waiting" in key:
-                        parsed["waiting_requests"] = int(val)
-                    elif "gpu_cache_usage_factor" in key:
-                        parsed["kv_cache_usage_pct"] = round(val * 100.0, 1)
-                    elif "num_requests_swapped" in key:
-                        parsed["swapped_requests"] = int(val)
-                except ValueError:
-                    pass
-        return parsed
-    except Exception:
-        return {}
+    metric_names = {
+        "vllm:num_requests_running": "running_requests",
+        "vllm:num_requests_waiting": "waiting_requests",
+        "vllm:kv_cache_usage_perc": "kv_cache_usage_pct",
+        "vllm:gpu_cache_usage_factor": "kv_cache_usage_pct",
+        "vllm:num_requests_swapped": "swapped_requests",
+    }
+    samples = {}
+    for line in raw.splitlines():
+        match = re.fullmatch(r'([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{.*\})?\s+(\S+)(?:\s+\S+)?', line.strip())
+        if not match or match[1] not in metric_names:
+            continue
+        try:
+            value = float(match[2])
+        except ValueError:
+            continue
+        samples.setdefault(match[1], []).append(value)
+    parsed = {}
+    for name, key in metric_names.items():
+        values = samples.get(name, [])
+        if len(values) != 1 or key in parsed:
+            continue
+        value = values[0]
+        if not math.isfinite(value) or value < 0:
+            continue
+        if key == "kv_cache_usage_pct":
+            if value <= 1:
+                parsed[key] = round(value * 100.0, 1)
+        elif value.is_integer():
+            parsed[key] = int(value)
+    return model_status, parsed
 
 
 def collect_litellm_status() -> str:
-    status, _ = litellm_api_call("GET", "/health/readiness", timeout_sec=3)
+    try:
+        status, _ = litellm_api_call("GET", "/health/readiness", timeout_sec=3, subprocess_timeout=5)
+    except (OSError, http.client.HTTPException):
+        return "unreachable"
     if status == 200:
         return "ready"
     if status in (401, 403):
-        return "ready (authenticated)"
-    status_models, _ = litellm_api_call("GET", "/v1/models", timeout_sec=3)
-    if status_models == 200:
-        return "ready"
-    if status_models in (401, 403):
-        return "ready (authenticated)"
+        return "authentication-required"
     return "unreachable"
 
 
@@ -1524,9 +1589,15 @@ def collect_serving_status() -> dict:
     gpus = collect_gpu_telemetry()
     host_mem = collect_host_memory()
     workloads = collect_k8s_workloads()
-    if active_model == "-" and any(w["name"].startswith(CALIBRATION_MODEL + "-") and w["ready"] for w in workloads):
+    if active_model == "-" and any(
+        isinstance(w["name"], str) and w["name"].startswith(CALIBRATION_MODEL + "-") for w in (workloads or [])
+    ):
         active_model = CALIBRATION_MODEL
-    metrics = collect_vllm_metrics(active_model)
+    model_status, metrics = collect_vllm_metrics(active_model)
+    if model_status == "no-model" and (workloads is None or selected_model != "-"):
+        model_status = "unavailable"
+    if not serving_enabled and model_status != "ready":
+        model_status = "stopped"
     gateway_status = collect_litellm_status()
 
     return {
@@ -1537,5 +1608,6 @@ def collect_serving_status() -> dict:
         "gpus": gpus,
         "workloads": workloads,
         "metrics": metrics,
+        "model_status": model_status,
         "gateway_status": gateway_status,
     }
