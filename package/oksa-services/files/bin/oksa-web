@@ -23,6 +23,7 @@ import oksa_model_serving as ms
 import oksa_model_removal as removal
 import oksa_settings as settings
 from oksa_monitoring import StatusSampler
+import oksa_user_deletion as user_deletion
 
 state_dir = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 
@@ -436,12 +437,26 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
 
         if path.startswith("/api/users/"):
             user_id = urllib.parse.unquote(path[len("/api/users/"):])
-            ok, res = ms.litellm_user_delete(user_id)
-            self.send_json(200 if ok else 400, {
-                "ok": ok,
-                "message": res if ok else None,
-                "error": None if ok else str(res)
-            })
+            result = user_deletion.UserDeletionService().delete(user_id)
+            status = {
+                user_deletion.UserDeletionOutcome.INVALID: 400,
+                user_deletion.UserDeletionOutcome.PROTECTED: 403,
+                user_deletion.UserDeletionOutcome.NOT_STARTED: 502,
+                user_deletion.UserDeletionOutcome.KEY_REVOCATION_UNCONFIRMED: 502,
+                user_deletion.UserDeletionOutcome.USER_DELETION_UNCONFIRMED: 502,
+                user_deletion.UserDeletionOutcome.DELETED: 200,
+            }[result.outcome]
+            data = {
+                "ok": result.deleted is True,
+                "outcome": result.outcome.name.lower(),
+                "deleted": result.deleted,
+                "confirmed_revoked_keys": result.confirmed_revoked_keys,
+                "message": result.message if result.deleted is True else None,
+                "error": result.message if result.deleted is not True else None,
+            }
+            if result.uncertain:
+                data["warning"] = result.message
+            self.send_json(status, data)
             return
 
         if path.startswith("/api/keys/"):
@@ -981,6 +996,7 @@ tr:hover { background-color: var(--bg-subtle); }
 
   <div id="tab-users" class="tab-content">
     <div class="card">
+      <p id="user-deletion-warning" class="form-error" role="alert" hidden></p>
       <div id="users-list">
         <div class="action-bar">
           <div class="action-bar-heading">
@@ -1721,6 +1737,13 @@ const usersView = {
   keys: null,
   selected: null,
   load: 0,
+  deletionWarnings: new Map(),
+
+  renderDeletionWarnings() {
+    const warning = document.getElementById('user-deletion-warning');
+    warning.textContent = Array.from(this.deletionWarnings.values()).join(' ');
+    warning.hidden = this.deletionWarnings.size === 0;
+  },
 
   keyStatus(key) {
     if (key.blocked) return 'Blocked';
@@ -1879,16 +1902,29 @@ const usersView = {
     const create = document.getElementById('user-create-key');
     create.disabled = true;
     try {
-      await api('/api/users/' + encodeURIComponent(uid), {method: 'DELETE'});
+      const result = await api('/api/users/' + encodeURIComponent(uid), {method: 'DELETE'});
+      if (result.outcome !== 'deleted' || result.deleted !== true) throw new Error('Invalid user-deletion response');
+      this.deletionWarnings.delete(uid);
+      this.renderDeletionWarnings();
       showToast('Removed user and their API keys');
       if (this.selected === uid) this.showList();
       else this.refresh();
     } catch (err) {
+      const notStarted = ['invalid', 'protected', 'not_started'].includes(err.result?.outcome);
+      if (!notStarted) {
+        const warning = typeof err.result?.warning === 'string' && err.result.warning
+          ? err.result.warning
+          : 'Deletion of user ' + uid + ' was not confirmed. Their API keys may have been revoked. Refresh before retrying. ' + err.message;
+        this.deletionWarnings.set(uid, warning);
+        this.renderDeletionWarnings();
+      }
       await this.refresh();
-      if (this.selected === uid) {
-        const error = document.getElementById('keys-error');
-        error.textContent = err.message + (error.textContent ? ' ' + error.textContent : '');
-      } else showToast(err.message);
+      if (notStarted) {
+        if (this.selected === uid) {
+          const error = document.getElementById('keys-error');
+          error.textContent = err.message + (error.textContent ? ' ' + error.textContent : '');
+        } else showToast(err.message);
+      }
     } finally { button.disabled = false; create.disabled = false; }
   },
 
