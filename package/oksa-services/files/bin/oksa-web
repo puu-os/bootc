@@ -22,6 +22,7 @@ for directory in (Path(__file__).resolve().parent, libexec_dir):
 import oksa_model_serving as ms
 import oksa_model_removal as removal
 import oksa_settings as settings
+from oksa_monitoring import StatusSampler
 
 state_dir = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 
@@ -60,7 +61,8 @@ def check_capabilities(model_name: str) -> bool:
 def collect_models_list() -> dict:
     return ms.collect_models_list(state_dir, discover_bin, planner_bin)
 
-def background_pull_worker(repo_id: str, name: str | None, revision: str, force: bool) -> None:
+def background_pull_worker(repo_id: str, name: str | None, revision: str, force: bool,
+                           sampler: StatusSampler) -> None:
     global pull_state
 
     cmd = [str(preseed_bin), "--repo-id", repo_id, "--revision", revision]
@@ -103,11 +105,34 @@ def background_pull_worker(repo_id: str, name: str | None, revision: str, force:
             pull_state["ended_at"] = time.time()
             pull_state["error"] = str(exc)
 
-    run_discover()
+    try:
+        run_discover()
+    finally:
+        sampler.invalidate()
+
+
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address: tuple[str, int], handler: type[http.server.BaseHTTPRequestHandler]) -> None:
+        self.monitoring = StatusSampler(ms.collect_serving_status)
+        super().__init__(address, handler)
+        try:
+            self.monitoring.start()
+        except BaseException:
+            self.server_close()
+            raise
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            self.monitoring.close()
 
 
 class OksaWebHandler(http.server.BaseHTTPRequestHandler):
     server_version = "OKSAWeb/1.0"
+    server: ThreadedHTTPServer
 
     def send_json(self, status: int, data: dict) -> None:
         payload = json.dumps(data).encode("utf-8")
@@ -156,8 +181,7 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/api/status":
-            status_data = ms.collect_serving_status()
-            self.send_json(200, {"ok": True, "status": status_data})
+            self.send_json(200, self.server.monitoring.snapshot().to_json())
             return
 
         if path == "/api/users":
@@ -324,7 +348,7 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             try:
                 thread = threading.Thread(
                     target=background_pull_worker,
-                    args=(repo_id, name, revision, force),
+                    args=(repo_id, name, revision, force, self.server.monitoring),
                     daemon=True,
                 )
                 thread.start()
@@ -349,7 +373,7 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             if not check_capabilities(model_name):
                 self.send_json(400, {"ok": False, "error": "Model has insufficient host capabilities"})
                 return
-            with control_lock:
+            with control_lock, self.server.monitoring.changing():
                 state_dir.mkdir(parents=True, exist_ok=True)
                 selected_model_file, serving_disabled_file = control_files()
                 ms.atomic_write_text(selected_model_file, f"{model_name}\n")
@@ -363,7 +387,7 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/api/models/stop":
-            with control_lock:
+            with control_lock, self.server.monitoring.changing():
                 state_dir.mkdir(parents=True, exist_ok=True)
                 selected_model_file, serving_disabled_file = control_files()
                 selected_model_file.unlink(missing_ok=True)
@@ -432,7 +456,7 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
 
         if path.startswith("/api/models/"):
             model_name = urllib.parse.unquote(path[len("/api/models/"):])
-            with control_lock:
+            with control_lock, self.server.monitoring.changing():
                 result = removal.ModelRemovalService(state_dir, discover_bin, planner_bin).remove(model_name)
             if result.deleted:
                 data: dict[str, bool | str] = {"ok": True, "deleted": True, "reconciled": result.reconciled}
@@ -1182,12 +1206,61 @@ function usageBar(pct) {
   return '<span class="bar"><span class="bar-track"><span class="bar-fill' + (level !== 'ok' ? ' ' + level : '') + '" style="width:' + Math.min(Math.round(pct), 100) + '%"></span></span>' + Math.round(pct) + '%</span>';
 }
 
+const monitoringFreshness = {
+  metadata: null,
+  receivedAt: 0,
+  hasReadings: false,
+  failed: false,
+  partial: false,
+  inference: 'Unavailable',
+  clearReadings() {
+    for (const id of ['host-mem-val', 'active-model-val', 'inf-requests-val', 'kv-cache-val']) document.getElementById(id).textContent = 'Unavailable';
+    for (const id of ['host-mem-sub', 'active-model-sub', 'inf-requests-sub']) document.getElementById(id).textContent = '';
+    tableMessage(document.getElementById('gpus-body'), 6, 'GPU data unavailable');
+    tableMessage(document.getElementById('workloads-body'), 4, 'Workload data unavailable');
+  },
+  accept(metadata, receivedAt, partial, inference, hasReadings = true) {
+    this.metadata = metadata;
+    this.receivedAt = receivedAt;
+    this.partial = partial;
+    this.inference = inference;
+    this.hasReadings = hasReadings;
+    this.failed = false;
+    if (!hasReadings) this.clearReadings();
+    this.render();
+  },
+  render() {
+    const panel = document.getElementById('tab-monitoring');
+    const updated = document.getElementById('mon-updated');
+    const m = this.metadata;
+    const known = this.hasReadings && m && typeof m.sampled_at === 'string' && Number.isFinite(Date.parse(m.sampled_at))
+      && typeof m.age_seconds === 'number' && Number.isFinite(m.age_seconds) && m.age_seconds >= 0
+      && typeof m.max_age_seconds === 'number' && Number.isFinite(m.max_age_seconds) && m.max_age_seconds > 0
+      && typeof m.stale === 'boolean' && (m.error === null || typeof m.error === 'string');
+    const age = known ? m.age_seconds + Math.max(0, performance.now() - this.receivedAt) / 1000 : null;
+    const stale = !known || this.failed || m.stale || m.error !== null || age > m.max_age_seconds;
+    panel.dataset.stale = String(stale);
+    if (known) {
+      panel.dataset.updatedAt = m.sampled_at;
+      updated.textContent = (stale ? 'Stale · ' : '') + 'Sampled ' + new Date(m.sampled_at).toLocaleTimeString()
+        + ' · ' + Math.floor(age) + 's old' + (this.partial ? ' · Some readings unavailable' : '')
+        + (m.error ? ' · Collection failed' : '');
+    } else {
+      delete panel.dataset.updatedAt;
+      updated.textContent = this.hasReadings ? 'Freshness unavailable'
+        : this.failed ? 'Update failed · No successful readings'
+        : m && m.error ? 'Collection failed · No readings' : 'Waiting for first readings';
+    }
+    document.getElementById('inference-status').textContent = 'Inference: ' + (!this.hasReadings ? 'Unavailable'
+      : stale ? (known ? 'Unverified — stale readings' : 'Unverified — freshness unavailable') : this.inference);
+  }
+};
+
 async function loadMonitoring() {
   const panel = document.getElementById('tab-monitoring');
   if (panel.dataset.loading) return;
   panel.dataset.loading = 'true';
   const hostStatus = document.getElementById('host-status');
-  const updated = document.getElementById('mon-updated');
   let partial = false;
   const numeric = (value, maximum = Infinity) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= maximum;
   const number = (value, format = String, maximum = Infinity, integer = false) => {
@@ -1201,15 +1274,20 @@ async function loadMonitoring() {
     if (typeof value !== 'string' || !value.trim()) { partial = true; return 'Unavailable'; }
     return value === '-' ? 'None' : value;
   };
+  const requestedAt = performance.now();
   try {
     const res = await fetch('/api/status', {signal: AbortSignal.timeout(60000)});
     if (!res.ok) throw new Error('status unavailable');
     const data = await res.json();
-    if (data.ok !== true || !data.status || typeof data.status !== 'object' || Array.isArray(data.status)) throw new Error('invalid status');
+    if (data.ok !== true || (data.status !== null && (!data.status || typeof data.status !== 'object' || Array.isArray(data.status)))) throw new Error('invalid status');
     const s = data.status;
     hostStatus.textContent = 'Admin API: reachable';
     hostStatus.classList.remove('offline');
     hostStatus.classList.add('online');
+    if (s === null) {
+      monitoringFreshness.accept(data.snapshot, requestedAt, true, 'Unavailable', false);
+      return;
+    }
 
     const mem = s.host_memory || {};
     document.getElementById('host-mem-val').textContent = number(mem.used_mib) + ' / ' + number(mem.total_mib > 0 ? mem.total_mib : null) + ' MiB';
@@ -1228,7 +1306,6 @@ async function loadMonitoring() {
       else inference = 'Gateway unavailable';
     }
     if (inference === 'Unavailable' || !['ready', 'authentication-required', 'unreachable'].includes(s.gateway_status)) partial = true;
-    document.getElementById('inference-status').textContent = 'Inference: ' + inference;
 
     const m = s.metrics || {};
     document.getElementById('inf-requests-val').textContent = number(m.running_requests, String, Infinity, true) + ' / ' + number(m.waiting_requests, String, Infinity, true);
@@ -1275,23 +1352,14 @@ async function loadMonitoring() {
       row.cells[3].classList.add('num');
     });
 
-    panel.dataset.updatedAt = new Date().toISOString();
-    panel.dataset.stale = 'false';
-    updated.textContent = 'Updated ' + new Date(panel.dataset.updatedAt).toLocaleTimeString() + (partial ? ' · Some readings unavailable' : '');
+    monitoringFreshness.accept(data.snapshot, requestedAt, partial, inference);
   } catch (err) {
     hostStatus.textContent = 'Admin API: unavailable';
     hostStatus.classList.remove('online');
     hostStatus.classList.add('offline');
-    if (panel.dataset.updatedAt) {
-      panel.dataset.stale = 'true';
-      updated.textContent = 'Stale · Last successful update ' + new Date(panel.dataset.updatedAt).toLocaleTimeString();
-    } else {
-      for (const id of ['host-mem-val', 'active-model-val', 'inf-requests-val', 'kv-cache-val']) document.getElementById(id).textContent = 'Unavailable';
-      document.getElementById('inference-status').textContent = 'Inference: Unavailable';
-      tableMessage(document.getElementById('gpus-body'), 6, 'GPU data unavailable');
-      tableMessage(document.getElementById('workloads-body'), 4, 'Workload data unavailable');
-      updated.textContent = 'Update failed · No successful readings';
-    }
+    monitoringFreshness.failed = true;
+    if (!monitoringFreshness.hasReadings) monitoringFreshness.clearReadings();
+    monitoringFreshness.render();
   } finally {
     delete panel.dataset.loading;
   }
@@ -1985,7 +2053,10 @@ function clearSettings(button) {
 }
 
 setInterval(() => {
-  if (currentTab === 'monitoring') loadMonitoring();
+  if (currentTab === 'monitoring') {
+    monitoringFreshness.render();
+    loadMonitoring();
+  }
   if (currentTab === 'models') checkPullStatus();
 }, 2500);
 
@@ -2002,17 +2073,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8088, help="Listen port (default: 8088)")
     args = parser.parse_args()
 
-    class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-        daemon_threads = True
-
     server_address = (args.host, args.port)
-    httpd = ThreadedHTTPServer(server_address, OksaWebHandler)
-    print(f"OKSA Web service listening on http://{args.host}:{args.port}")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down OKSA Web service.")
-        httpd.server_close()
+    with ThreadedHTTPServer(server_address, OksaWebHandler) as httpd:
+        print(f"OKSA Web service listening on http://{args.host}:{args.port}")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down OKSA Web service.")
 
 
 if __name__ == "__main__":

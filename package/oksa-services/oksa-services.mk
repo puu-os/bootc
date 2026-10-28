@@ -17,6 +17,8 @@ define OKSA_SERVICES_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/libexec/puu/oksa_model_serving.py
 	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/bin/oksa_model_removal.py \
 		$(TARGET_DIR)/usr/libexec/puu/oksa_model_removal.py
+	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/bin/oksa_monitoring.py \
+		$(TARGET_DIR)/usr/libexec/puu/oksa_monitoring.py
 	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/bin/oksa_calibration_state.py \
 		$(TARGET_DIR)/usr/libexec/puu/oksa_calibration_state.py
 	$(INSTALL) -D -m 0644 $(OKSA_SERVICES_FILES)/bin/oksa_settings.py \
