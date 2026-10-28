@@ -777,7 +777,12 @@ def inspect_hf_model(
     revision: str = "main",
     timeout_sec: int = 30,
 ) -> dict | None:
-    rev = urllib.parse.quote(revision, safe="/")
+    repo_pattern = r"[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)?"
+    if (not isinstance(repo_id, str) or not re.fullmatch(repo_pattern, repo_id)
+            or not isinstance(revision, str) or not revision.strip()
+            or re.search(r"[\x00-\x20\x7f]", revision)):
+        return None
+    rev = urllib.parse.quote(revision, safe="")
     api_url = f"https://huggingface.co/api/models/{repo_id}/revision/{rev}?blobs=true"
     headers = {"User-Agent": "puu-oksa/1.0"}
     token = os.environ.get("HF_TOKEN")
@@ -787,14 +792,22 @@ def inspect_hf_model(
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError, KeyError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         return None
 
+    if not isinstance(data, dict):
+        return None
+    resolved_revision = data.get("sha")
+    if not isinstance(resolved_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", resolved_revision):
+        return None
+    canonical_repo = data.get("id")
+    if not isinstance(canonical_repo, str) or not re.fullmatch(repo_pattern, canonical_repo):
+        return None
     siblings = data.get("siblings")
     if not isinstance(siblings, list):
         return None
 
-    repo_id = data.get("id") or repo_id
+    repo_id = canonical_repo
     files = []
     weight_bytes = 0
     config_entry = None
@@ -805,9 +818,12 @@ def inspect_hf_model(
         if not is_serving_file(rfilename):
             continue
         size = entry.get("size", 0)
-        if not isinstance(size, int) or size <= 0:
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
             continue
-        sha256 = entry.get("lfs", {}).get("sha256")
+        lfs = entry.get("lfs", {})
+        if not isinstance(lfs, dict):
+            return None
+        sha256 = lfs.get("sha256")
         blob_id = entry.get("blobId")
         files.append({"path": rfilename, "size": size, "sha256": sha256, "blob_id": blob_id})
         if rfilename == "config.json":
@@ -818,17 +834,19 @@ def inspect_hf_model(
     if not config_entry or weight_bytes == 0:
         return None
 
-    config_dict = {}
-    if isinstance(data.get("config"), dict):
-        config_dict = data["config"]
+    config_dict = data.get("config", {})
+    if not isinstance(config_dict, dict):
+        return None
     if not config_dict:
-        config_url = f"https://huggingface.co/{repo_id}/raw/{rev}/config.json"
+        config_url = f"https://huggingface.co/{repo_id}/raw/{resolved_revision}/config.json"
         cfg_req = urllib.request.Request(config_url, headers=headers)
         try:
             with urllib.request.urlopen(cfg_req, timeout=timeout_sec) as resp:
                 config_dict = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError):
-            pass
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+            return None
+        if not isinstance(config_dict, dict):
+            return None
 
     storage_mib = max(1, (sum(f["size"] for f in files) + 1048575) // 1048576)
     weight_mib = max(1, (weight_bytes + 1048575) // 1048576)
@@ -864,6 +882,7 @@ def inspect_hf_model(
     return {
         "repo_id": repo_id,
         "revision": revision,
+        "resolved_revision": resolved_revision,
         "model_name": model_name,
         "storage_mib": storage_mib,
         "estimated_memory_mib": estimated_memory_mib,
