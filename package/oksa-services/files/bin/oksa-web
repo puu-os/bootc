@@ -1476,7 +1476,13 @@ document.addEventListener('keydown', event => {
   if (event.key !== 'Tab') return;
   const focusable = Array.from(modal.querySelectorAll('input, select, button, [tabindex="0"]')).filter(el => !el.disabled && el.getClientRects().length);
   const first = focusable[0], last = focusable[focusable.length - 1];
-  if (event.shiftKey && (document.activeElement === first || document.activeElement === modal)) {
+  if (!focusable.length) {
+    event.preventDefault();
+    modal.focus();
+  } else if (!modal.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && (document.activeElement === first || document.activeElement === modal)) {
     event.preventDefault();
     last?.focus();
   } else if (!event.shiftKey && document.activeElement === last) {
