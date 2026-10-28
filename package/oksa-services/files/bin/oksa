@@ -252,7 +252,7 @@ def cmd_key_create(
     )
     if not ok:
         die(f"failed to generate key: {res}")
-    key = res.get("key", "")
+    key = res["key"]
     key_alias = res.get("key_alias") or alias or "-"
     exp = res.get("expires") or (f"in {duration}" if duration else "never")
     print("API Key generated successfully:")
