@@ -1140,6 +1140,8 @@ def litellm_key_list(
     user_id: str | None = None, master_key: str | None = None, *, include_service: bool = False,
 ) -> tuple[bool, list[dict] | str]:
     keys = []
+    seen = set()
+    expected_count = None
     page = 1
     while True:
         query = {"return_full_object": "true", "page": page, "size": 100}
@@ -1147,26 +1149,79 @@ def litellm_key_list(
             query["user_id"] = user_id
         status, resp = litellm_api_call("GET", "/key/list?" + urllib.parse.urlencode(query), master_key=master_key)
         if status != 200:
-            return False, str(resp.get("error") or resp.get("message") or f"HTTP {status}")
+            detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
+            return False, f"HTTP {status}" + (f": {detail}" if detail else "")
+        if (not isinstance(resp, dict) or any(field in resp for field in ("error", "errors", "detail"))
+                or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
+            return False, "Invalid LiteLLM key-list response"
         batch = resp.get("keys")
         pages = resp.get("total_pages")
-        if (not isinstance(batch, list) or not all(isinstance(key, dict) for key in batch)
-                or type(pages) is not int or pages < 0 or resp.get("current_page") != page):
+        count = resp.get("total_count")
+        if (not isinstance(batch, list) or not all(
+                isinstance(key, dict) and isinstance(key.get("token"), str) and key["token"].strip()
+                for key in batch)
+                or type(pages) is not int or pages < 0 or type(count) is not int or count < 0
+                or type(resp.get("current_page")) is not int or resp["current_page"] != page
+                or page > max(1, pages) or (expected_count is not None and count != expected_count)):
             return False, "Invalid LiteLLM key-list response"
+        if pages != (count + 99) // 100 and not (count == 0 and pages == 1):
+            return False, "Inconsistent LiteLLM key-list page count"
+        tokens = {key["token"] for key in batch}
+        if (len(batch) != min(100, max(0, count - (page - 1) * 100))
+                or len(tokens) != len(batch) or seen.intersection(tokens)):
+            return False, "Incomplete or duplicate LiteLLM key-list response"
+        expected_count = count
+        seen.update(tokens)
         keys.extend(batch)
         if page >= pages:
+            if len(seen) != count:
+                return False, "Incomplete LiteLLM key-list response"
             return True, keys if include_service else [key for key in keys if key.get("key_alias") != "open-webui"]
         page += 1
 
 
+def litellm_key_absent(token: str, master_key: str | None = None) -> tuple[bool, str]:
+    """Confirm database absence, not a generic missing route or cache propagation."""
+    if not isinstance(token, str) or not token.strip() or token.startswith("sk-"):
+        return False, "A token ID is required to verify absence"
+    endpoint = "/key/info?" + urllib.parse.urlencode({"key": token})
+    try:
+        status, response = litellm_api_call("GET", endpoint, master_key=master_key)
+    except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
+        return False, f"Key absence could not be confirmed: {type(exc).__name__}: {exc}"
+    error = response.get("error") if isinstance(response, dict) else None
+    if status == 404 and error == {
+        "message": "Key not found in database",
+        "type": "not_found_error",
+        "param": "key",
+        "code": "404",
+    }:
+        return True, "Original token is absent from the gateway database"
+    if status == 200:
+        if isinstance(response, dict) and response.get("key") == token and isinstance(response.get("info"), dict):
+            return False, "The original token is still present in the gateway database"
+        return False, "Invalid LiteLLM key-info response (HTTP 200)"
+    detail = error.get("message") if isinstance(error, dict) else error
+    return False, f"Key absence could not be confirmed (HTTP {status})" + (f": {detail}" if detail else "")
+
+
 def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tuple[bool, str]:
-    ok, keys = litellm_key_list(master_key=master_key, include_service=True)
+    if not isinstance(key_or_alias, str) or not key_or_alias.strip():
+        return False, "Key or alias is required"
+    try:
+        ok, keys = litellm_key_list(master_key=master_key, include_service=True)
+    except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
+        return False, f"Cannot list keys before revocation; no write attempted: {type(exc).__name__}: {exc}"
     if not ok:
-        return False, str(keys)
+        return False, f"Cannot list keys before revocation; no write attempted: {keys}"
+    if not isinstance(keys, list) or not all(
+            isinstance(key, dict) and isinstance(key.get("token"), str) and key["token"].strip()
+            for key in keys):
+        return False, "Invalid LiteLLM key-list response; no write attempted"
     hashed = hashlib.sha256(key_or_alias.encode("utf-8")).hexdigest()
-    matches = [key for key in keys if key.get("token") in (key_or_alias, hashed)]
+    matches = [key for key in keys if key["token"] in (key_or_alias, hashed)]
     if not matches and len(key_or_alias) >= 8:
-        matches = [key for key in keys if str(key.get("token") or "").startswith(key_or_alias)]
+        matches = [key for key in keys if key["token"].startswith(key_or_alias)]
     if not matches:
         matches = [key for key in keys if key.get("key_alias") == key_or_alias]
     if not matches:
@@ -1177,14 +1232,24 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
     if key.get("key_alias") == "open-webui":
         return False, "The Open WebUI service key cannot be revoked here"
     token = key.get("token")
-    if not isinstance(token, str) or not token:
-        return False, "Invalid LiteLLM key-list response"
     payload = {"keys": [token]}
-    status, resp = litellm_api_call("POST", "/key/delete", payload=payload, master_key=master_key)
-    if status == 200:
-        return True, f"Key {key_or_alias} revoked"
-    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-    return False, str(err)
+    warning = "Warning: Key revocation not confirmed. The key may still grant access; check the key list before retrying."
+    try:
+        status, resp = litellm_api_call("POST", "/key/delete", payload=payload, master_key=master_key)
+    except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
+        return False, f"{warning} {type(exc).__name__}: {exc}"
+    if status != 200:
+        detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
+        return False, f"{warning} HTTP {status}" + (f": {detail}" if detail else "")
+    if (not isinstance(resp, dict) or resp.get("deleted_keys") != [token]
+            or any(field in resp for field in ("error", "errors", "detail"))
+            or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
+        return False, f"{warning} Invalid LiteLLM key-delete acknowledgement (HTTP 200)"
+    # LiteLLM 1.90.1 echoes deletion requests; an unfiltered scan is not a snapshot.
+    absent, detail = litellm_key_absent(token, master_key=master_key)
+    if not absent:
+        return False, f"{warning} {detail}"
+    return True, f"Key {key_or_alias} revoked"
 
 
 def _legacy_model_map(state_dir: Path = STATE_DIR) -> dict[str, str]:
