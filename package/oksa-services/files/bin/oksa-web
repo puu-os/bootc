@@ -653,7 +653,7 @@ header {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background-color: var(--success);
+  background-color: var(--text-muted);
 }
 nav {
   display: flex;
@@ -706,6 +706,8 @@ nav {
 .bar-fill.crit { background-color: var(--danger); }
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .status-indicator.offline::before { background-color: var(--danger); }
+.status-indicator.online::before { background-color: var(--success); }
+#tab-monitoring[data-stale="true"] h2::after { content: " · Stale"; color: var(--warning); font-size: 0.8rem; }
 .table-container { overflow-x: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.8125rem; }
 th {
@@ -958,7 +960,7 @@ tr:hover { background-color: var(--bg-subtle); }
     <h1>OKSA Web</h1>
   </div>
   <div class="header-meta">
-    <span class="status-indicator" id="host-status">Host Online</span>
+    <span class="status-indicator" id="host-status">Admin API: checking</span>
     <span id="mon-updated" role="status"></span>
   </div>
 </header>
@@ -982,6 +984,7 @@ tr:hover { background-color: var(--bg-subtle); }
         <h2>Model</h2>
         <div class="metric-value" id="active-model-val">-</div>
         <div class="metric-sub" id="active-model-sub"></div>
+        <div class="metric-sub" id="inference-status">Inference: Unavailable</div>
       </div>
       <div class="card metric-card">
         <h2>Inference Requests</h2>
@@ -1291,76 +1294,117 @@ function usageBar(pct) {
 }
 
 async function loadMonitoring() {
+  const panel = document.getElementById('tab-monitoring');
+  if (panel.dataset.loading) return;
+  panel.dataset.loading = 'true';
   const hostStatus = document.getElementById('host-status');
   const updated = document.getElementById('mon-updated');
-  try {
-    const res = await fetch('/api/status');
-    const data = await res.json();
-    if (!data.ok) throw new Error('status unavailable');
-    const s = data.status || {};
-
-    hostStatus.textContent = 'Host Online';
-    hostStatus.classList.remove('offline');
-
-    const mem = s.host_memory;
-    if (mem) {
-      document.getElementById('host-mem-val').textContent = mem.used_mib + ' / ' + mem.total_mib + ' MiB';
-      document.getElementById('host-mem-sub').textContent = mem.used_pct + '% memory used';
-      setMetricLevel('host-mem-val', metricLevel(mem.used_pct || 0));
+  let partial = false;
+  const numeric = (value, maximum = Infinity) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= maximum;
+  const number = (value, format = String, maximum = Infinity, integer = false) => {
+    if (!numeric(value, maximum) || (integer && !Number.isInteger(value))) {
+      partial = true;
+      return 'Unavailable';
     }
+    return format(value);
+  };
+  const text = value => {
+    if (typeof value !== 'string' || !value.trim()) { partial = true; return 'Unavailable'; }
+    return value === '-' ? 'None' : value;
+  };
+  try {
+    const res = await fetch('/api/status', {signal: AbortSignal.timeout(60000)});
+    if (!res.ok) throw new Error('status unavailable');
+    const data = await res.json();
+    if (data.ok !== true || !data.status || typeof data.status !== 'object' || Array.isArray(data.status)) throw new Error('invalid status');
+    const s = data.status;
+    hostStatus.textContent = 'Admin API: reachable';
+    hostStatus.classList.remove('offline');
+    hostStatus.classList.add('online');
 
-    document.getElementById('active-model-val').textContent = s.active_model || 'None';
-    document.getElementById('active-model-sub').textContent = 'Selected: ' + (s.selected_model || 'None');
+    const mem = s.host_memory || {};
+    document.getElementById('host-mem-val').textContent = number(mem.used_mib) + ' / ' + number(mem.total_mib > 0 ? mem.total_mib : null) + ' MiB';
+    document.getElementById('host-mem-sub').textContent = number(mem.used_pct, value => value + '% memory used', 100);
+    setMetricLevel('host-mem-val', numeric(mem.used_pct, 100) ? metricLevel(mem.used_pct) : 'ok');
+
+    document.getElementById('active-model-val').textContent = text(s.active_model);
+    document.getElementById('active-model-sub').textContent = 'Selected: ' + text(s.selected_model);
+    let inference = 'Unavailable';
+    if (s.model_status === 'stopped') inference = 'Stopped';
+    else if (s.model_status === 'no-model') inference = 'No model loaded';
+    else if (s.model_status === 'not-ready') inference = 'Model not ready';
+    else if (s.model_status === 'ready') {
+      if (s.gateway_status === 'ready') inference = 'Ready';
+      else if (s.gateway_status === 'authentication-required') inference = 'Unverified — gateway authentication required';
+      else inference = 'Gateway unavailable';
+    }
+    if (inference === 'Unavailable' || !['ready', 'authentication-required', 'unreachable'].includes(s.gateway_status)) partial = true;
+    document.getElementById('inference-status').textContent = 'Inference: ' + inference;
 
     const m = s.metrics || {};
-    const waiting = m.waiting_requests || 0;
-    document.getElementById('inf-requests-val').textContent = (m.running_requests || 0) + ' / ' + waiting;
-    setMetricLevel('inf-requests-val', waiting > 0 ? 'warn' : 'ok');
-    document.getElementById('inf-requests-sub').textContent = waiting > 0 ? 'Running / Waiting (queued)' : 'Running / Waiting';
-
-    const kvPct = m.kv_cache_usage_pct || 0;
-    document.getElementById('kv-cache-val').textContent = kvPct + '%';
-    setMetricLevel('kv-cache-val', metricLevel(kvPct));
+    document.getElementById('inf-requests-val').textContent = number(m.running_requests, String, Infinity, true) + ' / ' + number(m.waiting_requests, String, Infinity, true);
+    setMetricLevel('inf-requests-val', numeric(m.waiting_requests) && m.waiting_requests > 0 ? 'warn' : 'ok');
+    document.getElementById('inf-requests-sub').textContent = numeric(m.waiting_requests) && m.waiting_requests > 0 ? 'Running / Waiting (queued)' : 'Running / Waiting';
+    document.getElementById('kv-cache-val').textContent = number(m.kv_cache_usage_pct, value => value + '%', 100);
+    setMetricLevel('kv-cache-val', numeric(m.kv_cache_usage_pct, 100) ? metricLevel(m.kv_cache_usage_pct) : 'ok');
 
     const gBody = document.getElementById('gpus-body');
     gBody.replaceChildren();
-    if (s.gpus && s.gpus.length > 0) {
-      s.gpus.forEach(g => {
-        const row = tableRow(gBody, ['[' + (g.index ?? '-') + ']', g.name || 'NVIDIA', '', '', '', '']).parentElement;
-        row.cells[2].innerHTML = usageBar(g.gpu_util_pct || 0);
-        const vramPct = g.memory_total_mib ? (g.memory_used_mib || 0) / g.memory_total_mib * 100 : 0;
-        row.cells[3].innerHTML = usageBar(vramPct) + ' ' + Math.round(g.memory_used_mib || 0) + ' / ' + Math.round(g.memory_total_mib || 0) + ' MiB';
-        row.cells[4].textContent = (g.temperature_c || 0) + '°C';
-        row.cells[5].textContent = g.power_w ? Number(g.power_w).toFixed(1) + ' W' : '-';
-        row.cells[4].classList.add('num');
-        row.cells[5].classList.add('num');
-      });
-    } else {
-      tableMessage(gBody, 6, 'No GPU data');
-    }
+    if (!Array.isArray(s.gpus)) { partial = true; tableMessage(gBody, 6, 'GPU data unavailable'); }
+    else if (!s.gpus.length) tableMessage(gBody, 6, 'No GPUs reported');
+    else s.gpus.forEach(g => {
+      if (!g || typeof g !== 'object') { partial = true; return; }
+      const row = tableRow(gBody, [number(g.index, value => '[' + value + ']', Infinity, true), text(g.name), '', '', '', '']).parentElement;
+      if (numeric(g.gpu_util_pct, 100)) row.cells[2].innerHTML = usageBar(g.gpu_util_pct);
+      else row.cells[2].textContent = number(g.gpu_util_pct, String, 100);
+      const used = number(g.memory_used_mib, value => String(Math.round(value)));
+      const total = number(g.memory_total_mib > 0 ? g.memory_total_mib : null, value => String(Math.round(value)));
+      row.cells[3].textContent = used + ' / ' + total + ' MiB';
+      if (numeric(g.memory_used_mib) && numeric(g.memory_total_mib) && g.memory_total_mib > 0 && g.memory_used_mib <= g.memory_total_mib) {
+        row.cells[3].innerHTML = usageBar(g.memory_used_mib / g.memory_total_mib * 100) + ' ' + used + ' / ' + total + ' MiB';
+      }
+      row.cells[4].textContent = number(g.temperature_c, value => value + '°C');
+      row.cells[5].textContent = number(g.power_w, value => value.toFixed(1) + ' W');
+      row.cells[4].classList.add('num');
+      row.cells[5].classList.add('num');
+    });
 
     const wBody = document.getElementById('workloads-body');
     wBody.replaceChildren();
-    if (s.workloads && s.workloads.length > 0) {
-      s.workloads.forEach(w => {
-        const row = tableRow(wBody, [w.name, '', '', '']).parentElement;
-        const pill = document.createElement('span');
-        pill.className = 'pill ' + (w.phase === 'Running' ? 'ok' : 'insufficient');
-        pill.textContent = w.phase;
-        row.cells[1].replaceChildren(pill);
-        row.cells[2].textContent = w.ready ? 'Yes' : 'No';
-        row.cells[3].textContent = String(w.restarts || 0);
-        row.cells[3].classList.add('num');
-      });
-    } else {
-      tableMessage(wBody, 4, 'No workloads reported');
-    }
+    if (!Array.isArray(s.workloads)) { partial = true; tableMessage(wBody, 4, 'Workload data unavailable'); }
+    else if (!s.workloads.length) tableMessage(wBody, 4, 'No workloads reported');
+    else s.workloads.forEach(w => {
+      if (!w || typeof w !== 'object') { partial = true; return; }
+      const row = tableRow(wBody, [text(w.name), '', '', '']).parentElement;
+      const pill = document.createElement('span');
+      pill.className = 'pill ' + (w.phase === 'Running' && w.ready === true ? 'ok' : 'insufficient');
+      pill.textContent = text(w.phase);
+      row.cells[1].replaceChildren(pill);
+      if (typeof w.ready === 'boolean') row.cells[2].textContent = w.ready ? 'Yes' : 'No';
+      else { partial = true; row.cells[2].textContent = 'Unavailable'; }
+      row.cells[3].textContent = number(w.restarts, String, Infinity, true);
+      row.cells[3].classList.add('num');
+    });
 
-    updated.textContent = 'Updated ' + new Date().toLocaleTimeString();
+    panel.dataset.updatedAt = new Date().toISOString();
+    panel.dataset.stale = 'false';
+    updated.textContent = 'Updated ' + new Date(panel.dataset.updatedAt).toLocaleTimeString() + (partial ? ' · Some readings unavailable' : '');
   } catch (err) {
-    hostStatus.textContent = 'Host Unreachable';
+    hostStatus.textContent = 'Admin API: unavailable';
+    hostStatus.classList.remove('online');
     hostStatus.classList.add('offline');
-    updated.textContent = 'Last update failed';
+    if (panel.dataset.updatedAt) {
+      panel.dataset.stale = 'true';
+      updated.textContent = 'Stale · Last successful update ' + new Date(panel.dataset.updatedAt).toLocaleTimeString();
+    } else {
+      for (const id of ['host-mem-val', 'active-model-val', 'inf-requests-val', 'kv-cache-val']) document.getElementById(id).textContent = 'Unavailable';
+      document.getElementById('inference-status').textContent = 'Inference: Unavailable';
+      tableMessage(document.getElementById('gpus-body'), 6, 'GPU data unavailable');
+      tableMessage(document.getElementById('workloads-body'), 4, 'Workload data unavailable');
+      updated.textContent = 'Update failed · No successful readings';
+    }
+  } finally {
+    delete panel.dataset.loading;
   }
 }
 

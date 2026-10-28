@@ -5,6 +5,7 @@
 import argparse
 import os
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -317,6 +318,10 @@ def cmd_key_revoke(key_or_alias: str) -> None:
 
 
 def format_status_text(data: dict) -> str:
+    def reading(value, format_spec: str = "", unit: str = "") -> str:
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            return "Unavailable"
+        return f"{value:{format_spec}}{unit}"
     lines = []
     lines.append("=== Puu OS Model Serving Status ===")
     serving_str = "ENABLED" if data.get("serving_enabled") else "DISABLED"
@@ -326,46 +331,52 @@ def format_status_text(data: dict) -> str:
     lines.append(f"Serving:      {serving_str}")
     lines.append(f"Active Model: {active}")
     lines.append(f"Selected:     {selected}")
+    lines.append(f"Model health: {data.get('model_status', 'unavailable')}")
     lines.append(f"Gateway:      {gateway}")
     lines.append("")
 
     mem = data.get("host_memory", {})
     if mem:
-        lines.append(f"Host Memory:  {mem.get('used_mib', 0)} / {mem.get('total_mib', 0)} MiB ({mem.get('used_pct', 0)}% used)")
+        lines.append(f"Host Memory:  {reading(mem.get('used_mib'))} / {reading(mem.get('total_mib'))} MiB ({reading(mem.get('used_pct'), unit='% used')})")
+    else:
+        lines.append("Host Memory:  Unavailable")
 
-    gpus = data.get("gpus", [])
-    if gpus:
+    gpus = data.get("gpus")
+    if gpus is None:
+        lines.append("Accelerators: Unavailable")
+    elif gpus:
         lines.append("")
         lines.append("Accelerators:")
         lines.append(f"  {'GPU':<5} {'NAME':<24} {'UTIL':<8} {'VRAM USED':<16} {'TEMP':<8} POWER")
         for g in gpus:
-            vram_str = f"{g.get('memory_used_mib', 0):.0f} / {g.get('memory_total_mib', 0):.0f} MiB"
+            vram_str = f"{reading(g.get('memory_used_mib'), '.0f')} / {reading(g.get('memory_total_mib'), '.0f')} MiB"
             lines.append(
-                f"  [{g.get('index')}]  {g.get('name', 'NVIDIA')[:22]:<24} "
-                f"{g.get('gpu_util_pct', 0):.0f}%     "
+                f"  [{reading(g.get('index'))}]  {g.get('name', 'Unavailable')[:22]:<24} "
+                f"{reading(g.get('gpu_util_pct'), '.0f', '%'):<8} "
                 f"{vram_str:<16} "
-                f"{g.get('temperature_c', 0):.0f}°C    "
-                f"{g.get('power_w', 0):.1f}W"
+                f"{reading(g.get('temperature_c'), '.0f', '°C'):<8} "
+                f"{reading(g.get('power_w'), '.1f', 'W')}"
             )
 
-    workloads = data.get("workloads", [])
-    if workloads:
+    workloads = data.get("workloads")
+    if workloads is None:
+        lines.append("Cluster Workloads: Unavailable")
+    elif workloads:
         lines.append("")
         lines.append("Cluster Workloads:")
         lines.append(f"  {'NAME':<36} {'STATUS':<12} {'READY':<8} RESTARTS")
         for w in workloads:
-            ready_str = "yes" if w.get("ready") else "no"
-            lines.append(f"  {w.get('name', '-')[:34]:<36} {w.get('phase', '-'):<12} {ready_str:<8} {w.get('restarts', 0)}")
+            ready_str = "unavailable" if w.get("ready") is None else "yes" if w["ready"] else "no"
+            lines.append(f"  {w.get('name', '-')[:34]:<36} {w.get('phase', '-'):<12} {ready_str:<8} {reading(w.get('restarts'))}")
 
-    metrics = data.get("metrics", {})
-    if metrics:
-        lines.append("")
-        lines.append("Inference Telemetry:")
-        lines.append(f"  Running Requests:  {metrics.get('running_requests', 0)}")
-        lines.append(f"  Waiting Requests:  {metrics.get('waiting_requests', 0)}")
-        lines.append(f"  KV Cache Usage:    {metrics.get('kv_cache_usage_pct', 0.0)}%")
-        if "swapped_requests" in metrics:
-            lines.append(f"  Swapped Requests:  {metrics.get('swapped_requests', 0)}")
+    metrics = data.get("metrics") or {}
+    lines.append("")
+    lines.append("Inference Telemetry:")
+    lines.append(f"  Running Requests:  {reading(metrics.get('running_requests'))}")
+    lines.append(f"  Waiting Requests:  {reading(metrics.get('waiting_requests'))}")
+    lines.append(f"  KV Cache Usage:    {reading(metrics.get('kv_cache_usage_pct'), unit='%')}")
+    if "swapped_requests" in metrics:
+        lines.append(f"  Swapped Requests:  {reading(metrics.get('swapped_requests'))}")
 
     return "\n".join(lines)
 
