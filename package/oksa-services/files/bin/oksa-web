@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 import argparse
+import fcntl
 import http.server
 import json
 import os
@@ -443,24 +444,124 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(400, {"ok": False, "error": "Invalid model name"})
                 return
             with control_lock:
-                active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
-                selected_model_file, serving_disabled_file = control_files()
-                if ms.read_first_line(active_model_file) == model_name:
-                    selected_model_file.unlink(missing_ok=True)
-                    ms.atomic_write_text(serving_disabled_file, "")
-                    subprocess.run([str(planner_bin)], capture_output=True)
-                elif ms.read_first_line(selected_model_file) in (model_name, ms.public_model_name(model_name, state_dir)):
-                    selected_model_file.unlink(missing_ok=True)
+                stage = "shutdown"
+                deleted = False
+                try:
+                    with (ms.MODELS_DIR.parent / f".{model_name}.preseed.lock").open("a") as model_lock:
+                        try:
+                            fcntl.flock(model_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            self.send_json(409, {"ok": False, "deleted": False, "error": "Model is busy. Wait for its download or update to finish and retry deletion."})
+                            return
+                        active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
+                        selected_model_file, serving_disabled_file = control_files()
+                        public_name = ms.public_model_name(model_name, state_dir)
+                        if ms.read_first_line(active_model_file) == model_name:
+                            selected_model_file.unlink(missing_ok=True)
+                            ms.atomic_write_text(serving_disabled_file, "")
+                            subprocess.run([str(planner_bin), "--require-reconcile"], capture_output=True, text=True, check=True)
+                        elif ms.read_first_line(selected_model_file) in (model_name, public_name):
+                            selected_model_file.unlink(missing_ok=True)
 
-                model_dir = ms.MODELS_DIR / model_name
-                public_name = ms.public_model_name(model_name, state_dir)
-                if model_dir.exists():
-                    shutil.rmtree(model_dir)
-                env_file = state_dir / "models.d" / f"{model_name}.env"
-                env_file.unlink(missing_ok=True)
-                run_discover()
-                subprocess.run([str(planner_bin)], capture_output=True)
-            self.send_json(200, {"ok": True, "message": f"Model {public_name} deleted"})
+                        state_dir.mkdir(parents=True, exist_ok=True)
+                        with (state_dir / "planner.lock").open("a") as lock:
+                            fcntl.flock(lock, fcntl.LOCK_EX)
+                            with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=True):
+                                if ms.read_first_line(active_model_file) == model_name:
+                                    raise ValueError("The model is still active or activation is pending; stop serving and retry deletion")
+                                identity = ms.model_id(model_name)
+                                manifest = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", str(ms.CALIBRATED_MANIFEST_PATH.parent))) / "32-vllm-generated.yaml"
+                                if manifest.exists():
+                                    manifest_text = manifest.read_text(encoding="utf-8")
+                                    try:
+                                        content = json.loads(manifest_text)
+                                    except json.JSONDecodeError:
+                                        if manifest_text.strip() == "apiVersion: v1\nkind: List\nitems: []":
+                                            content = {"kind": "List", "items": []}
+                                        else:
+                                            result = ms.run_kubectl(
+                                                "create", "--dry-run=client", "--validate=false", "-f", str(manifest),
+                                                "-o", "json", "--request-timeout=5s", timeout=10,
+                                            )
+                                            text = result.stdout.strip()
+                                            if not text:
+                                                raise ValueError("Empty generated workload response")
+                                            decoder = json.JSONDecoder()
+                                            objects, pos = [], 0
+                                            while pos < len(text):
+                                                item, pos = decoder.raw_decode(text, pos)
+                                                objects.append(item)
+                                                while pos < len(text) and text[pos].isspace():
+                                                    pos += 1
+                                            content = objects[0] if len(objects) == 1 else {"kind": "List", "items": objects}
+                                    if not isinstance(content, dict):
+                                        raise ValueError("Invalid generated workload manifest")
+                                    items = content.get("items") if content.get("kind") == "List" else [content]
+                                    if not isinstance(items, list):
+                                        raise ValueError("Invalid generated workload manifest items")
+                                    for item in items:
+                                        if not isinstance(item, dict) or item.get("kind") not in ("Service", "Deployment"):
+                                            raise ValueError("Unexpected generated workload manifest entry")
+                                        if item["kind"] != "Deployment":
+                                            continue
+                                        metadata, spec = item.get("metadata"), item.get("spec")
+                                        if not isinstance(metadata, dict) or not isinstance(spec, dict) or not isinstance(metadata.get("labels", {}), dict):
+                                            raise ValueError("Invalid generated deployment manifest")
+                                        if metadata.get("name") == f"puu-vllm-{identity}" or metadata.get("labels", {}).get(f"{ms.label_namespace()}/model-name") == identity:
+                                            if type(spec.get("replicas", 1)) is not int or spec.get("replicas", 1) != 0:
+                                                raise ValueError("A pending manifest can start this model; stop serving and retry deletion")
+                                result = ms.run_kubectl(
+                                    "get", "deployment,replicaset,pod", "-n", ms.OKSA_NAMESPACE,
+                                    "-l", f"{ms.label_namespace()}/model-name={identity}",
+                                    "-o", "json", "--request-timeout=5s", timeout=10,
+                                )
+                                workloads = json.loads(result.stdout)
+                                if not isinstance(workloads, dict) or not isinstance(workloads.get("items"), list):
+                                    raise ValueError("Invalid Kubernetes workload response")
+                                for workload in workloads["items"]:
+                                    if not isinstance(workload, dict) or workload.get("kind") not in ("Deployment", "ReplicaSet", "Pod"):
+                                        raise ValueError("Invalid Kubernetes workload entry")
+                                    stopped = False
+                                    if workload["kind"] != "Pod":
+                                        spec, status, metadata = (workload.get(field, {}) for field in ("spec", "status", "metadata"))
+                                        if not all(isinstance(field, dict) for field in (spec, status, metadata)):
+                                            raise ValueError("Invalid Kubernetes controller status")
+                                        desired, remaining = spec.get("replicas", 1), status.get("replicas", 0)
+                                        generation, observed = metadata.get("generation"), status.get("observedGeneration")
+                                        stopped = (
+                                            type(desired) is int and desired == 0 and type(remaining) is int and remaining == 0
+                                            and type(generation) is int and generation > 0
+                                            and type(observed) is int and observed == generation
+                                        )
+                                    if not stopped:
+                                        self.send_json(409, {"ok": False, "deleted": False, "error": "Model not deleted: shutdown is not confirmed. Stop or remove remaining workloads, then retry deletion."})
+                                        return
+                                stage = "deletion"
+                                model_dir = ms.MODELS_DIR / model_name
+                                if model_dir.exists():
+                                    shutil.rmtree(model_dir)
+                                (state_dir / "models.d" / f"{model_name}.env").unlink(missing_ok=True)
+                                deleted = True
+
+                            subprocess.run([str(discover_bin)], capture_output=True, text=True, check=True)
+                            catalog = (state_dir / "models.list").read_text(encoding="utf-8")
+                            metadata = json.loads((state_dir / "models.json").read_text(encoding="utf-8"))
+                            if not isinstance(metadata, list) or not all(isinstance(item, dict) for item in metadata):
+                                raise ValueError("Invalid refreshed model catalog")
+                            if (any(line.split("\t", 1)[0].strip() == model_name for line in catalog.splitlines())
+                                    or any(item.get("name") == model_name for item in metadata)
+                                    or ms.parse_env_file(state_dir / "default-model.env").get("PUU_VLLM_MODEL_NAME") == model_name):
+                                raise ValueError("Deleted model remains in the catalog; discovery did not finish")
+                        subprocess.run([str(planner_bin), "--require-reconcile"], capture_output=True, text=True, check=True)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    detail = (exc.stderr or exc.stdout or str(exc)).strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+                    if deleted:
+                        self.send_json(200, {"ok": True, "deleted": True, "reconciled": False, "warning": f"Model {public_name} was deleted, but catalog/workload reconciliation failed: {detail}. The model list may be out of date. Resolve the service error and refresh."})
+                    else:
+                        message = "Shutdown could not be confirmed; model files and registration were preserved" if stage == "shutdown" else "Model removal failed and may be partial; check model storage before retrying"
+                        self.send_json(503 if stage == "shutdown" else 500, {"ok": False, "deleted": False, "error": f"{message}: {detail}"})
+                    return
+            self.send_json(200, {"ok": True, "deleted": True, "reconciled": True, "message": f"Model {public_name} deleted"})
             return
 
         self.send_json(404, {"ok": False, "error": "Not Found"})
@@ -665,7 +766,7 @@ tr:hover { background-color: var(--bg-subtle); }
 .btn-secondary { background-color: var(--bg-surface); color: var(--text); border: 1px solid var(--border); }
 .btn-secondary:hover { background-color: var(--bg-subtle); border-color: var(--border-strong); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.form-error { color: var(--danger); margin-top: 10px; font-size: 0.8125rem; }
+.form-error { color: var(--danger); margin-top: 10px; font-size: 0.8125rem; overflow-wrap: anywhere; }
 .modal {
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -931,13 +1032,14 @@ tr:hover { background-color: var(--bg-subtle); }
       <div class="action-bar">
         <div class="action-bar-heading">
           <h2>Models</h2>
-          <p id="models-summary" class="metric-sub">Loading catalog...</p>
+          <p id="models-summary" class="metric-sub" tabindex="-1">Loading catalog...</p>
         </div>
         <div class="action-bar-actions">
           <button class="btn btn-secondary btn-sm" id="models-stop" onclick="stopServing(this)" disabled>Stop</button>
           <button class="btn btn-sm" onclick="openAddModal()">Download</button>
         </div>
       </div>
+      <p id="models-error" class="form-error" role="alert" tabindex="-1"></p>
       <div class="table-container">
         <table>
           <thead>
@@ -1371,14 +1473,21 @@ async function stopServing(button) {
 }
 
 async function removeModel(name, button) {
-  if (!confirm('Remove model ' + name + '?')) return;
+  if (button?.disabled || !confirm('Remove model ' + name + '? If it is serving, it will be stopped first.')) return;
+  const error = document.getElementById('models-error');
+  error.textContent = '';
   if (button) button.disabled = true;
   try {
-    const d = await api('/api/models/' + encodeURIComponent(name), { method: 'DELETE' });
-    showToast(d.message);
+    const d = await api('/api/models/' + encodeURIComponent(name), {method: 'DELETE'});
+    if (d.reconciled === false) error.textContent = d.warning;
+    else showToast(d.message);
     await loadModels();
-  } catch (err) { alert(err.message); }
-  finally { if (button) button.disabled = false; }
+  } catch (err) { error.textContent = err.message; }
+  finally {
+    if (button) button.disabled = false;
+    if (button?.isConnected) button.focus();
+    else (error.textContent ? error : document.getElementById('models-summary')).focus();
+  }
 }
 
 function openAddModal() {

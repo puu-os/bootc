@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+import argparse
 import dataclasses
 import fcntl
 import json
@@ -611,7 +612,7 @@ def stop_generic_workloads(keep_app: str = "") -> None:
         )
 
 
-def reconcile(dry_run: bool) -> None:
+def reconcile(dry_run: bool, require_reconcile: bool = False) -> None:
     state_dir = ms.STATE_DIR
     models_dir = ms.MODELS_DIR
     manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
@@ -626,7 +627,7 @@ def reconcile(dry_run: bool) -> None:
     selected_model_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
     serving_disabled_file = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
     selected_model = os.environ.get("PUU_VLLM_SELECTED_MODEL", "")
-    require_selected_model = ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False)
+    require_selected_model = require_reconcile or ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False)
     ignore_serving_disabled = ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
 
     disabled = not ignore_serving_disabled and serving_disabled_file.is_file()
@@ -746,10 +747,15 @@ def reconcile(dry_run: bool) -> None:
         active_model_file.unlink(missing_ok=True)
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Reconcile model serving workloads")
+    parser.add_argument("--require-reconcile", action="store_true", help="Fail instead of skipping live reconciliation")
+    args = parser.parse_args()
     manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
     dry_run = (ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
                or manifest_dir != ms.CALIBRATED_MANIFEST_PATH.parent)
     if dry_run:
+        if args.require_reconcile:
+            sys.exit("Live reconciliation is required; dry-run configuration is active")
         reconcile(dry_run=True)
         return
     ms.STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -758,15 +764,17 @@ def main() -> None:
         try:
             calibration_lock = (STATUS_PATH.parent / "lock").open("a")
         except FileNotFoundError:
+            if args.require_reconcile:
+                sys.exit("Calibration has not initialized; reconciliation was not performed")
             return
         with calibration_lock:
             try:
                 fcntl.flock(calibration_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
-                if ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False):
+                if args.require_reconcile or ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False):
                     sys.exit("Calibration is in progress")
                 return
-            reconcile(dry_run=False)
+            reconcile(dry_run=False, require_reconcile=args.require_reconcile)
 
 
 if __name__ == "__main__":
