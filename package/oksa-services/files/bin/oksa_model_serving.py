@@ -1039,11 +1039,19 @@ def litellm_user_create(
         payload["user_email"] = email
     if max_budget is not None:
         payload["max_budget"] = max_budget
-    status, resp = litellm_api_call("POST", "/user/new", payload=payload, master_key=master_key)
-    if status == 200:
-        return True, resp
-    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-    return False, str(err)
+    warning = "Warning: User creation not confirmed. The user may exist; check before retrying."
+    try:
+        status, resp = litellm_api_call("POST", "/user/new", payload=payload, master_key=master_key)
+    except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
+        return False, f"{warning} {type(exc).__name__}: {exc}"
+    if status != 200:
+        detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
+        return False, f"{warning} HTTP {status}" + (f": {detail}" if detail else "")
+    if (not isinstance(resp, dict) or resp.get("user_id") != user_id
+            or any(field in resp for field in ("error", "errors", "detail"))
+            or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
+        return False, f"{warning} Invalid LiteLLM user-create response (HTTP 200)"
+    return True, resp
 
 
 def litellm_user_list(master_key: str | None = None) -> tuple[bool, list[dict] | str]:
@@ -1106,11 +1114,20 @@ def litellm_key_create(
         payload["max_budget"] = max_budget
     if duration:
         payload["duration"] = duration
-    status, resp = litellm_api_call("POST", "/key/generate", payload=payload, master_key=master_key)
-    if status == 200:
-        return True, resp
-    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-    return False, str(err)
+    warning = "Warning: Key creation not confirmed. The key may exist; check before retrying."
+    try:
+        status, resp = litellm_api_call("POST", "/key/generate", payload=payload, master_key=master_key)
+    except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
+        return False, f"{warning} {type(exc).__name__}: {exc}"
+    if status != 200:
+        detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
+        return False, f"{warning} HTTP {status}" + (f": {detail}" if detail else "")
+    if (not isinstance(resp, dict) or not isinstance(resp.get("key"), str) or not resp["key"].strip()
+            or ("user_id" in resp and resp["user_id"] != user_id)
+            or any(field in resp for field in ("error", "errors", "detail"))
+            or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
+        return False, f"{warning} Invalid LiteLLM key-create response (HTTP 200)"
+    return True, resp
 
 
 def litellm_key_list(
