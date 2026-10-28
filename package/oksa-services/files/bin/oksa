@@ -18,6 +18,7 @@ for directory in (Path(__file__).resolve().parent, libexec_dir):
         sys.path.insert(0, str(directory))
 import oksa_model_serving as ms
 import oksa_model_removal as removal
+import oksa_user_deletion as user_deletion
 
 
 def die(msg: str) -> None:
@@ -200,10 +201,10 @@ def cmd_user_create(user_id: str, email: str | None = None, budget: float | None
 
 def cmd_user_delete(user_id: str) -> None:
     check_admin_privileges()
-    ok, res = ms.litellm_user_delete(user_id)
-    if not ok:
-        die(f"failed to delete user: {res}")
-    print(res)
+    result = user_deletion.UserDeletionService().delete(user_id)
+    if result.deleted is not True:
+        die(result.message)
+    print(result.message)
 
 
 def cmd_user_info(user_id: str) -> None:
