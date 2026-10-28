@@ -912,21 +912,6 @@ tr:hover { background-color: var(--bg-subtle); }
   font-size: 0.8125rem;
 }
 .checkbox-row input { width: auto; margin: 0; }
-.spend-bar {
-  width: 100%;
-  height: 4px;
-  background: var(--border);
-  border-radius: 2px;
-  overflow: hidden;
-  margin-top: 2px;
-}
-.spend-bar-fill {
-  height: 100%;
-  background: var(--primary);
-  border-radius: 2px;
-}
-.spend-bar-fill.warn { background: var(--warning); }
-.spend-bar-fill.danger { background: var(--danger); }
 .model-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1080,8 +1065,8 @@ tr:hover { background-color: var(--bg-subtle); }
       <p id="users-status" role="status">Loading users...</p>
       <div class="table-container">
         <table>
-          <thead><tr><th>User ID</th><th>Email</th><th>Active Keys</th><th>Spend / Budget</th><th>Actions</th></tr></thead>
-          <tbody id="users-body"><tr><td colspan="5">Loading users...</td></tr></tbody>
+          <thead><tr><th>User ID</th><th>Email</th><th>Active Keys</th><th>Actions</th></tr></thead>
+          <tbody id="users-body"><tr><td colspan="4">Loading users...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1095,8 +1080,8 @@ tr:hover { background-color: var(--bg-subtle); }
       </div>
       <div class="table-container">
         <table>
-          <thead><tr><th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Spend / Budget</th><th>Expires</th><th>Actions</th></tr></thead>
-          <tbody id="keys-body"><tr><td colspan="7">Loading API keys...</td></tr></tbody>
+          <thead><tr><th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Expires</th><th>Actions</th></tr></thead>
+          <tbody id="keys-body"><tr><td colspan="6">Loading API keys...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1170,10 +1155,6 @@ tr:hover { background-color: var(--bg-subtle); }
         <label for="user-email">Email (optional)</label>
         <input type="email" id="user-email" placeholder="dev@example.org">
       </div>
-      <div class="input-group">
-        <label for="user-budget">Budget (USD, optional)</label>
-        <input type="number" min="0" step="0.01" id="user-budget" placeholder="100.00">
-      </div>
       <p id="user-error" class="form-error" role="alert"></p>
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary" onclick="closeModal('user-modal')">Cancel</button>
@@ -1209,10 +1190,6 @@ tr:hover { background-color: var(--bg-subtle); }
         </div>
         <p id="key-model-count" role="status">0 models selected</p>
         <div id="key-models" class="model-chips"></div>
-      </div>
-      <div class="input-group">
-        <label for="key-spend">Budget (USD, optional)</label>
-        <input type="number" min="0" step="0.01" id="key-spend" placeholder="50.00">
       </div>
       <div class="input-group">
         <label for="key-duration">Expires in (optional, e.g. 30d, 24h)</label>
@@ -1817,31 +1794,18 @@ let keyCounts = null;
 let usersLoad = 0;
 let keysLoad = 0;
 
-function budgetMarkup(spend, budget) {
-  const used = Number(spend ?? 0);
-  const limit = budget == null ? null : Number(budget);
-  if (!Number.isFinite(used) || (limit !== null && (!Number.isFinite(limit) || limit < 0))) return 'Budget unavailable';
-  const text = '$' + used.toFixed(2) + ' / ' + (limit === null ? 'Unlimited' : '$' + limit.toFixed(2));
-  if (limit === null) return text;
-  const percent = limit === 0 ? 100 : Math.max(0, used / limit * 100);
-  const state = percent >= 100 ? 'danger' : percent >= 80 ? 'warn' : '';
-  const status = percent >= 100 ? 'Limit reached' : percent >= 80 ? 'Approaching limit' : Math.round(percent) + '% used';
-  return text + '<div class="spend-bar" aria-hidden="true"><div class="spend-bar-fill ' + state + '" style="width:' + Math.min(100, percent) + '%"></div></div><span class="metric-sub">' + status + '</span>';
-}
-
 function renderUsers() {
   const body = document.getElementById('users-body');
   body.replaceChildren();
   const users = cachedUsers || [];
   if (!users.length) {
-    tableMessage(body, 5, 'No users. Create a user to issue API keys.');
+    tableMessage(body, 4, 'No users. Create a user to issue API keys.');
     return;
   }
   users.forEach(user => {
     const activeCount = keyCounts?.get(user.user_id) || 0;
     const count = keyCounts === null ? 'Unavailable' : String(activeCount);
-    const actions = tableRow(body, [user.user_id, user.user_email || '-', count, '']);
-    actions.parentElement.cells[3].innerHTML = budgetMarkup(user.spend, user.max_budget);
+    const actions = tableRow(body, [user.user_id, user.user_email || '-', count]);
     actionButton(actions, 'Delete', true, button => deleteUser(user.user_id, button));
   });
 }
@@ -1875,7 +1839,6 @@ async function submitCreateUser() {
   const error = document.getElementById('user-error');
   if (!uid) { error.textContent = 'User ID is required'; return; }
   const email = document.getElementById('user-email').value.trim() || undefined;
-  const budget = document.getElementById('user-budget').value || undefined;
   form.dataset.busy = 'true';
   button.disabled = true;
   error.textContent = '';
@@ -1883,7 +1846,7 @@ async function submitCreateUser() {
     await api('/api/users', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_id: uid, email, budget})
+      body: JSON.stringify({user_id: uid, email})
     });
     delete form.dataset.busy;
     closeModal('user-modal');
@@ -1908,7 +1871,7 @@ async function deleteUser(uid, button) {
 async function loadKeys() {
   const body = document.getElementById('keys-body');
   const load = ++keysLoad;
-  tableMessage(body, 7, 'Loading API keys...');
+  tableMessage(body, 6, 'Loading API keys...');
   try {
     const d = await api('/api/keys');
     if (load !== keysLoad) return;
@@ -1921,11 +1884,10 @@ async function loadKeys() {
     renderUsers();
     body.replaceChildren();
     document.getElementById('keys-count').textContent = d.keys.length === 1 ? '1 key' : d.keys.length + ' keys';
-    if (!d.keys.length) tableMessage(body, 7, 'No API keys found');
+    if (!d.keys.length) tableMessage(body, 6, 'No API keys found');
     d.keys.forEach(k => {
       const models = Array.isArray(k.models) && k.models.length ? k.models.join(', ') : 'All models (including future models)';
-      const actions = tableRow(body, [k.key_alias || '-', k.key_name || '-', k.user_id || '-', models, '', k.expires || 'never']);
-      actions.parentElement.cells[4].innerHTML = budgetMarkup(k.spend, k.max_budget);
+      const actions = tableRow(body, [k.key_alias || '-', k.key_name || '-', k.user_id || '-', models, k.expires || 'never']);
       actionButton(actions, 'Revoke', true, button => revokeKey(k.token, button));
       if (!k.token) actions.lastElementChild.disabled = true;
     });
@@ -1933,7 +1895,7 @@ async function loadKeys() {
     if (load !== keysLoad) return;
     keyCounts = null;
     renderUsers();
-    tableMessage(body, 7, 'Unable to load API keys: ' + err.message);
+    tableMessage(body, 6, 'Unable to load API keys: ' + err.message);
   }
 }
 
@@ -1954,7 +1916,6 @@ async function submitCreateKey() {
   if (!uid) { error.textContent = 'Select a user.'; return; }
   if (!alias) { error.textContent = 'Key name is required.'; return; }
   if (selected && !models.length) { error.textContent = 'Select at least one model, or choose All models.'; return; }
-  const spend = document.getElementById('key-spend').value || undefined;
   const duration = document.getElementById('key-duration').value.trim() || undefined;
   form.dataset.busy = 'true';
   button.disabled = true;
@@ -1963,7 +1924,7 @@ async function submitCreateKey() {
     const d = await api('/api/keys', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_id: uid, alias, models, spend, duration})
+      body: JSON.stringify({user_id: uid, alias, models, duration})
     });
     if (!d.key || typeof d.key.key !== 'string' || !d.key.key) throw new Error('Key created, but the API returned no secret. Revoke it and try again.');
     delete form.dataset.busy;
