@@ -62,15 +62,6 @@ def collect_models_list() -> dict:
 
 def background_pull_worker(repo_id: str, name: str | None, revision: str, force: bool) -> None:
     global pull_state
-    with pull_lock:
-        pull_state["running"] = True
-        pull_state["repo_id"] = repo_id
-        pull_state["model_name"] = name
-        pull_state["progress"] = "Starting download..."
-        pull_state["error"] = None
-        pull_state["complete"] = False
-        pull_state["started_at"] = time.time()
-        pull_state["ended_at"] = 0
 
     cmd = [str(preseed_bin), "--repo-id", repo_id, "--revision", revision]
     if name:
@@ -324,13 +315,21 @@ class OksaWebHandler(http.server.BaseHTTPRequestHandler):
                 if pull_state["running"]:
                     self.send_json(409, {"ok": False, "error": "Another model download is currently running"})
                     return
+                pull_state.update(running=True, repo_id=repo_id, model_name=name, progress="Starting download...",
+                                  error=None, complete=False, started_at=time.time(), ended_at=0)
 
-            thread = threading.Thread(
-                target=background_pull_worker,
-                args=(repo_id, name, revision, force),
-                daemon=True,
-            )
-            thread.start()
+            try:
+                thread = threading.Thread(
+                    target=background_pull_worker,
+                    args=(repo_id, name, revision, force),
+                    daemon=True,
+                )
+                thread.start()
+            except RuntimeError as exc:
+                with pull_lock:
+                    pull_state.update(running=False, error=str(exc), ended_at=time.time())
+                self.send_json(503, {"ok": False, "error": "Could not start download worker; retry Download"})
+                return
             self.send_json(200, {"ok": True, "message": f"Download started for {repo_id}"})
             return
 
