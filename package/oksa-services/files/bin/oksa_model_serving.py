@@ -419,10 +419,10 @@ def get_kubeconfig() -> str:
     return os.environ.get("KUBECONFIG", "/var/lib/rancher/k3s/k3s.yaml")
 
 
-def run_kubectl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+def run_kubectl(*args: str, check: bool = True, timeout: float | None = None) -> subprocess.CompletedProcess:
     cmd = ["/usr/bin/kubectl", f"--kubeconfig={get_kubeconfig()}", *args]
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, check=check)
+        return subprocess.run(cmd, capture_output=True, text=True, check=check, timeout=timeout)
     except OSError as exc:
         if check:
             raise
