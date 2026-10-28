@@ -912,6 +912,19 @@ tr:hover { background-color: var(--bg-subtle); }
   font-size: 0.8125rem;
 }
 .checkbox-row input { width: auto; margin: 0; }
+.user-link { background: none; border: 0; padding: 0; color: var(--primary); font: inherit; text-align: left; cursor: pointer; text-decoration: underline; }
+#tab-users h2, #user-detail-email, .access-table td { overflow-wrap: anywhere; }
+#user-detail h3 { font-size: 0.95rem; margin-top: 24px; }
+@media (max-width: 640px) {
+  .access-table, .access-table tbody, .access-table tr { display: block; }
+  .access-table thead { display: none; }
+  .access-table tr + tr { border-top: 1px solid var(--border); }
+  .access-table td { display: grid; grid-template-columns: minmax(80px, 30%) minmax(0, 1fr); gap: 12px; border: 0; }
+  .access-table td::before { content: attr(data-label); color: var(--text-muted); }
+  .access-table td[colspan] { display: block; }
+  .access-table td[colspan]::before { content: none; }
+  #tab-users .action-bar-actions { flex-wrap: wrap; }
+}
 .model-chips {
   display: flex;
   flex-wrap: wrap;
@@ -956,7 +969,7 @@ tr:hover { background-color: var(--bg-subtle); }
 <nav>
   <button class="nav-tab active" onclick="switchTab('monitoring')">Monitoring</button>
   <button class="nav-tab" onclick="switchTab('models')">Models</button>
-  <button class="nav-tab" onclick="switchTab('users')">Users & API Keys</button>
+  <button class="nav-tab" onclick="switchTab('users')">Users</button>
   <button class="nav-tab" onclick="switchTab('settings')">Settings</button>
 </nav>
 
@@ -1057,32 +1070,52 @@ tr:hover { background-color: var(--bg-subtle); }
   </div>
 
   <div id="tab-users" class="tab-content">
-    <div class="card" style="margin-bottom: 24px;">
-      <div class="action-bar">
-        <h2>Users</h2>
-        <button class="btn btn-sm" onclick="openUserModal()">Create User</button>
-      </div>
-      <p id="users-status" role="status">Loading users...</p>
-      <div class="table-container">
-        <table>
-          <thead><tr><th>User ID</th><th>Email</th><th>Active Keys</th><th>Actions</th></tr></thead>
-          <tbody id="users-body"><tr><td colspan="4">Loading users...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
     <div class="card">
-      <div class="action-bar">
-        <div class="action-bar-heading">
-          <h2>API Keys</h2>
-          <p id="keys-count" class="metric-sub" role="status"></p>
+      <div id="users-list">
+        <div class="action-bar">
+          <div class="action-bar-heading">
+            <h2>Users</h2>
+            <p class="metric-sub">Manage users and their API keys. These are not Open WebUI chat accounts.</p>
+          </div>
+          <div class="action-bar-actions">
+            <button class="btn btn-secondary btn-sm" onclick="usersView.refresh()">Refresh</button>
+            <button class="btn btn-sm" onclick="usersView.openUserModal()">Create User</button>
+          </div>
         </div>
-        <button class="btn btn-sm" onclick="openKeyModal()">Create Key</button>
+        <div class="input-group">
+          <label for="users-search">Find a user</label>
+          <input type="search" id="users-search" placeholder="User ID or email" autocomplete="off">
+        </div>
+        <p id="users-status" role="status">Loading users...</p>
+        <div class="table-container">
+          <table class="access-table" aria-label="Users">
+            <thead><tr><th scope="col">User ID</th><th scope="col">Email</th><th scope="col" title="Not blocked or expired; server limits still apply">Enabled Keys</th></tr></thead>
+            <tbody id="users-body"><tr><td colspan="3">Loading users...</td></tr></tbody>
+          </table>
+        </div>
       </div>
-      <div class="table-container">
-        <table>
-          <thead><tr><th>Name</th><th>Key</th><th>User</th><th>Models</th><th>Expires</th><th>Actions</th></tr></thead>
-          <tbody id="keys-body"><tr><td colspan="6">Loading API keys...</td></tr></tbody>
-        </table>
+      <div id="user-detail" hidden>
+        <button class="btn btn-secondary btn-sm" onclick="usersView.showList()">← All users</button>
+        <div class="action-bar" style="margin-top: 20px;">
+          <div class="action-bar-heading">
+            <h2 id="user-heading" tabindex="-1"></h2>
+            <p id="user-detail-email" class="metric-sub"></p>
+          </div>
+          <div class="action-bar-actions">
+            <button class="btn btn-secondary btn-sm" onclick="usersView.refresh()">Refresh</button>
+            <button class="btn btn-danger btn-sm" onclick="usersView.deleteUser(this)">Delete User</button>
+            <button class="btn btn-sm" id="user-create-key" onclick="usersView.openKeyModal()">Create Key</button>
+          </div>
+        </div>
+        <h3>API Keys</h3>
+        <p id="keys-count" class="metric-sub" role="status"></p>
+        <p id="keys-error" class="form-error" role="alert"></p>
+        <div class="table-container">
+          <table class="access-table" aria-label="User API keys">
+            <thead><tr><th scope="col">Name</th><th scope="col">Models</th><th scope="col">Status</th><th scope="col">Expires</th><th scope="col">Actions</th></tr></thead>
+            <tbody id="keys-body"><tr><td colspan="5">Loading API keys...</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -1168,10 +1201,7 @@ tr:hover { background-color: var(--bg-subtle); }
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="key-title" tabindex="-1">
     <h3 id="key-title">Create API Key</h3>
     <form id="key-form">
-      <div class="input-group">
-        <label for="key-user-id">User</label>
-        <select id="key-user-id" required disabled></select>
-      </div>
+      <p id="key-owner" class="metric-sub"></p>
       <div class="input-group">
         <label for="key-alias">Name</label>
         <input type="text" id="key-alias" placeholder="dev-key" required>
@@ -1247,7 +1277,7 @@ function switchTab(tab) {
 
   if (tab === 'monitoring') loadMonitoring();
   if (tab === 'models') loadModels();
-  if (tab === 'users') { loadUsers(); loadKeys(); }
+  if (tab === 'users') usersView.refresh();
   if (tab === 'settings') loadSettings();
 }
 
@@ -1521,65 +1551,6 @@ function openDialog(id) {
   modal.querySelector('input:not(:disabled), select:not(:disabled), button, [role="dialog"]').focus();
 }
 
-function openUserModal() {
-  if (document.getElementById('user-form').dataset.busy) return;
-  document.getElementById('user-form').reset();
-  document.getElementById('user-error').textContent = '';
-  document.getElementById('user-submit').disabled = false;
-  openDialog('user-modal');
-}
-
-async function openKeyModal() {
-  const form = document.getElementById('key-form');
-  if (form.dataset.busy) return;
-  form.reset();
-  const modal = document.getElementById('key-modal');
-  const load = Symbol();
-  modal.load = load;
-  const users = document.getElementById('key-user-id');
-  const models = document.getElementById('key-models');
-  const error = document.getElementById('key-error');
-  users.replaceChildren();
-  users.disabled = true;
-  models.replaceChildren();
-  document.getElementById('key-model-selector').hidden = true;
-  document.getElementById('key-model-count').textContent = '0 models selected';
-  document.getElementById('key-submit').disabled = true;
-  error.textContent = 'Loading users and installed models...';
-  openDialog('key-modal');
-  try {
-    const [u, m] = await Promise.all([cachedUsers === null ? api('/api/users') : Promise.resolve({users: cachedUsers}), api('/api/models')]);
-    if (modal.load !== load) return;
-    if (!Array.isArray(u.users) || !Array.isArray(m.models)) throw new Error('Invalid users or models response');
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = 'Select a user';
-    users.append(placeholder);
-    u.users.forEach(user => {
-      const option = document.createElement('option');
-      option.value = user.user_id;
-      option.textContent = user.user_id + (user.user_email ? ' — ' + user.user_email : '');
-      users.append(option);
-    });
-    users.disabled = !u.users.length;
-    m.models.forEach(model => {
-      const label = document.createElement('label');
-      label.className = 'model-chip';
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.value = model.name;
-      const name = document.createElement('span');
-      name.textContent = ' ' + model.name;
-      label.append(checkbox, name);
-      models.append(label);
-    });
-    if (!m.models.length) models.textContent = 'No models installed.';
-    error.textContent = u.users.length ? '' : 'Create a user before creating a key.';
-    document.getElementById('key-submit').disabled = !u.users.length;
-  } catch (err) {
-    if (modal.load === load) error.textContent = err.message;
-  }
-}
 
 function closeModal(id) {
   const modal = document.getElementById(id);
@@ -1789,164 +1760,280 @@ function actionButton(cell, text, danger, action) {
   cell.append(button);
 }
 
-let cachedUsers = null;
-let keyCounts = null;
-let usersLoad = 0;
-let keysLoad = 0;
+const usersView = {
+  users: null,
+  keys: null,
+  selected: null,
+  load: 0,
 
-function renderUsers() {
-  const body = document.getElementById('users-body');
-  body.replaceChildren();
-  const users = cachedUsers || [];
-  if (!users.length) {
-    tableMessage(body, 4, 'No users. Create a user to issue API keys.');
-    return;
+  keyStatus(key) {
+    if (key.blocked) return 'Blocked';
+    if (key.expires) {
+      const expiry = Date.parse(key.expires);
+      if (!Number.isFinite(expiry)) return 'Expiry unknown';
+      if (expiry <= Date.now()) return 'Expired';
+    }
+    return 'Enabled';
+  },
+
+  renderUsers() {
+    const body = document.getElementById('users-body');
+    body.replaceChildren();
+    const query = document.getElementById('users-search').value.trim().toLowerCase();
+    const users = (this.users || []).filter(user =>
+      [user.user_id, user.user_email].some(value => String(value || '').toLowerCase().includes(query)));
+    if (!users.length) {
+      tableMessage(body, 3, this.users === null ? 'Users unavailable.' : query ? 'No matching users.' : 'No users. Create a user to issue API keys.');
+      return;
+    }
+    const counts = new Map();
+    (this.keys || []).forEach(key => {
+      if (this.keyStatus(key) === 'Enabled') counts.set(key.user_id, (counts.get(key.user_id) || 0) + 1);
+    });
+    users.forEach(user => {
+      const row = body.insertRow();
+      const identity = row.insertCell();
+      identity.dataset.label = 'User ID';
+      const link = document.createElement('button');
+      link.type = 'button';
+      link.className = 'user-link';
+      link.textContent = user.user_id;
+      link.addEventListener('click', () => this.showUser(user));
+      identity.append(link);
+      const email = row.insertCell();
+      email.dataset.label = 'Email';
+      email.textContent = user.user_email || '—';
+      const count = row.insertCell();
+      count.dataset.label = 'Enabled keys';
+      count.textContent = this.keys === null ? 'Unavailable' : String(counts.get(user.user_id) || 0);
+    });
+  },
+
+  showUser(user) {
+    this.selected = user.user_id;
+    document.getElementById('users-list').hidden = true;
+    document.getElementById('user-detail').hidden = false;
+    document.getElementById('user-heading').textContent = user.user_id;
+    document.getElementById('user-detail-email').textContent = user.user_email || 'No email address';
+    document.getElementById('user-heading').focus();
+    this.refresh();
+  },
+
+  showList() {
+    this.selected = null;
+    document.getElementById('user-detail').hidden = true;
+    document.getElementById('users-list').hidden = false;
+    document.getElementById('users-search').focus();
+    this.refresh();
+  },
+
+  async refresh() {
+    const load = ++this.load;
+    const uid = this.selected;
+    const status = document.getElementById('users-status');
+    const error = document.getElementById('keys-error');
+    const body = document.getElementById('keys-body');
+    status.textContent = uid === null ? 'Loading users...' : '';
+    error.textContent = '';
+    document.getElementById('keys-count').textContent = '';
+    this.keys = null;
+    if (uid === null) this.renderUsers();
+    else tableMessage(body, 5, 'Loading API keys...');
+    const [users, keys] = await Promise.allSettled([
+      api('/api/users'),
+      api('/api/keys' + (uid === null ? '' : '?user_id=' + encodeURIComponent(uid)))
+    ]);
+    if (load !== this.load) return;
+    if (users.status === 'fulfilled' && Array.isArray(users.value.users)) {
+      this.users = users.value.users;
+      if (uid !== null) {
+        const user = this.users.find(user => user.user_id === uid);
+        if (!user) { this.showList(); return; }
+        document.getElementById('user-detail-email').textContent = user.user_email || 'No email address';
+      }
+      status.textContent = '';
+    } else {
+      const message = 'Unable to refresh users: ' + (users.reason?.message || 'Invalid users response');
+      if (uid === null) status.textContent = message;
+      else error.textContent = message;
+    }
+    if (keys.status === 'fulfilled' && Array.isArray(keys.value.keys)) {
+      this.keys = keys.value.keys;
+    } else {
+      const message = 'Unable to load API keys: ' + (keys.reason?.message || 'Invalid keys response');
+      if (uid === null) status.textContent += (status.textContent ? ' ' : '') + message;
+      else error.textContent += (error.textContent ? ' ' : '') + message;
+    }
+    if (uid === null) { this.renderUsers(); return; }
+    if (this.keys === null) { tableMessage(body, 5, 'API keys unavailable. Use Refresh to retry.'); return; }
+    body.replaceChildren();
+    const owned = this.keys.filter(key => key.user_id === uid);
+    document.getElementById('keys-count').textContent = owned.length === 1 ? '1 key' : owned.length + ' keys';
+    if (!owned.length) tableMessage(body, 5, 'No API keys for this user. Create a key to grant API access.');
+    owned.forEach(key => {
+      const models = Array.isArray(key.models) && key.models.length ? key.models.join(', ') : 'All models (including future models)';
+      const expiry = key.expires ? Date.parse(key.expires) : null;
+      const expires = expiry === null ? 'Never' : Number.isFinite(expiry) ? new Date(expiry).toLocaleString() : 'Unknown';
+      const actions = tableRow(body, [key.key_alias || key.key_name || 'Unnamed key', models, this.keyStatus(key), expires]);
+      actionButton(actions, 'Revoke', true, button => this.revokeKey(key, uid, button));
+      actions.lastElementChild.disabled = !key.token;
+      Array.from(actions.parentElement.cells).forEach((cell, index) => {
+        cell.dataset.label = ['Name', 'Models', 'Status', 'Expires', 'Actions'][index];
+      });
+    });
+  },
+
+  openUserModal() {
+    if (document.getElementById('user-form').dataset.busy) return;
+    document.getElementById('user-form').reset();
+    document.getElementById('user-error').textContent = '';
+    document.getElementById('user-submit').disabled = false;
+    openDialog('user-modal');
+  },
+
+  async submitCreateUser() {
+    const form = document.getElementById('user-form');
+    const button = document.getElementById('user-submit');
+    if (form.dataset.busy || !form.reportValidity()) return;
+    const uid = document.getElementById('user-id').value.trim();
+    const error = document.getElementById('user-error');
+    if (!uid) { error.textContent = 'User ID is required'; return; }
+    const email = document.getElementById('user-email').value.trim() || undefined;
+    form.dataset.busy = 'true';
+    button.disabled = true;
+    error.textContent = '';
+    try {
+      await api('/api/users', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({user_id: uid, email})
+      });
+      delete form.dataset.busy;
+      closeModal('user-modal');
+      showToast('Created user ' + uid);
+      this.showUser({user_id: uid, user_email: email});
+    } catch (err) { error.textContent = err.message; }
+    finally { delete form.dataset.busy; button.disabled = false; }
+  },
+
+  async deleteUser(button) {
+    const uid = this.selected;
+    if (uid === null || button.disabled || !confirm('Delete user ' + uid + ' and ALL their API keys? This cannot be undone.')) return;
+    button.disabled = true;
+    const create = document.getElementById('user-create-key');
+    create.disabled = true;
+    try {
+      await api('/api/users/' + encodeURIComponent(uid), {method: 'DELETE'});
+      showToast('Removed user and their API keys');
+      if (this.selected === uid) this.showList();
+      else this.refresh();
+    } catch (err) {
+      await this.refresh();
+      if (this.selected === uid) {
+        const error = document.getElementById('keys-error');
+        error.textContent = err.message + (error.textContent ? ' ' + error.textContent : '');
+      } else showToast(err.message);
+    } finally { button.disabled = false; create.disabled = false; }
+  },
+
+  async openKeyModal() {
+    const form = document.getElementById('key-form');
+    if (this.selected === null || form.dataset.busy) return;
+    form.reset();
+    const modal = document.getElementById('key-modal');
+    const load = Symbol();
+    modal.load = load;
+    modal.userId = this.selected;
+    document.getElementById('key-owner').textContent = 'User: ' + modal.userId;
+    const models = document.getElementById('key-models');
+    const error = document.getElementById('key-error');
+    models.textContent = 'Loading installed models...';
+    document.getElementById('key-model-selector').hidden = true;
+    document.getElementById('key-model-count').textContent = '0 models selected';
+    document.getElementById('key-submit').disabled = false;
+    error.textContent = '';
+    openDialog('key-modal');
+    try {
+      const data = await api('/api/models');
+      if (modal.load !== load) return;
+      if (!Array.isArray(data.models)) throw new Error('Invalid models response');
+      models.replaceChildren();
+      data.models.forEach(model => {
+        const label = document.createElement('label');
+        label.className = 'model-chip';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = model.name;
+        label.append(checkbox, document.createTextNode(' ' + model.name));
+        models.append(label);
+      });
+      if (!data.models.length) models.textContent = 'No models installed.';
+    } catch (err) {
+      if (modal.load === load) models.textContent = 'Unable to load models: ' + err.message + '. Close and reopen this form to retry, or choose All models.';
+    }
+  },
+
+  async submitCreateKey() {
+    const form = document.getElementById('key-form');
+    const button = document.getElementById('key-submit');
+    if (button.disabled || form.dataset.busy || !form.reportValidity()) return;
+    const uid = document.getElementById('key-modal').userId;
+    const alias = document.getElementById('key-alias').value.trim();
+    const selected = document.getElementById('key-model-access').value === 'selected';
+    const models = selected ? Array.from(document.querySelectorAll('#key-models input:checked'), checkbox => checkbox.value) : [];
+    const error = document.getElementById('key-error');
+    if (!uid || uid !== this.selected) { error.textContent = 'Open the user again before creating a key.'; return; }
+    if (!alias) { error.textContent = 'Key name is required.'; return; }
+    if (selected && !models.length) { error.textContent = 'Select at least one model, or choose All models.'; return; }
+    const duration = document.getElementById('key-duration').value.trim() || undefined;
+    form.dataset.busy = 'true';
+    button.disabled = true;
+    error.textContent = '';
+    try {
+      const data = await api('/api/keys', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({user_id: uid, alias, models, duration})
+      });
+      this.refresh();
+      if (!data.key || typeof data.key.key !== 'string' || !data.key.key) throw new Error('Key created, but the API returned no secret. Revoke it and try again.');
+      delete form.dataset.busy;
+      closeModal('key-modal');
+      document.getElementById('created-key-token').textContent = data.key.key;
+      document.getElementById('copy-status').textContent = '';
+      openDialog('key-result-modal');
+      document.getElementById('key-result-modal').opener = document.getElementById('user-create-key');
+    } catch (err) { error.textContent = err.message; }
+    finally { delete form.dataset.busy; button.disabled = false; }
+  },
+
+  async revokeKey(key, uid, button) {
+    if (button.disabled || !confirm('Revoke key ' + (key.key_alias || key.key_name || 'Unnamed key') + ' for user ' + uid + '? Applications using it will lose access.')) return;
+    const restoreFocus = document.activeElement === button;
+    button.disabled = true;
+    try {
+      await api('/api/keys/' + encodeURIComponent(key.token), {method: 'DELETE'});
+      showToast('API key revoked');
+      await this.refresh();
+      if (restoreFocus && this.selected === uid && currentTab === 'users' && !document.querySelector('.modal-overlay.open')) {
+        document.getElementById('user-create-key').focus();
+      }
+    } catch (err) {
+      if (this.selected === uid) document.getElementById('keys-error').textContent = err.message;
+      else showToast(err.message);
+    } finally { button.disabled = false; }
   }
-  users.forEach(user => {
-    const activeCount = keyCounts?.get(user.user_id) || 0;
-    const count = keyCounts === null ? 'Unavailable' : String(activeCount);
-    const actions = tableRow(body, [user.user_id, user.user_email || '-', count]);
-    actionButton(actions, 'Delete', true, button => deleteUser(user.user_id, button));
-  });
-}
+};
 
-async function loadUsers() {
-  const load = ++usersLoad;
-  const status = document.getElementById('users-status');
-  status.textContent = 'Loading users...';
-  try {
-    const d = await api('/api/users');
-    if (load !== usersLoad) return;
-    if (!Array.isArray(d.users)) throw new Error('Invalid users response');
-    cachedUsers = d.users;
-    renderUsers();
-    status.textContent = '';
-  } catch (err) {
-    if (load === usersLoad) status.textContent = 'Unable to refresh users: ' + err.message;
-  }
-}
-
+document.getElementById('users-search').addEventListener('input', () => usersView.renderUsers());
 document.getElementById('user-form').addEventListener('submit', event => {
   event.preventDefault();
-  submitCreateUser();
+  usersView.submitCreateUser();
 });
-
-async function submitCreateUser() {
-  const form = document.getElementById('user-form');
-  const button = document.getElementById('user-submit');
-  if (form.dataset.busy || !form.reportValidity()) return;
-  const uid = document.getElementById('user-id').value.trim();
-  const error = document.getElementById('user-error');
-  if (!uid) { error.textContent = 'User ID is required'; return; }
-  const email = document.getElementById('user-email').value.trim() || undefined;
-  form.dataset.busy = 'true';
-  button.disabled = true;
-  error.textContent = '';
-  try {
-    await api('/api/users', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_id: uid, email})
-    });
-    delete form.dataset.busy;
-    closeModal('user-modal');
-    showToast('Created user ' + uid);
-    loadUsers();
-  } catch (err) { error.textContent = err.message; }
-  finally { delete form.dataset.busy; button.disabled = false; }
-}
-
-async function deleteUser(uid, button) {
-  if (button.disabled || !confirm('Delete user ' + uid + ' and all their API keys?')) return;
-  button.disabled = true;
-  try {
-    await api('/api/users/' + encodeURIComponent(uid), {method: 'DELETE'});
-    showToast('Removed user and their API keys');
-    loadUsers();
-    loadKeys();
-  } catch (err) { alert(err.message); }
-  finally { button.disabled = false; }
-}
-
-async function loadKeys() {
-  const body = document.getElementById('keys-body');
-  const load = ++keysLoad;
-  tableMessage(body, 6, 'Loading API keys...');
-  try {
-    const d = await api('/api/keys');
-    if (load !== keysLoad) return;
-    if (!Array.isArray(d.keys)) throw new Error('Invalid keys response');
-    keyCounts = new Map();
-    d.keys.forEach(key => {
-      if (key.blocked || (key.expires && Date.parse(key.expires) <= Date.now())) return;
-      keyCounts.set(key.user_id, (keyCounts.get(key.user_id) || 0) + 1);
-    });
-    renderUsers();
-    body.replaceChildren();
-    document.getElementById('keys-count').textContent = d.keys.length === 1 ? '1 key' : d.keys.length + ' keys';
-    if (!d.keys.length) tableMessage(body, 6, 'No API keys found');
-    d.keys.forEach(k => {
-      const models = Array.isArray(k.models) && k.models.length ? k.models.join(', ') : 'All models (including future models)';
-      const actions = tableRow(body, [k.key_alias || '-', k.key_name || '-', k.user_id || '-', models, k.expires || 'never']);
-      actionButton(actions, 'Revoke', true, button => revokeKey(k.token, button));
-      if (!k.token) actions.lastElementChild.disabled = true;
-    });
-  } catch (err) {
-    if (load !== keysLoad) return;
-    keyCounts = null;
-    renderUsers();
-    tableMessage(body, 6, 'Unable to load API keys: ' + err.message);
-  }
-}
-
 document.getElementById('key-form').addEventListener('submit', event => {
   event.preventDefault();
-  submitCreateKey();
+  usersView.submitCreateKey();
 });
-
-async function submitCreateKey() {
-  const form = document.getElementById('key-form');
-  const button = document.getElementById('key-submit');
-  if (button.disabled || form.dataset.busy || !form.reportValidity()) return;
-  const uid = document.getElementById('key-user-id').value;
-  const alias = document.getElementById('key-alias').value.trim();
-  const selected = document.getElementById('key-model-access').value === 'selected';
-  const models = selected ? Array.from(document.querySelectorAll('#key-models input:checked'), checkbox => checkbox.value) : [];
-  const error = document.getElementById('key-error');
-  if (!uid) { error.textContent = 'Select a user.'; return; }
-  if (!alias) { error.textContent = 'Key name is required.'; return; }
-  if (selected && !models.length) { error.textContent = 'Select at least one model, or choose All models.'; return; }
-  const duration = document.getElementById('key-duration').value.trim() || undefined;
-  form.dataset.busy = 'true';
-  button.disabled = true;
-  error.textContent = '';
-  try {
-    const d = await api('/api/keys', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_id: uid, alias, models, duration})
-    });
-    if (!d.key || typeof d.key.key !== 'string' || !d.key.key) throw new Error('Key created, but the API returned no secret. Revoke it and try again.');
-    delete form.dataset.busy;
-    closeModal('key-modal');
-    document.getElementById('created-key-token').textContent = d.key.key;
-    document.getElementById('copy-status').textContent = '';
-    openDialog('key-result-modal');
-    loadKeys();
-  } catch (err) { error.textContent = err.message; }
-  finally { delete form.dataset.busy; button.disabled = false; }
-}
-
-async function revokeKey(keyToken, button) {
-  if (button.disabled || !confirm('Revoke API key?')) return;
-  button.disabled = true;
-  try {
-    const d = await api('/api/keys/' + encodeURIComponent(keyToken), {method: 'DELETE'});
-    showToast(d.message || 'API key revoked');
-    loadKeys();
-  } catch (err) { alert(err.message); }
-  finally { button.disabled = false; }
-}
 
 async function copyKey() {
   const token = document.getElementById('created-key-token');
