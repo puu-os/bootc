@@ -1891,7 +1891,11 @@ const usersView = {
       closeModal('user-modal');
       showToast('Created user ' + uid);
       this.showUser({user_id: uid, user_email: email});
-    } catch (err) { error.textContent = err.message; }
+    } catch (err) {
+      error.textContent = err.result ? err.message
+        : 'Creation of user ' + uid + ' was not confirmed. The user may exist. Refresh the users list before retrying. ' + err.message;
+      this.refresh();
+    }
     finally { delete form.dataset.busy; button.disabled = false; }
   },
 
@@ -1987,15 +1991,19 @@ const usersView = {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({user_id: uid, alias, models, duration})
       });
+      if (!data.key || typeof data.key.key !== 'string' || !data.key.key.trim()) throw new Error('The API returned no usable secret.');
       this.refresh();
-      if (!data.key || typeof data.key.key !== 'string' || !data.key.key) throw new Error('Key created, but the API returned no secret. Revoke it and try again.');
       delete form.dataset.busy;
       closeModal('key-modal');
       document.getElementById('created-key-token').textContent = data.key.key;
       document.getElementById('copy-status').textContent = '';
       openDialog('key-result-modal');
       document.getElementById('key-result-modal').opener = document.getElementById('user-create-key');
-    } catch (err) { error.textContent = err.message; }
+    } catch (err) {
+      error.textContent = err.result ? err.message
+        : 'API key creation for user ' + uid + ' was not confirmed. The key may exist. Refresh the key list before retrying. ' + err.message;
+      this.refresh();
+    }
     finally { delete form.dataset.busy; button.disabled = false; }
   },
 
