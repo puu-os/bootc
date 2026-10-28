@@ -1070,29 +1070,6 @@ def litellm_user_list(master_key: str | None = None) -> tuple[bool, list[dict] |
         page += 1
 
 
-def litellm_user_delete(user_id: str, master_key: str | None = None) -> tuple[bool, str]:
-    if not isinstance(user_id, str) or not user_id.strip():
-        return False, "User ID is required"
-    ok, keys = litellm_key_list(user_id=user_id, master_key=master_key, include_service=True)
-    if not ok:
-        return False, str(keys)
-    if any(key.get("key_alias") == "open-webui" for key in keys):
-        return False, "This user owns the Open WebUI service key and cannot be deleted"
-    if keys:
-        tokens = [key.get("token") for key in keys]
-        if not all(isinstance(token, str) and token for token in tokens):
-            return False, "Invalid LiteLLM key-list response"
-        status, resp = litellm_api_call("POST", "/key/delete", payload={"keys": tokens}, master_key=master_key)
-        if status != 200:
-            return False, str(resp.get("error") or resp.get("message") or f"HTTP {status}")
-    payload = {"user_ids": [user_id]}
-    status, resp = litellm_api_call("POST", "/user/delete", payload=payload, master_key=master_key)
-    if status == 200:
-        return True, f"User {user_id} deleted"
-    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-    return False, str(err)
-
-
 def litellm_user_info(user_id: str, master_key: str | None = None) -> tuple[bool, dict | str]:
     quoted_id = urllib.parse.quote(user_id, safe="")
     status, resp = litellm_api_call("GET", f"/user/info?user_id={quoted_id}", master_key=master_key)
