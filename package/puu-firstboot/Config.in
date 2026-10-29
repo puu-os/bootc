@@ -20,6 +20,6 @@ config BR2_PACKAGE_PUU_FIRSTBOOT
 	select BR2_PACKAGE_PYTHON_GOBJECT
 	select BR2_PACKAGE_DCONF
 	help
-	  Restricted GNOME first-boot session and unprivileged wizard.
+	  Restricted GNOME first-boot session and unprivileged Python wizard.
 	  Normal graphical login requires trusted setup completion.
 	  Live installer sessions retain their existing login behavior.

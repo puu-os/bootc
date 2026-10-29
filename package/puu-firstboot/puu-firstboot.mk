@@ -4,8 +4,10 @@
 PUU_FIRSTBOOT_VERSION = 1.0
 PUU_FIRSTBOOT_SITE = $(PUU_FIRSTBOOT_PKGDIR)/files
 PUU_FIRSTBOOT_SITE_METHOD = local
+PUU_FIRSTBOOT_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = --exclude='/dist' --exclude='__pycache__'
 PUU_FIRSTBOOT_LICENSE = GPL-2.0-or-later
 PUU_FIRSTBOOT_LICENSE_FILES = LICENSE
+PUU_FIRSTBOOT_SETUP_TYPE = hatch
 PUU_FIRSTBOOT_DEPENDENCIES = \
 	dconf \
 	gdm \
@@ -21,8 +23,6 @@ PUU_FIRSTBOOT_DEPENDENCIES = \
 	python-gobject \
 	systemd
 
-PUU_FIRSTBOOT_GUI_SCRIPTS = puu-firstboot-session-dispatch puu-firstboot-wizard
-PUU_FIRSTBOOT_BACKEND_SCRIPTS = puu-firstboot-enroll puu-firstboot-monitor
 PUU_FIRSTBOOT_SYSTEM_UNITS = \
 	puu-firstboot-monitor.service \
 	puu-firstboot-homectl.service.d/puu-firstboot.conf
@@ -39,12 +39,11 @@ PUU_FIRSTBOOT_DCONF_FILES = \
 	db/puu-firstboot.d/00-lockdown \
 	db/puu-firstboot.d/locks/00-lockdown
 
-define PUU_FIRSTBOOT_INSTALL_TARGET_CMDS
-	$(foreach script,$(PUU_FIRSTBOOT_GUI_SCRIPTS) $(PUU_FIRSTBOOT_BACKEND_SCRIPTS),\
-		$(INSTALL) -D -m 0755 $(@D)/bin/$(script) \
-			$(TARGET_DIR)/usr/libexec/puu/$(script)$(sep))
-	$(INSTALL) -D -m 0644 $(@D)/bin/puu_firstboot_state.py \
-		$(TARGET_DIR)/usr/libexec/puu/puu_firstboot_state.py
+define PUU_FIRSTBOOT_CLEAN_DIST
+	rm -rf $(@D)/dist
+endef
+PUU_FIRSTBOOT_PRE_BUILD_HOOKS += PUU_FIRSTBOOT_CLEAN_DIST
+define PUU_FIRSTBOOT_INSTALL_ASSETS
 	$(foreach file,$(PUU_FIRSTBOOT_SHARE_FILES),\
 		$(INSTALL) -D -m 0644 $(@D)/share/$(file) \
 			$(TARGET_DIR)/usr/share/$(file)$(sep))
@@ -72,6 +71,7 @@ define PUU_FIRSTBOOT_INSTALL_TARGET_CMDS
 		$(@D)/dconf/db/puu-firstboot.d
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/puu-firstboot
 endef
+PUU_FIRSTBOOT_POST_INSTALL_TARGET_HOOKS += PUU_FIRSTBOOT_INSTALL_ASSETS
 
 define PUU_FIRSTBOOT_INSTALL_INIT_SYSTEMD
 	for unit in $(PUU_FIRSTBOOT_SYSTEM_UNITS); do \
@@ -83,9 +83,10 @@ define PUU_FIRSTBOOT_INSTALL_INIT_SYSTEMD
 		$(TARGET_DIR)/usr/lib/systemd/system-preset/84-puu-firstboot.preset
 endef
 
-$(eval $(generic-package))
+$(eval $(python-package))
 
 # Local packages otherwise keep their cached scripts across incremental builds.
-$(PUU_FIRSTBOOT_TARGET_RSYNC): $(shell find $(PUU_FIRSTBOOT_SITE) -type f) \
+$(PUU_FIRSTBOOT_TARGET_RSYNC): $(shell find $(PUU_FIRSTBOOT_SITE) \
+	-type f ! -path '*/dist/*' ! -path '*/__pycache__/*') \
 	$(PUU_FIRSTBOOT_PKGDIR)/puu-firstboot.mk
 $(PUU_FIRSTBOOT_TARGET_CONFIGURE): $(PUU_FIRSTBOOT_TARGET_RSYNC)

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "puu-firstboot"
+version = "1.0"
+requires-python = ">=3.10"
+description = "Puu restricted GNOME first-boot setup"
+license = { file = "LICENSE" }
+dependencies = ["PyGObject"]
+
+[tool.hatch.build]
+dev-mode-dirs = ["bin"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/bin", "/dconf", "/share", "/systemd", "/LICENSE", "/pyproject.toml"]
+exclude = ["__pycache__"]
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.shared-data]
+"bin/puu-firstboot-enroll" = "usr/libexec/puu/puu-firstboot-enroll"
+"bin/puu-firstboot-monitor" = "usr/libexec/puu/puu-firstboot-monitor"
+"bin/puu-firstboot-session-dispatch" = "usr/libexec/puu/puu-firstboot-session-dispatch"
+"bin/puu-firstboot-wizard" = "usr/libexec/puu/puu-firstboot-wizard"
+"bin/puu_firstboot_state.py" = "usr/libexec/puu/puu_firstboot_state.py"
+
+[tool.hatch.envs.default]
+installer = "uv"
