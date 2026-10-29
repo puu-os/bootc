@@ -1,0 +1,5 @@
+# sha256 from https://pypi.org/pypi/nicegui/3.18.0/json
+sha256  74cf67c57d2a0dbcdc329d9b35d0396d25dc961550765276daef4de244eaf15b  nicegui-3.18.0.tar.gz
+# Locally computed sha256 checksums
+sha256  41c065c2081141886f7d3004e3cd4000c1507cc4bf37a063f12be1d53e9db272  LICENSE
+sha256  74fd6fd1c0cf81ff6451cc0b3291751fdd9cad333a21006093be9166d3e03a1d  DEPENDENCIES.md
