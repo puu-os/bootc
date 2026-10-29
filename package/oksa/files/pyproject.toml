@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oksa"
+version = "1.0"
+requires-python = ">=3.10"
+description = "Puu model-serving administration and service bootstrap"
+license = { file = "LICENSE" }
+dependencies = ["nicegui==3.18.0"]
+
+[tool.hatch.build]
+dev-mode-dirs = ["bin"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/bin", "/manifests", "/systemd", "/vllm", "/oksa.conf", "/LICENSE", "/pyproject.toml"]
+exclude = ["__pycache__"]
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.shared-data]
+"bin/oksa" = "usr/bin/oksa"
+"bin/oksa-install-k3s-addons" = "usr/libexec/puu/oksa-install-k3s-addons"
+"bin/oksa-discover-vllm-models" = "usr/libexec/puu/oksa-discover-vllm-models"
+"bin/oksa-label-model-serving-node" = "usr/libexec/puu/oksa-label-model-serving-node"
+"bin/oksa-plan-vllm-workloads" = "usr/libexec/puu/oksa-plan-vllm-workloads"
+"bin/oksa-preseed-vllm-models" = "usr/libexec/puu/oksa-preseed-vllm-models"
+"bin/oksa-init-litellm-db" = "usr/libexec/puu/oksa-init-litellm-db"
+"bin/oksa-calibrate" = "usr/libexec/puu/oksa-calibrate"
+"bin/oksa-calibration-probe" = "usr/libexec/puu/oksa-calibration-probe"
+"bin/oksa-web" = "usr/libexec/puu/oksa-web"
+"bin/oksa_model_serving.py" = "usr/libexec/puu/oksa_model_serving.py"
+"bin/oksa_model_removal.py" = "usr/libexec/puu/oksa_model_removal.py"
+"bin/oksa_monitoring.py" = "usr/libexec/puu/oksa_monitoring.py"
+"bin/oksa_user_deletion.py" = "usr/libexec/puu/oksa_user_deletion.py"
+"bin/oksa_calibration_state.py" = "usr/libexec/puu/oksa_calibration_state.py"
+"bin/oksa_settings.py" = "usr/libexec/puu/oksa_settings.py"
+
+[tool.hatch.envs.default]
+installer = "uv"
+
+[tool.hatch.envs.default.scripts]
+web = "python bin/oksa-web {args}"
+cli = "python bin/oksa {args}"

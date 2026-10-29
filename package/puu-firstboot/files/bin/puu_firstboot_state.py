@@ -12,7 +12,7 @@ import tempfile
 import time
 import sys
 
-for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3] / "oksa-services" / "files" / "bin"):
+for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3] / "oksa" / "files" / "bin"):
     if _candidate.is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 

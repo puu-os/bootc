@@ -47,4 +47,4 @@ awk '
     invalid = 1
   }
   END { if (invalid) exit 1 }
-' package/oksa-services/files/manifests/*.yaml
+' package/oksa/files/manifests/*.yaml

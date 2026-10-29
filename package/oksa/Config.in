@@ -1,0 +1,22 @@
+config BR2_PACKAGE_OKSA
+	bool "oksa"
+	depends on BR2_INIT_SYSTEMD
+	depends on BR2_PACKAGE_K3S
+	depends on BR2_PACKAGE_PYTHON3
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_TOOLCHAIN_HAS_SYNC_4
+	depends on BR2_USE_MMU
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_4_9
+	select BR2_PACKAGE_PYTHON3_SSL
+	select BR2_PACKAGE_PYTHON_NICEGUI
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_MOUNTPOINT
+	help
+	  Puu Python model-serving tools, Kubernetes resources and service bootstrap
+	  for k3s, including mDNS publication of the API subdomain.
+
+comment "oksa needs systemd"
+	depends on BR2_PACKAGE_K3S
+	depends on !BR2_INIT_SYSTEMD
