@@ -1560,3 +1560,277 @@ index f4788cd7..8d80d04d 100644
  
  comment "Special purpose (read help)"
  
+diff --git a/package/python-aiohttp/python-aiohttp.hash b/package/python-aiohttp/python-aiohttp.hash
+--- a/package/python-aiohttp/python-aiohttp.hash
++++ b/package/python-aiohttp/python-aiohttp.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/aiohttp/json
+-md5  eb22a738fd03b7b009286e048a015780  aiohttp-3.13.5.tar.gz
+-sha256  9d98cc980ecc96be6eb4c1994ce35d28d8b1f5e5208a23b421187d1209dbb7d1  aiohttp-3.13.5.tar.gz
++# sha256 from https://pypi.org/pypi/aiohttp/3.14.5/json
++sha256  5558a7f5a05af9ecf744af91e5baefc436f93c9333e656c27ec253f9a6bbe178  aiohttp-3.14.5.tar.gz
+@@ -5 +4,2 @@
+-sha256  9f80d0db7d755a941db4572172c270ecbd8f082ba215ddd095985942ed94a9eb  LICENSE.txt
++sha256  2e4be5fc6c4c72a466fcb665d726e049a6891981fe536c4f04b6366749461d23  LICENSE.txt
++sha256  628168d68bb5a8a17e0bbefb3bd74e326e1edc20583d76f52f457c82c921867d  vendor/llhttp/LICENSE
+diff --git a/package/python-aiohttp/python-aiohttp.mk b/package/python-aiohttp/python-aiohttp.mk
+--- a/package/python-aiohttp/python-aiohttp.mk
++++ b/package/python-aiohttp/python-aiohttp.mk
+@@ -7 +7 @@
+-PYTHON_AIOHTTP_VERSION = 3.13.5
++PYTHON_AIOHTTP_VERSION = 3.14.5
+@@ -9 +9 @@
+-PYTHON_AIOHTTP_SITE = https://files.pythonhosted.org/packages/77/9a/152096d4808df8e4268befa55fba462f440f14beab85e8ad9bf990516918
++PYTHON_AIOHTTP_SITE = https://files.pythonhosted.org/packages/6c/4c/bdccd81e9ee225b69c60e7766c9a5b05364f118f4d383713b89a682d772d
+@@ -11,2 +11,2 @@
+-PYTHON_AIOHTTP_LICENSE = Apache-2.0
+-PYTHON_AIOHTTP_LICENSE_FILES = LICENSE.txt
++PYTHON_AIOHTTP_LICENSE = Apache-2.0, MIT
++PYTHON_AIOHTTP_LICENSE_FILES = LICENSE.txt vendor/llhttp/LICENSE
+diff --git a/package/python-anyio/python-anyio.hash b/package/python-anyio/python-anyio.hash
+--- a/package/python-anyio/python-anyio.hash
++++ b/package/python-anyio/python-anyio.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/anyio/json
+-md5  790c9bef76fdeac4c2e4e4ea757e14ab  anyio-4.13.0.tar.gz
+-sha256  334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc  anyio-4.13.0.tar.gz
++# sha256 from https://pypi.org/pypi/anyio/4.15.1/json
++sha256  9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94  anyio-4.15.1.tar.gz
+diff --git a/package/python-anyio/python-anyio.mk b/package/python-anyio/python-anyio.mk
+--- a/package/python-anyio/python-anyio.mk
++++ b/package/python-anyio/python-anyio.mk
+@@ -7 +7 @@
+-PYTHON_ANYIO_VERSION = 4.13.0
++PYTHON_ANYIO_VERSION = 4.15.1
+@@ -9 +9 @@
+-PYTHON_ANYIO_SITE = https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13
++PYTHON_ANYIO_SITE = https://files.pythonhosted.org/packages/a9/d2/f4d173e22df740bc37b1db102b386ba719b66e95b0f0d751f556b387e6d2
+diff --git a/package/python-dotenv/python-dotenv.hash b/package/python-dotenv/python-dotenv.hash
+--- a/package/python-dotenv/python-dotenv.hash
++++ b/package/python-dotenv/python-dotenv.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/python-dotenv/json
+-md5  72b43685c14b492ced7ed6fb1e3f1d63  python_dotenv-1.2.1.tar.gz
+-sha256  42667e897e16ab0d66954af0e60a9caa94f0fd4ecf3aaf6d2d260eec1aa36ad6  python_dotenv-1.2.1.tar.gz
++# sha256 from https://pypi.org/pypi/python-dotenv/1.2.4/json
++sha256  f0d53e69935a851c0dcc78f3ab7aaccd8cabef0b92382b576b824212902873c0  python_dotenv-1.2.4.tar.gz
+diff --git a/package/python-dotenv/python-dotenv.mk b/package/python-dotenv/python-dotenv.mk
+--- a/package/python-dotenv/python-dotenv.mk
++++ b/package/python-dotenv/python-dotenv.mk
+@@ -7 +7 @@
+-PYTHON_DOTENV_VERSION = 1.2.1
++PYTHON_DOTENV_VERSION = 1.2.4
+@@ -9 +9 @@
+-PYTHON_DOTENV_SITE = https://files.pythonhosted.org/packages/f0/26/19cadc79a718c5edbec86fd4919a6b6d3f681039a2f6d66d14be94e75fb9
++PYTHON_DOTENV_SITE = https://files.pythonhosted.org/packages/74/26/2fbeedb218a787a5eea551c7532cac4e009f83d689dd2faa0d0353473f86
+diff --git a/package/python-engineio/python-engineio.hash b/package/python-engineio/python-engineio.hash
+--- a/package/python-engineio/python-engineio.hash
++++ b/package/python-engineio/python-engineio.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/python-engineio/json
+-md5  724a0e786c6eb7ba9c1a03fd58b719ec  python_engineio-4.13.0.tar.gz
+-sha256  f9c51a8754d2742ba832c24b46ed425fdd3064356914edd5a1e8ffde76ab7709  python_engineio-4.13.0.tar.gz
++# sha256 from https://pypi.org/pypi/python-engineio/4.15.1/json
++sha256  1a412e798a90c64fabe7b20798939ae6d4a03f34da8a33d5a21a25a8bbbc3612  python_engineio-4.15.1.tar.gz
+diff --git a/package/python-engineio/python-engineio.mk b/package/python-engineio/python-engineio.mk
+--- a/package/python-engineio/python-engineio.mk
++++ b/package/python-engineio/python-engineio.mk
+@@ -7 +7 @@
+-PYTHON_ENGINEIO_VERSION = 4.13.0
++PYTHON_ENGINEIO_VERSION = 4.15.1
+@@ -9 +9 @@
+-PYTHON_ENGINEIO_SITE = https://files.pythonhosted.org/packages/42/5a/349caac055e03ef9e56ed29fa304846063b1771ee54ab8132bf98b29491e
++PYTHON_ENGINEIO_SITE = https://files.pythonhosted.org/packages/dd/91/b565807fa922620ed575b412bf978d032e4c5d79558b400fdbfe1008c95a
+diff --git a/package/python-idna/python-idna.hash b/package/python-idna/python-idna.hash
+--- a/package/python-idna/python-idna.hash
++++ b/package/python-idna/python-idna.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/idna/json
+-md5  9a9c33db960e0d35cc5b257c37dabeff  idna-3.11.tar.gz
+-sha256  795dafcc9c04ed0c1fb032c2aa73654d8e8c5023a7df64a53f39190ada629902  idna-3.11.tar.gz
++# sha256 from https://pypi.org/pypi/idna/3.20/json
++sha256  a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44  idna-3.20.tar.gz
+@@ -5 +4 @@
+-sha256  b7a336abf3b04e180ec065cdd16e705d079e1cc7a14f910aa6e9187f36b9cd87  LICENSE.md
++sha256  1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04  LICENSE.md
+diff --git a/package/python-idna/python-idna.mk b/package/python-idna/python-idna.mk
+--- a/package/python-idna/python-idna.mk
++++ b/package/python-idna/python-idna.mk
+@@ -7 +7 @@
+-PYTHON_IDNA_VERSION = 3.11
++PYTHON_IDNA_VERSION = 3.20
+@@ -9 +9 @@
+-PYTHON_IDNA_SITE = https://files.pythonhosted.org/packages/6f/6d/0703ccc57f3a7233505399edb88de3cbd678da106337b9fcde432b65ed60
++PYTHON_IDNA_SITE = https://files.pythonhosted.org/packages/f5/08/8eea9d4b8302028f3abb2c0813953f7aec26d33b7a8960ed760e65ff29fa
+diff --git a/package/python-multidict/python-multidict.hash b/package/python-multidict/python-multidict.hash
+--- a/package/python-multidict/python-multidict.hash
++++ b/package/python-multidict/python-multidict.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/multidict/json
+-md5  aed0d99fa532a2b6570b88c900d60b99  multidict-6.7.1.tar.gz
+-sha256  ec6652a1bee61c53a3e5776b6049172c53b6aaba34f18c9ad04f82712bac623d  multidict-6.7.1.tar.gz
++# sha256 from https://pypi.org/pypi/multidict/7.2.1/json
++sha256  e8af3e6f1bdbc31fd762b094133b478b89988eaebc63cbe82b1d9e3bbd15cede  multidict-7.2.1.tar.gz
+@@ -5 +4 @@
+-sha256  93d11a968e2f0f36373c40811ff6d20e173f58c3cab5884cd6617bbfd795492a  LICENSE
++sha256  2e4be5fc6c4c72a466fcb665d726e049a6891981fe536c4f04b6366749461d23  LICENSE
+diff --git a/package/python-multidict/python-multidict.mk b/package/python-multidict/python-multidict.mk
+--- a/package/python-multidict/python-multidict.mk
++++ b/package/python-multidict/python-multidict.mk
+@@ -7 +7 @@
+-PYTHON_MULTIDICT_VERSION = 6.7.1
++PYTHON_MULTIDICT_VERSION = 7.2.1
+@@ -9 +9 @@
+-PYTHON_MULTIDICT_SITE = https://files.pythonhosted.org/packages/1a/c2/c2d94cbe6ac1753f3fc980da97b3d930efe1da3af3c9f5125354436c073d
++PYTHON_MULTIDICT_SITE = https://files.pythonhosted.org/packages/7b/6b/29ef8e752f5854dcc267ded0652c475bec99b86f255957a0d4fcad657b18
+diff --git a/package/python-multipart/python-multipart.hash b/package/python-multipart/python-multipart.hash
+--- a/package/python-multipart/python-multipart.hash
++++ b/package/python-multipart/python-multipart.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/python_multipart/json
+-md5  0debb97a2b5d68f8dd5119bd200f4010  python_multipart-0.0.22.tar.gz
+-sha256  7340bef99a7e0032613f56dc36027b959fd3b30a787ed62d310e951f7c3a3a58  python_multipart-0.0.22.tar.gz
++# sha256 from https://pypi.org/pypi/python-multipart/0.0.32/json
++sha256  be54b7f3fa167bb83e4fcd936b887b708f4e57fe75911c02aebf53efaf8d938e  python_multipart-0.0.32.tar.gz
+@@ -5 +4 @@
+-sha256  a8e833176cd617daf00b9d6d39fa15ca8edebc6d1643079cd2f4893c0c289be2  LICENSE.txt
++sha256  cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  LICENSE.txt
+diff --git a/package/python-multipart/python-multipart.mk b/package/python-multipart/python-multipart.mk
+--- a/package/python-multipart/python-multipart.mk
++++ b/package/python-multipart/python-multipart.mk
+@@ -7 +7 @@
+-PYTHON_MULTIPART_VERSION = 0.0.22
++PYTHON_MULTIPART_VERSION = 0.0.32
+@@ -9 +9 @@
+-PYTHON_MULTIPART_SITE = https://files.pythonhosted.org/packages/94/01/979e98d542a70714b0cb2b6728ed0b7c46792b695e3eaec3e20711271ca3
++PYTHON_MULTIPART_SITE = https://files.pythonhosted.org/packages/5b/42/55c32bb9b12693c092ad250a0e82edb5b31ddeda6eb772de5f308b3804ad
+diff --git a/package/python-socketio/python-socketio.hash b/package/python-socketio/python-socketio.hash
+--- a/package/python-socketio/python-socketio.hash
++++ b/package/python-socketio/python-socketio.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/python-socketio/json
+-md5  2020f7a9aa9fc74786ff2bdc8b48a68f  python_socketio-5.16.0.tar.gz
+-sha256  f79403c7f1ba8b84460aa8fe4c671414c8145b21a501b46b676f3740286356fd  python_socketio-5.16.0.tar.gz
++# sha256 from https://pypi.org/pypi/python-socketio/5.17.0/json
++sha256  c3bbfc4937dcfea7c4d1b182afa94d4a30335d153987e8f2078b344beacf95a0  python_socketio-5.17.0.tar.gz
+diff --git a/package/python-socketio/python-socketio.mk b/package/python-socketio/python-socketio.mk
+--- a/package/python-socketio/python-socketio.mk
++++ b/package/python-socketio/python-socketio.mk
+@@ -7 +7 @@
+-PYTHON_SOCKETIO_VERSION = 5.16.0
++PYTHON_SOCKETIO_VERSION = 5.17.0
+@@ -9 +9 @@
+-PYTHON_SOCKETIO_SITE = https://files.pythonhosted.org/packages/b8/55/5d8af5884283b58e4405580bcd84af1d898c457173c708736e065f10ca4a
++PYTHON_SOCKETIO_SITE = https://files.pythonhosted.org/packages/b9/04/8647675c93b5e74a3daa41a2a03930bac0cbdcfcf307900f0441ae6550ba
+diff --git a/package/python-starlette/python-starlette.hash b/package/python-starlette/python-starlette.hash
+--- a/package/python-starlette/python-starlette.hash
++++ b/package/python-starlette/python-starlette.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/starlette/json
+-md5  2d1e880ba9520c487e52dec610a0dfc5  starlette-1.1.0.tar.gz
+-sha256  e83c7fe0ddecd8719c5b840080325aec0260acec86e9832899e377b91d65e90f  starlette-1.1.0.tar.gz
++# sha256 from https://pypi.org/pypi/starlette/1.10.0/json
++sha256  b8399098d4c1e3522734f7235dc79b1fc967f96cf139c81e0fa30479e0685f9b  starlette-1.10.0.tar.gz
+diff --git a/package/python-starlette/python-starlette.mk b/package/python-starlette/python-starlette.mk
+--- a/package/python-starlette/python-starlette.mk
++++ b/package/python-starlette/python-starlette.mk
+@@ -7 +7 @@
+-PYTHON_STARLETTE_VERSION = 1.1.0
++PYTHON_STARLETTE_VERSION = 1.10.0
+@@ -9 +9 @@
+-PYTHON_STARLETTE_SITE = https://files.pythonhosted.org/packages/95/66/4d20cdf39a8d6a51e663b7038e3b828ff211d3891a43a713fe7e4643f3a8
++PYTHON_STARLETTE_SITE = https://files.pythonhosted.org/packages/48/bb/3d8757f21e9a53d9035c9eb039a777047139a16bfdbedfc7a58241c3d914
+diff --git a/package/python-typing-extensions/python-typing-extensions.hash b/package/python-typing-extensions/python-typing-extensions.hash
+--- a/package/python-typing-extensions/python-typing-extensions.hash
++++ b/package/python-typing-extensions/python-typing-extensions.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/typing-extensions/json
+-md5  079e529d0b271647f3ec2720aee8fc65  typing_extensions-4.15.0.tar.gz
+-sha256  0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466  typing_extensions-4.15.0.tar.gz
++# sha256 from https://pypi.org/pypi/typing-extensions/4.16.0/json
++sha256  dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5  typing_extensions-4.16.0.tar.gz
+diff --git a/package/python-typing-extensions/python-typing-extensions.mk b/package/python-typing-extensions/python-typing-extensions.mk
+--- a/package/python-typing-extensions/python-typing-extensions.mk
++++ b/package/python-typing-extensions/python-typing-extensions.mk
+@@ -7 +7 @@
+-PYTHON_TYPING_EXTENSIONS_VERSION = 4.15.0
++PYTHON_TYPING_EXTENSIONS_VERSION = 4.16.0
+@@ -9 +9 @@
+-PYTHON_TYPING_EXTENSIONS_SITE = https://files.pythonhosted.org/packages/72/94/1a15dd82efb362ac84269196e94cf00f187f7ed21c242792a923cdb1c61f
++PYTHON_TYPING_EXTENSIONS_SITE = https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3306cebfbda2c520f545d36b5be2c7255cc528bb45d6
+diff --git a/package/python-yarl/python-yarl.hash b/package/python-yarl/python-yarl.hash
+--- a/package/python-yarl/python-yarl.hash
++++ b/package/python-yarl/python-yarl.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/yarl/json
+-md5  323301056acefbfe0d57e8ab8ba33eb3  yarl-1.23.0.tar.gz
+-sha256  53b1ea6ca88ebd4420379c330aea57e258408dd0df9af0992e5de2078dc9f5d5  yarl-1.23.0.tar.gz
++# sha256 from https://pypi.org/pypi/yarl/1.25.1/json
++sha256  03dd38de09bc213e9a8b29761eec33ee1d5318dac0e49d8af36e4d27830e23a7  yarl-1.25.1.tar.gz
+diff --git a/package/python-yarl/python-yarl.mk b/package/python-yarl/python-yarl.mk
+--- a/package/python-yarl/python-yarl.mk
++++ b/package/python-yarl/python-yarl.mk
+@@ -7 +7 @@
+-PYTHON_YARL_VERSION = 1.23.0
++PYTHON_YARL_VERSION = 1.25.1
+@@ -9 +9 @@
+-PYTHON_YARL_SITE = https://files.pythonhosted.org/packages/23/6e/beb1beec874a72f23815c1434518bfc4ed2175065173fb138c3705f658d4
++PYTHON_YARL_SITE = https://files.pythonhosted.org/packages/75/16/e8be8e2fb175bbf41a0680381a319f1199fae256588241a2ac8677eafb49
+diff --git a/package/python-orjson/python-orjson.mk b/package/python-orjson/python-orjson.mk
+--- a/package/python-orjson/python-orjson.mk
++++ b/package/python-orjson/python-orjson.mk
+@@ -7 +7 @@
+-PYTHON_ORJSON_VERSION = 3.11.5
++PYTHON_ORJSON_VERSION = 3.11.6
+@@ -9 +9 @@
+-PYTHON_ORJSON_SITE_PYPI = https://files.pythonhosted.org/packages/04/b8/333fdb27840f3bf04022d21b654a35f58e15407183aeb16f3b41aa053446
++PYTHON_ORJSON_SITE_PYPI = https://files.pythonhosted.org/packages/70/a3/4e09c61a5f0c521cba0bb433639610ae037437669f1a4cbc93799e731d78
+@@ -12,2 +12,2 @@
+-PYTHON_ORJSON_LICENSE = Apache-2.0 or MIT
+-PYTHON_ORJSON_LICENSE_FILES = LICENSE-APACHE LICENSE-MIT
++PYTHON_ORJSON_LICENSE = MPL-2.0, Apache-2.0 or MIT
++PYTHON_ORJSON_LICENSE_FILES = LICENSE-APACHE LICENSE-MIT LICENSE-MPL-2.0
+diff --git a/package/python-orjson/python-orjson.hash b/package/python-orjson/python-orjson.hash
+--- a/package/python-orjson/python-orjson.hash
++++ b/package/python-orjson/python-orjson.hash
+@@ -2 +2 @@
+-sha256  cd415890f20e7f29055b5057d3ff5af7c673ffc3d7e659ec68e9377f13604065  python-orjson-3.11.5-cargo6.tar.gz
++sha256  666eecabd187fd586f4caf4a30d629a190591fcf060c1dbe6c19962f8bce0a55  python-orjson-3.11.6-cargo6.tar.gz
+@@ -5,0 +6 @@
++sha256  66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172  LICENSE-MPL-2.0
+diff --git a/package/python-certifi/python-certifi.mk b/package/python-certifi/python-certifi.mk
+--- a/package/python-certifi/python-certifi.mk
++++ b/package/python-certifi/python-certifi.mk
+@@ -7 +7 @@
+-PYTHON_CERTIFI_VERSION = 2026.4.22
++PYTHON_CERTIFI_VERSION = 2026.10.19
+@@ -9 +9 @@
+-PYTHON_CERTIFI_SITE = https://files.pythonhosted.org/packages/25/ee/6caf7a40c36a1220410afe15a1cc64993a1f864871f698c0f93acb72842a
++PYTHON_CERTIFI_SITE = https://files.pythonhosted.org/packages/a6/bd/1436c50cc46699de0230fbaacc1d1de7bfec413176099949e9d5112e88f2
+diff --git a/package/python-certifi/python-certifi.hash b/package/python-certifi/python-certifi.hash
+--- a/package/python-certifi/python-certifi.hash
++++ b/package/python-certifi/python-certifi.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/certifi/json
+-md5  238385f505d22767cd1860661f1c5743  certifi-2026.4.22.tar.gz
+-sha256  8d455352a37b71bf76a79caa83a3d6c25afee4a385d632127b6afb3963f1c580  certifi-2026.4.22.tar.gz
++# sha256 from https://pypi.org/pypi/certifi/2026.10.19/json
++sha256  035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae  certifi-2026.10.19.tar.gz
+diff --git a/package/python-brotli/python-brotli.mk b/package/python-brotli/python-brotli.mk
+--- a/package/python-brotli/python-brotli.mk
++++ b/package/python-brotli/python-brotli.mk
+@@ -7 +7 @@
+-PYTHON_BROTLI_VERSION = 1.2.0
++PYTHON_BROTLI_VERSION = 1.2.1
+@@ -9 +9 @@
+-PYTHON_BROTLI_SITE = https://files.pythonhosted.org/packages/f7/16/c92ca344d646e71a43b8bb353f0a6490d7f6e06210f8554c8f874e454285
++PYTHON_BROTLI_SITE = https://files.pythonhosted.org/packages/cf/81/1546c983678a9b4e77cb4718eaedd1b2caf24a6cdbf1eb8775938d22aff7
+diff --git a/package/python-brotli/python-brotli.hash b/package/python-brotli/python-brotli.hash
+--- a/package/python-brotli/python-brotli.hash
++++ b/package/python-brotli/python-brotli.hash
+@@ -1,3 +1,2 @@
+-# md5, sha256 from https://pypi.org/pypi/brotli/json
+-md5  af164f216cba527bf6f24d09c9d3576b  brotli-1.2.0.tar.gz
+-sha256  e310f77e41941c13340a95976fe66a8a95b01e783d430eeaf7a2f87e0a57dd0a  brotli-1.2.0.tar.gz
++# sha256 from https://pypi.org/pypi/brotli/1.2.1/json
++sha256  02b2f7b5a83485efe448a44ddf7983def05c3bb1dcf917d4f7154070260e13de  brotli-1.2.1.tar.gz
