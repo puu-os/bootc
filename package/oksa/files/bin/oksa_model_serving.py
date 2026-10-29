@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 from contextlib import contextmanager
+import copy
 import dataclasses
 import fcntl
 import hashlib
@@ -18,10 +19,13 @@ import socket
 import subprocess
 import tempfile
 import time
-from typing import Any, Dict
+from typing import Any, Callable, Dict, TYPE_CHECKING
 import urllib.error
 import urllib.parse
 import urllib.request
+
+if TYPE_CHECKING:
+    from oksa_workload_evaluation import WorkloadSnapshot
 
 STATE_DIR = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 MODELS_DIR = Path(os.environ.get("PUU_VLLM_MODELS_DIR", "/var/lib/vllm/models"))
@@ -40,8 +44,6 @@ def is_calibration_model(name: str) -> bool:
     )
 
 
-
-
 def normalize_storage_id(repo_id: str, name: str | None = None) -> str:
     raw = (name if isinstance(name, str) and name.strip() else repo_id.rsplit("/", 1)[-1]).strip().lower()
     normalized = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("._-")
@@ -56,25 +58,34 @@ def public_model_name(name: str, state_dir: Path = STATE_DIR) -> str:
     return parse_env_file(state_dir / "models.d" / f"{name}.env").get("PUU_VLLM_REPO_ID") or name
 
 
-def resolve_model_name(name: str, state_dir: Path = STATE_DIR) -> str:
+class InvalidModelSelection(ValueError):
+    """The requested model is absent from or ambiguous in the catalogue."""
+
+
+def resolve_model_name(
+    name: str, state_dir: Path = STATE_DIR, *, catalogue: tuple[tuple[str, str], ...] | None = None,
+) -> str:
     if not isinstance(name, str) or not name:
-        raise ValueError("Model name must be a non-empty string")
+        raise InvalidModelSelection("Model name must be a non-empty string")
     if is_calibration_model(name):
         return CALIBRATION_MODEL
-    matches = [internal for internal, _, _ in read_models_list(state_dir / "models.list")
-               if name in (internal, public_model_name(internal, state_dir))]
+    if catalogue is None:
+        catalogue = tuple((internal, public_model_name(internal, state_dir))
+                          for internal, _, _ in read_models_list(state_dir / "models.list"))
+    matches = [internal for internal, public_name in catalogue if name in (internal, public_name)]
     if len(matches) != 1:
-        raise ValueError(f"Unknown or ambiguous model: {name}")
+        raise InvalidModelSelection(f"Unknown or ambiguous model: {name}")
     return matches[0]
 
 
-def calibration_model_info() -> dict:
+def calibration_model_info(capable: bool | None = None) -> dict:
     from oksa_calibration_state import applied_result
 
-    try:
-        capable = applied_result()["limits"]["max_num_seqs"] > 0
-    except (OSError, ValueError):
-        capable = False
+    if capable is None:
+        try:
+            capable = applied_result()["limits"]["max_num_seqs"] > 0
+        except (OSError, ValueError):
+            capable = False
     proc = run_kubectl("get", "deployment", CALIBRATION_MODEL, "-n", OKSA_NAMESPACE,
                        "--ignore-not-found", "--request-timeout=5s", "-o", "json", check=False)
     deployment = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else {}
@@ -124,19 +135,14 @@ def run_discover(discover_bin: Path | None = None) -> None:
 def check_capabilities(planner_bin: Path, model_name: str) -> bool:
     if not planner_bin.is_file() or not os.access(planner_bin, os.X_OK):
         return False
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        check_dir = Path(tmp_dir)
-        manifests_dir = check_dir / "manifests"
-        manifests_dir.mkdir(parents=True, exist_ok=True)
-        env = dict(
-            os.environ,
-            PUU_K3S_MANIFEST_DIR=str(manifests_dir),
-            PUU_VLLM_SELECTED_MODEL=model_name,
-            PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
-            PUU_VLLM_IGNORE_SERVING_DISABLED="true",
-            PUU_VLLM_ACTIVE_MODEL_FILE=str(check_dir / "active-model"),
-        )
-        return subprocess.run([str(planner_bin)], env=env, capture_output=True).returncode == 0
+    from oksa_workload_evaluation import WorkloadEvaluator
+
+    try:
+        state = WorkloadState.load()
+        selected_model = state.resolve_model_name(model_name)
+        return WorkloadEvaluator(state.snapshot).evaluate(selected_model).capable
+    except (OSError, ValueError):
+        return False
 
 
 def collect_models_list(
@@ -146,6 +152,11 @@ def collect_models_list(
 ) -> dict:
     run_discover(discover_bin)
     planner = planner_bin or resolve_helper("oksa-plan-vllm-workloads")
+    from oksa_workload_evaluation import WorkloadEvaluator
+
+    state = WorkloadState.load(state_dir, capture_capability_errors=True)
+    evaluator = WorkloadEvaluator(state.snapshot) if state.snapshot is not None else None
+    planner_available = planner.is_file() and os.access(planner, os.X_OK)
     active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
     active_model = read_first_line(active_model_file)
     selected_file, disabled_file = control_files(state_dir)
@@ -153,7 +164,7 @@ def collect_models_list(
     selected_model = read_first_line(selected_file)
     if selected_model:
         try:
-            selected_model = resolve_model_name(selected_model, state_dir)
+            selected_model = state.resolve_model_name(selected_model)
         except ValueError:
             pass
 
@@ -167,30 +178,35 @@ def collect_models_list(
         except (OSError, ValueError):
             pass
 
-    builtin = calibration_model_info()
+    builtin = calibration_model_info(state.calibration_positive)
     builtin["selected"] = is_calibration_model(selected_model) or (not selected_model and serving_enabled)
     models = [builtin]
     if builtin["active"]:
         active_model = CALIBRATION_MODEL
-    for name, _, _ in read_models_list(state_dir / "models.list"):
+    for name, public_name in state.catalogue:
         if is_calibration_model(name):
             continue
         meta = meta_map.get(name, {})
+        try:
+            resolved_name = state.resolve_model_name(name)
+            capable = planner_available and evaluator is not None and evaluator.evaluate(resolved_name).capable
+        except (OSError, ValueError):
+            capable = False
         models.append({
-            "name": public_model_name(name, state_dir),
+            "name": public_name,
             "id": name,
             "repo_id": meta.get("repo_id") or "-",
             "storage_mib": meta.get("storage_mib") or 0,
             "quantization": meta.get("quantization") or "none",
-            "capabilities": "ok" if check_capabilities(planner, name) else "insufficient",
+            "capabilities": "ok" if capable else "insufficient",
             "active": (name == active_model),
             "selected": (name == selected_model),
         })
 
     return {
         "ok": True,
-        "active_model": public_model_name(active_model, state_dir),
-        "selected_model": public_model_name(selected_model, state_dir),
+        "active_model": state.public_model_name(active_model, state_dir),
+        "selected_model": state.public_model_name(selected_model, state_dir),
         "serving_enabled": serving_enabled,
         "models": models,
     }
@@ -705,6 +721,164 @@ class NodeCapacity:
     @property
     def single_gpu_capacity_mib(self) -> int:
         return (self.gpu_memory_max_mib * 95) // 100
+
+
+@dataclasses.dataclass(frozen=True)
+class CalibratedWorkload:
+    manifest: dict
+    deployment_index: int
+
+    @classmethod
+    def load(cls) -> "CalibratedWorkload":
+        manifest = json.loads(CALIBRATED_MANIFEST_PATH.read_text())
+        if not isinstance(manifest, dict) or manifest.get("kind") != "List" or not isinstance(manifest.get("items"), list):
+            raise ValueError("Expected calibrated Bonsai manifest List")
+        deployments = [
+            index for index, item in enumerate(manifest["items"])
+            if isinstance(item, dict) and item.get("kind") == "Deployment"
+            and isinstance(item.get("metadata"), dict)
+            and item["metadata"].get("name") == CALIBRATION_MODEL
+        ]
+        if len(deployments) != 1 or not isinstance(manifest["items"][deployments[0]].get("spec"), dict):
+            raise ValueError("Missing calibrated Bonsai Deployment")
+        return cls(manifest, deployments[0])
+
+    @property
+    def replicas(self) -> int:
+        return self.manifest["items"][self.deployment_index]["spec"].get("replicas", 1)
+
+    def manifest_with_replicas(self, replicas: int) -> dict:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["items"][self.deployment_index]["spec"]["replicas"] = replicas
+        return manifest
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkloadState:
+    snapshot: "WorkloadSnapshot | None"
+    calibrated: CalibratedWorkload | None
+    calibration_positive: bool
+    catalogue: tuple[tuple[str, str], ...]
+    capability_error: OSError | ValueError | None = None
+
+    @classmethod
+    def load(
+        cls,
+        state_dir: Path | None = None,
+        models_dir: Path | None = None,
+        *,
+        capture_capability_errors: bool = False,
+        check_model_paths: bool = True,
+        resolve_public_names: bool = True,
+        selected_model: str = "",
+        on_invalid_selection: Callable[[InvalidModelSelection], None] | None = None,
+    ) -> "WorkloadState":
+        """Load strictly, or retain listing data without a snapshot on capability read failure.
+
+        Validate selection before parsing specs; a returning error handler permits loading to continue.
+        """
+        from oksa_calibration_state import applied_result
+        from oksa_workload_evaluation import CalibrationSnapshot, ModelSnapshot, WorkloadSnapshot
+
+        state_dir = STATE_DIR if state_dir is None else state_dir
+        models_dir = MODELS_DIR if models_dir is None else models_dir
+
+        capability_error = None
+        node = None
+        try:
+            node = NodeCapacity.from_env(
+                parse_env_file(state_dir / "node-capacity.env"),
+                parse_env_file(state_dir / "topology.env"),
+            )
+        except (OSError, ValueError) as err:
+            if not capture_capability_errors:
+                raise
+            capability_error = err
+        models = []
+        catalogue = []
+        metadata_cache: dict[Path, dict[str, str]] = {}
+        entries = read_models_list(state_dir / "models.list")
+        for name, _, _ in entries:
+            if is_calibration_model(name):
+                public_name = CALIBRATION_REPO
+            elif resolve_public_names and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+                public_path = state_dir / "models.d" / f"{name}.env"
+                if public_path not in metadata_cache:
+                    metadata_cache[public_path] = parse_env_file(public_path)
+                public_name = metadata_cache[public_path].get("PUU_VLLM_REPO_ID") or name
+            else:
+                public_name = name
+            catalogue.append((name, public_name))
+        catalogue = tuple(catalogue)
+        if selected_model:
+            try:
+                resolve_model_name(selected_model, catalogue=catalogue)
+            except InvalidModelSelection as err:
+                if on_invalid_selection is None:
+                    raise
+                on_invalid_selection(err)
+
+        for (name, path, env_path), (_, public_name) in zip(entries, catalogue):
+            spec = None
+            # The calibrated workload is not planned from a discovered model spec.
+            if name != CALIBRATION_MODEL:
+                try:
+                    metadata_path = Path(env_path)
+                    if metadata_path not in metadata_cache:
+                        metadata_cache[metadata_path] = parse_env_file(metadata_path)
+                    spec = ModelSpec.from_env(metadata_cache[metadata_path], name=name, path=path)
+                except (OSError, ValueError) as err:
+                    if not capture_capability_errors:
+                        raise
+                    capability_error = err
+            if spec is not None:
+                path_exists = False
+                path_error = None
+                if check_model_paths:
+                    try:
+                        path_exists = Path(spec.path).is_dir()
+                    except (OSError, ValueError) as err:
+                        path_error = err
+                models.append(ModelSnapshot(spec, path_exists, model_id(name), public_name, path_error))
+
+        calibrated = None
+        calibration_positive = False
+        applied_max_sequences = None
+        calibration_error = ""
+        try:
+            result = applied_result()
+            calibration_positive = result["limits"]["max_num_seqs"] > 0
+            calibrated = CalibratedWorkload.load()
+            applied_max_sequences = result["limits"]["max_num_seqs"]
+        except (OSError, ValueError) as err:
+            calibration_error = str(err)
+
+        limits, valid = read_calibration_limits()
+        utilization = limits.get("gpu_memory_utilization") if valid else None
+        max_context = limits.get("max_model_len") if valid else None
+        max_sequences = limits.get("max_num_seqs") if valid else None
+        calibration = CalibrationSnapshot(
+            applied_max_sequences=applied_max_sequences,
+            replicas=calibrated.replicas if calibrated is not None else 1,
+            error=calibration_error,
+            gpu_memory_utilization=(utilization if isinstance(utilization, (int, float)) and 0.05 <= utilization <= 0.98 else None),
+            max_context=max_context if isinstance(max_context, int) and max_context > 0 else None,
+            max_sequences=max_sequences if isinstance(max_sequences, int) and max_sequences > 0 else None,
+        )
+        snapshot = (WorkloadSnapshot(tuple(models), node, models_dir, CALIBRATION_MODEL, calibration)
+                    if capability_error is None else None)
+        return cls(snapshot, calibrated, calibration_positive, catalogue, capability_error)
+
+    def resolve_model_name(self, name: str) -> str:
+        return resolve_model_name(name, catalogue=self.catalogue)
+
+    def public_model_name(self, name: str, state_dir: Path = STATE_DIR) -> str:
+        if is_calibration_model(name):
+            return CALIBRATION_REPO
+        for internal, public_name in self.catalogue:
+            if internal == name:
+                return public_name
+        return public_model_name(name, state_dir)
 
 
 def read_models_list(path: Path | str) -> list[tuple[str, str, str]]:

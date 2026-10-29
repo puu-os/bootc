@@ -3,7 +3,6 @@
 # Copyright (C) Opinsys Oy 2026
 
 import argparse
-import dataclasses
 import fcntl
 import json
 import os
@@ -13,27 +12,8 @@ import textwrap
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oksa_model_serving as ms
-from oksa_calibration_state import STATUS_PATH, applied_result
-
-
-@dataclasses.dataclass
-class PlannedWorkload:
-    spec: ms.ModelSpec
-    serving_mode: str
-    gpu_memory_utilization: str
-    resource_gpus: int
-    replicas: int
-    assigned_gpu_devices: str
-    interconnect_selector: str
-    shared_reserved_mib: int
-    app_name: str
-    model_label: str
-    model_node_label: str
-
-
-
-class PlanError(Exception):
-    pass
+from oksa_calibration_state import STATUS_PATH
+from oksa_workload_evaluation import PlannedWorkload, WorkloadEvaluator
 
 
 def _match_expr(key: str, val: str, indent: str = "                  ") -> list[str]:
@@ -47,25 +27,6 @@ def _match_expr(key: str, val: str, indent: str = "                  ") -> list[
 
 def warn(msg: str) -> None:
     sys.stderr.write(f"oksa-plan-vllm-workloads: {msg}\n")
-
-
-def serving_mode_for_model(requested_mode: str, sharing_policy: str) -> str:
-    if requested_mode == "shared-gpu":
-        return "shared-gpu" if sharing_policy == "allow" else "exclusive-gpu"
-    if requested_mode in ("exclusive-gpu", "replicated", "topology-parallel"):
-        return requested_mode
-    return "shared-gpu"
-
-
-def utilization_from_budget(budget_mib: int, gpu_memory_mib: int) -> str:
-    if gpu_memory_mib <= 0:
-        return "0.70"
-    permille = (budget_mib * 1000) // gpu_memory_mib
-    if permille < 50:
-        permille = 50
-    elif permille > 950:
-        permille = 950
-    return f"0.{permille:03d}"
 
 
 def write_node_affinity(
@@ -242,110 +203,6 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 with Server(("0.0.0.0", listen_port), Handler) as server:
     server.serve_forever()
 """).strip()
-
-
-def plan_workload(
-    spec: ms.ModelSpec,
-    node: ms.NodeCapacity,
-    models_dir: Path,
-    shared_reserved_mib: int,
-    manual_selection: bool = False,
-) -> PlannedWorkload:
-    if not manual_selection and not spec.autostart:
-        raise PlanError("autostart is disabled")
-
-    serving_mode = serving_mode_for_model(spec.serving_mode, spec.sharing_policy)
-    model_label = ms.model_id(spec.name)
-    app_name = f"puu-vllm-{model_label}"
-    model_node_label = ms.model_node_label(spec.name)
-    gpu_memory_utilization = f"{spec.gpu_memory_utilization:.2f}"
-    cal_limits, cal_valid = ms.read_calibration_limits()
-    if cal_valid:
-        cal_util = cal_limits.get("gpu_memory_utilization")
-        if isinstance(cal_util, (int, float)) and 0.05 <= cal_util <= 0.98:
-            gpu_memory_utilization = f"{cal_util:.2f}"
-        cal_max_len = cal_limits.get("max_model_len")
-        if isinstance(cal_max_len, int) and 0 < cal_max_len < spec.max_context:
-            spec = dataclasses.replace(spec, max_context=cal_max_len)
-        cal_max_seqs = cal_limits.get("max_num_seqs")
-        if isinstance(cal_max_seqs, int) and 0 < cal_max_seqs < spec.max_concurrent_sequences:
-            spec = dataclasses.replace(spec, max_concurrent_sequences=cal_max_seqs)
-    resource_gpus = 0
-    replicas = 1
-    assigned_gpu_devices = ""
-    interconnect_selector = "none"
-
-    if not spec.path.startswith(f"{models_dir}/"):
-        raise PlanError(f"model path {spec.path} is not under {models_dir}")
-    if not Path(spec.path).is_dir():
-        raise PlanError(f"model path {spec.path} is missing")
-    if spec.same_path_required and spec.path != str(models_dir / spec.name):
-        raise PlanError("model path must be identical on participants")
-    if node.gpu_count <= 0 or not node.cuda_ready or not node.cdi_ready:
-        raise PlanError("CUDA/CDI GPU capacity is not ready")
-    if spec.requires_unified_memory and not node.unified_memory:
-        raise PlanError("unified memory is required but not available")
-    if spec.min_gpu_memory_mib > 0 and node.gpu_memory_max_mib < spec.min_gpu_memory_mib:
-        raise PlanError(f"max GPU memory {node.gpu_memory_max_mib} MiB is below required {spec.min_gpu_memory_mib} MiB")
-    if spec.gpu_memory_budget_mib <= 0:
-        raise PlanError("no positive GPU memory budget was discovered")
-    if spec.estimated_memory_mib > 0 and spec.gpu_memory_budget_mib < spec.estimated_memory_mib:
-        raise PlanError(f"GPU memory budget {spec.gpu_memory_budget_mib} MiB is below estimated model size {spec.estimated_memory_mib} MiB")
-
-    if serving_mode == "shared-gpu":
-        if node.single_gpu_capacity_mib <= 0:
-            raise PlanError("shared GPU capacity is unknown")
-        if spec.gpu_memory_budget_mib > node.single_gpu_capacity_mib:
-            raise PlanError(f"shared GPU budget {spec.gpu_memory_budget_mib} MiB exceeds single-GPU limit {node.single_gpu_capacity_mib} MiB")
-        reserved_after = shared_reserved_mib + spec.gpu_memory_budget_mib
-        if reserved_after > node.single_gpu_capacity_mib:
-            raise PlanError(f"shared GPU budget would reserve {reserved_after} MiB above {node.single_gpu_capacity_mib} MiB")
-        shared_reserved_mib = reserved_after
-        assigned_gpu_devices = "0"
-        gpu_memory_utilization = utilization_from_budget(spec.gpu_memory_budget_mib, node.gpu_memory_max_mib)
-    elif serving_mode in ("exclusive-gpu", "replicated"):
-        resource_gpus = 1
-        if serving_mode == "replicated":
-            replicas = spec.max_replicas
-        if spec.gpu_memory_budget_mib > node.single_gpu_capacity_mib and not node.unified_memory:
-            mode_prefix = "exclusive" if serving_mode == "exclusive-gpu" else "replicated"
-            raise PlanError(f"budget {spec.gpu_memory_budget_mib} MiB exceeds {mode_prefix} GPU guardrail {node.single_gpu_capacity_mib} MiB")
-    elif serving_mode == "topology-parallel":
-        parallel_gpus = spec.tensor_parallel_size * spec.pipeline_parallel_size
-        if parallel_gpus <= 1:
-            raise PlanError("topology-parallel requires more than one vLLM parallel GPU")
-        if parallel_gpus < spec.topology_min_gpus:
-            raise PlanError(f"vLLM parallel size {parallel_gpus} is below required {spec.topology_min_gpus} GPUs")
-        if parallel_gpus > node.gpu_count:
-            raise PlanError(f"vLLM parallel size {parallel_gpus} exceeds discovered GPU count {node.gpu_count}")
-        parallel_capacity_mib = (node.gpu_memory_max_mib * parallel_gpus * 95) // 100
-        if spec.gpu_memory_budget_mib > parallel_capacity_mib and not node.unified_memory:
-            raise PlanError(f"budget {spec.gpu_memory_budget_mib} MiB exceeds topology guardrail {parallel_capacity_mib} MiB")
-        if spec.requires_nvlink:
-            if not node.topology_parallel_capable:
-                raise PlanError("NVLink topology is required but not available")
-            interconnect_selector = "topology"
-        elif node.topology_parallel_capable:
-            interconnect_selector = "topology"
-        elif (spec.requires_fast_nic or spec.allow_fast_nic_fallback) and node.fast_nic_present:
-            interconnect_selector = "fast-nic"
-        else:
-            raise PlanError("neither topology NVLink nor fast NIC is available for topology-parallel serving")
-        resource_gpus = parallel_gpus
-
-    return PlannedWorkload(
-        spec=spec,
-        serving_mode=serving_mode,
-        gpu_memory_utilization=gpu_memory_utilization,
-        resource_gpus=resource_gpus,
-        replicas=replicas,
-        assigned_gpu_devices=assigned_gpu_devices,
-        interconnect_selector=interconnect_selector,
-        shared_reserved_mib=shared_reserved_mib,
-        app_name=app_name,
-        model_label=model_label,
-        model_node_label=model_node_label,
-    )
 
 
 def render_manifest(plan: PlannedWorkload, image: str, models_dir: Path) -> str:
@@ -581,22 +438,6 @@ spec:
     return manifest_text
 
 
-def calibrated_workload() -> tuple[dict, dict, dict]:
-    result = applied_result()
-    manifest = json.loads(ms.CALIBRATED_MANIFEST_PATH.read_text())
-    if not isinstance(manifest, dict) or manifest.get("kind") != "List" or not isinstance(manifest.get("items"), list):
-        raise ValueError("Expected calibrated Bonsai manifest List")
-    deployments = [
-        item for item in manifest["items"]
-        if isinstance(item, dict) and item.get("kind") == "Deployment"
-        and isinstance(item.get("metadata"), dict)
-        and item["metadata"].get("name") == ms.CALIBRATION_MODEL
-    ]
-    if len(deployments) != 1 or not isinstance(deployments[0].get("spec"), dict):
-        raise ValueError("Missing calibrated Bonsai Deployment")
-    return result, manifest, deployments[0]
-
-
 def stop_generic_workloads(keep_app: str = "") -> None:
     selector = f"{ms.label_namespace()}/model-name"
     if keep_app:
@@ -621,8 +462,6 @@ def reconcile(dry_run: bool, require_reconcile: bool = False) -> None:
         "PUU_VLLM_IMAGE",
         "vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967",
     )
-    node_capacity_env = state_dir / "node-capacity.env"
-    topology_env = state_dir / "topology.env"
     active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
     selected_model_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
     serving_disabled_file = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
@@ -631,78 +470,36 @@ def reconcile(dry_run: bool, require_reconcile: bool = False) -> None:
     ignore_serving_disabled = ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
 
     disabled = not ignore_serving_disabled and serving_disabled_file.is_file()
-    node = ms.NodeCapacity.from_env(
-        ms.parse_env_file(node_capacity_env),
-        ms.parse_env_file(topology_env),
-    )
-
     if not selected_model:
         selected_model = ms.read_first_line(selected_model_file)
+
+    def invalid_selection(err: ms.InvalidModelSelection) -> None:
+        warn(str(err))
+        if require_selected_model:
+            sys.exit(1)
+        if not disabled:
+            raise err
+
+    try:
+        state = ms.WorkloadState.load(
+            state_dir, models_dir, check_model_paths=not disabled,
+            resolve_public_names=bool(selected_model) and not ms.is_calibration_model(selected_model),
+            selected_model=selected_model, on_invalid_selection=invalid_selection,
+        )
+    except ms.InvalidModelSelection:
+        return
     if selected_model:
         try:
-            selected_model = ms.resolve_model_name(selected_model, state_dir)
-        except ValueError as err:
-            warn(str(err))
-            if require_selected_model:
-                sys.exit(1)
-            if not disabled:
-                return
-
-    specs = [
-        ms.ModelSpec.from_env(ms.parse_env_file(env_path), name=name, path=path)
-        for name, path, env_path in ms.read_models_list(state_dir / "models.list")
-        if name != ms.CALIBRATION_MODEL
-    ]
+            selected_model = state.resolve_model_name(selected_model)
+        except ms.InvalidModelSelection:
+            pass
 
     empty_manifest = "apiVersion: v1\nkind: List\nitems: []\n"
-    shared_reserved_mib = 0
-    planned: PlannedWorkload | None = None
-
-    calibration = calibrated_manifest = calibrated_deployment = None
-    try:
-        calibration, calibrated_manifest, calibrated_deployment = calibrated_workload()
-    except (OSError, ValueError) as err:
-        if selected_model == ms.CALIBRATION_MODEL:
-            warn(f"cannot start calibrated Bonsai: {err}")
-    calibration_pending = calibration is None
-    bonsai_active = False
-
-    if disabled:
-        pass
-    elif selected_model == ms.CALIBRATION_MODEL:
-        bonsai_active = calibration is not None and calibration["limits"]["max_num_seqs"] > 0
-        if not bonsai_active:
-            warn("Bonsai requires a positive calibration applied during this boot")
-    elif not selected_model and (calibration_pending or calibration["limits"]["max_num_seqs"] > 0):
-        # Calibration owns automatic serving until a model is explicitly selected.
-        bonsai_active = (calibration is not None and calibration["limits"]["max_num_seqs"] > 0
-                         and calibrated_deployment["spec"].get("replicas", 1) > 0)
-    elif calibration_pending:
-        warn("waiting for a valid calibration before switching workloads")
-    elif selected_model:
-        matching = [s for s in specs if s.name == selected_model]
-        if not matching:
-            warn(f"selected model {selected_model} was not discovered")
-        else:
-            try:
-                planned = plan_workload(
-                    matching[0], node, models_dir, shared_reserved_mib, manual_selection=True
-                )
-            except PlanError as err:
-                warn(f"skipping {matching[0].name}: {err}")
-    elif specs:
-        candidates = sorted(
-            (pair for pair in enumerate(specs) if pair[1].autostart),
-            key=lambda pair: (-pair[1].autostart_priority, pair[0]),
-        )
-        for _, spec in candidates:
-            try:
-                planned = plan_workload(
-                    spec, node, models_dir, shared_reserved_mib, manual_selection=False
-                )
-                break
-            except PlanError as err:
-                warn(f"skipping {spec.name}: {err}")
+    evaluation = WorkloadEvaluator(state.snapshot).evaluate(selected_model, disabled)
+    for reason in evaluation.reasons:
+        warn(reason)
+    planned = evaluation.plan
+    bonsai_active = evaluation.calibrated_active
 
     if selected_model and not (planned or bonsai_active):
         if require_selected_model:
@@ -726,8 +523,8 @@ def reconcile(dry_run: bool, require_reconcile: bool = False) -> None:
             if manifest_changed:
                 ms.atomic_write_text(manifest, empty_manifest)
             stop_generic_workloads(planned.app_name if planned else "")
-        if calibrated_deployment is not None and (disabled or selected_model):
-            calibrated_deployment["spec"]["replicas"] = int(bonsai_active)
+        if state.calibrated is not None and (disabled or selected_model):
+            calibrated_manifest = state.calibrated.manifest_with_replicas(int(bonsai_active))
             ms.atomic_write_text(ms.CALIBRATED_MANIFEST_PATH, json.dumps(calibrated_manifest) + "\n")
             ms.run_kubectl("apply", "-f", str(ms.CALIBRATED_MANIFEST_PATH))
             if not bonsai_active:
