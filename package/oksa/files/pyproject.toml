@@ -32,6 +32,7 @@ bypass-selection = true
 "bin/oksa-calibration-probe" = "usr/libexec/puu/oksa-calibration-probe"
 "bin/oksa-web" = "usr/libexec/puu/oksa-web"
 "bin/oksa_model_serving.py" = "usr/libexec/puu/oksa_model_serving.py"
+"bin/oksa_workload_evaluation.py" = "usr/libexec/puu/oksa_workload_evaluation.py"
 "bin/oksa_model_removal.py" = "usr/libexec/puu/oksa_model_removal.py"
 "bin/oksa_monitoring.py" = "usr/libexec/puu/oksa_monitoring.py"
 "bin/oksa_user_deletion.py" = "usr/libexec/puu/oksa_user_deletion.py"
