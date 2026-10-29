@@ -3,3 +3,4 @@ build/
 todo.txt
 __pycache__/
 *.pyc
+dist/
