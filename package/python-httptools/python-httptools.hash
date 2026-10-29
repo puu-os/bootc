@@ -1,0 +1,7 @@
+# sha256 from https://pypi.org/pypi/httptools/0.9.0/json
+sha256  d484ebb7e3a3f3597b0f645fbd1b85633674ca808c1f5ba11c2caf7c66f5c8b6  httptools-0.9.0.tar.gz
+# Locally computed sha256 checksums
+sha256  f4573e7cb7676745fb5b8d36fa548aa93e391cfb6872ddacd65130c45ea6a92d  LICENSE
+sha256  79e6ba8b687cb54786207342b9b6fcee0ac10218453ed9009b84d949b2233cc0  vendor/http-parser/LICENSE-MIT
+sha256  628168d68bb5a8a17e0bbefb3bd74e326e1edc20583d76f52f457c82c921867d  vendor/llhttp/LICENSE
+sha256  ebca854e0134cd256d673627c20499f42577eb74bacf08b9f25b626a73c91277  vendor/llhttp/LICENSE-MIT
