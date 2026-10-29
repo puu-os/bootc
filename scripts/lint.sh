@@ -13,7 +13,7 @@ git ls-files -z | (
     IFS= read -r shebang < "$file" || true
     if printf '%s\n' "$shebang" | grep -Eq '^#!([^[:space:]]*/)?(env([[:space:]]+-S)?[[:space:]]+)?(a|ba|da|k)?sh([[:space:]]|$)'; then
       sh_files+=("$file")
-    elif printf '%s\n' "$shebang" | grep -Eq '^#!([^[:space:]]*/)?(env([[:space:]]+-S)?[[:space:]]+)?python3?([[:space:]]|$)'; then
+    elif [[ "$file" == *.py ]] || printf '%s\n' "$shebang" | grep -Eq '^#!([^[:space:]]*/)?(env([[:space:]]+-S)?[[:space:]]+)?python3?([[:space:]]|$)'; then
       py_files+=("$file")
     fi
   done

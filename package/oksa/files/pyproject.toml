@@ -37,6 +37,8 @@ bypass-selection = true
 "bin/oksa_user_deletion.py" = "usr/libexec/puu/oksa_user_deletion.py"
 "bin/oksa_calibration_state.py" = "usr/libexec/puu/oksa_calibration_state.py"
 "bin/oksa_settings.py" = "usr/libexec/puu/oksa_settings.py"
+"bin/oksa_web_service.py" = "usr/libexec/puu/oksa_web_service.py"
+"bin/oksa_web_ui.py" = "usr/libexec/puu/oksa_web_ui.py"
 
 [tool.hatch.envs.default]
 installer = "uv"
