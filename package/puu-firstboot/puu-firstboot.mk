@@ -16,7 +16,7 @@ PUU_FIRSTBOOT_DEPENDENCIES = \
 	host-dconf \
 	libadwaita \
 	libgtk4 \
-	oksa-services \
+	oksa \
 	python3 \
 	python-gobject \
 	systemd
