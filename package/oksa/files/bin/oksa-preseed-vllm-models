@@ -290,8 +290,9 @@ def main() -> None:
     models_dir = args.models_dir
 
     if args.repo_id:
-        name = args.name or args.repo_id.split("/")[-1].lower()
-        name = re.sub(r"[^a-z0-9._-]+", "-", name).strip("-")
+        name = ms.normalize_storage_id(args.repo_id, args.name)
+        if not name:
+            sys.exit("error: invalid model storage ID")
         success = preseed_target(models_dir, name, args.repo_id, args.revision, force=args.force)
         if success:
             notify_discovery_and_planner()

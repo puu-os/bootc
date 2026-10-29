@@ -40,6 +40,14 @@ def is_calibration_model(name: str) -> bool:
     )
 
 
+
+
+def normalize_storage_id(repo_id: str, name: str | None = None) -> str:
+    raw = (name if isinstance(name, str) and name.strip() else repo_id.rsplit("/", 1)[-1]).strip().lower()
+    normalized = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("._-")
+    return normalized if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", normalized) else ""
+
+
 def public_model_name(name: str, state_dir: Path = STATE_DIR) -> str:
     if is_calibration_model(name):
         return CALIBRATION_REPO

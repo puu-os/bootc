@@ -13,7 +13,7 @@ import sys
 import time
 
 libexec_dir = Path("/usr/libexec/puu")
-for directory in (Path(__file__).resolve().parent, libexec_dir):
+for directory in (libexec_dir, Path(__file__).resolve().parent):
     if directory.is_dir() and str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 import oksa_model_serving as ms
@@ -91,14 +91,14 @@ def cmd_model_add(
 ) -> None:
     if os.geteuid() != 0:
         die("oksa model add requires root privileges")
-    effective_name = re.sub(r"[^a-z0-9._-]+", "-", (name or repo_id.rsplit("/", 1)[-1]).lower()).strip("-")
+    effective_name = ms.normalize_storage_id(repo_id, name)
+    if not effective_name:
+        die("invalid model storage ID")
     if ms.is_calibration_model(repo_id) or ms.is_calibration_model(effective_name):
         die("The preset model is installed automatically")
     if not preseed_bin.is_file() or not os.access(preseed_bin, os.X_OK):
         die(f"preseed helper not found: {preseed_bin}")
-    cmd = [str(preseed_bin), "--repo-id", repo_id, "--revision", revision]
-    if name:
-        cmd.extend(["--name", name])
+    cmd = [str(preseed_bin), "--repo-id", repo_id, "--revision", revision, "--name", effective_name]
     if force:
         cmd.append("--force")
     res = subprocess.run(cmd)
