@@ -1,0 +1,4 @@
+# sha256 from https://pypi.org/pypi/poetry-dynamic-versioning/1.10.1/json
+sha256  b7beb9785f527b56a5ae5011f2951b04ad56dd7e654b74f7e09c2924ed1efa25  poetry_dynamic_versioning-1.10.1.tar.gz
+# Locally computed sha256 checksums
+sha256  cd75c5564078e3aadf662a9df3d23430f4705dfeedebbd0ebbeef53998ad94a8  LICENSE
