@@ -10,8 +10,41 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 
 import oksa_model_serving as ms
+
+
+def wait_for_stopped_pods(selector: str, *, kubeconfig: str | None = None) -> None:
+    """Wait after scale-zero, pruning only terminal pods with the workload's labels."""
+    if not selector:
+        raise ValueError("A workload label selector is required for shutdown")
+    deadline = time.monotonic() + 120
+    kubeconfig = ms.get_kubeconfig() if kubeconfig is None else kubeconfig
+
+    def run(*args):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Pods did not stop within 120s: {selector}")
+        return ms.run_kubectl(
+            *args, f"--request-timeout={min(5, remaining)}s",
+            timeout=min(10, remaining), kubeconfig=kubeconfig,
+        )
+
+    while True:
+        result = run("get", "pod", "-n", ms.OKSA_NAMESPACE, "-l", selector, "-o", "json")
+        pods = json.loads(result.stdout)
+        if not isinstance(pods, dict) or not isinstance(pods.get("items"), list):
+            raise ValueError("Invalid Kubernetes pod response during shutdown")
+        if not pods["items"]:
+            return
+        # Recheck each phase server-side; never delete an active pod from a stale list.
+        for phase in ("Failed", "Succeeded"):
+            run(
+                "delete", "pod", "-n", ms.OKSA_NAMESPACE, "-l", selector,
+                f"--field-selector=status.phase={phase}", "--ignore-not-found", "--wait=false",
+            )
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
 class RemovalOutcome(Enum):
@@ -143,6 +176,11 @@ class ModelRemovalService:
                             if not isinstance(workload, dict) or workload.get("kind") not in ("Deployment", "ReplicaSet", "Pod"):
                                 raise ValueError("Invalid Kubernetes workload entry")
                             stopped = False
+                            if workload["kind"] == "Pod":
+                                status = workload.get("status", {})
+                                if not isinstance(status, dict):
+                                    raise ValueError("Invalid Kubernetes pod status")
+                                stopped = status.get("phase") in ("Failed", "Succeeded")
                             if workload["kind"] != "Pod":
                                 spec, status, metadata = (workload.get(field, {}) for field in ("spec", "status", "metadata"))
                                 if not all(isinstance(field, dict) for field in (spec, status, metadata)):
