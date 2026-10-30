@@ -221,19 +221,37 @@ class _OksaPage:
             await self._load_pull()
 
     def _build_monitoring(self) -> None:
-        ui.button("Refresh monitoring", color="accent", on_click=self._load_monitoring).props("outline")
+        with ui.column().classes("w-full min-w-0 gap-1"):
+            self.model_status = ui.label("Active model: Unavailable").classes("text-2xl font-semibold w-full break-words")
+            self.inference = ui.label("Inference: Unavailable").classes("text-xl font-medium w-full break-words")
+            self.selected_model = ui.label("Selected model: Unavailable").classes("text-sm text-[#4C566A] w-full break-words")
+        with ui.row().classes("w-full items-center justify-between gap-2"):
+            with ui.column().classes("min-w-0 gap-1"):
+                self.freshness = ui.label("Waiting for first readings").classes("tabular-nums")
+                self.api_status = ui.label("Admin API: waiting for first update").classes("text-sm text-[#4C566A]")
+            ui.button("Refresh monitoring", color="accent", on_click=self._load_monitoring).props("outline")
         self.monitoring_error = ui.label("").classes("text-negative")
-        self.api_status = ui.label("Admin API: waiting for first update")
-        self.freshness = ui.label("Waiting for first readings")
-        self.inference = ui.label("Inference: Unavailable")
-        self.memory = ui.label("Host memory: Unavailable")
-        self.memory_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
-        self.memory_progress.set_visibility(False)
-        self.model_status = ui.label("Active model: Unavailable; selected: Unavailable")
-        self.requests = ui.label("Requests running / waiting: Unavailable / Unavailable")
-        self.kv_cache = ui.label("KV cache: Unavailable")
-        self.kv_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
-        self.kv_progress.set_visibility(False)
+        with ui.grid().classes("w-full grid-cols-1 md:grid-cols-3 gap-6"):
+            with ui.column().classes("min-w-0 gap-1"):
+                ui.label("Host memory").classes("text-sm text-[#4C566A]")
+                with ui.row().classes("w-full flex-nowrap items-baseline gap-1"):
+                    self.memory = ui.label("Unavailable / Unavailable").classes("text-xl tabular-nums min-w-0 break-words")
+                    ui.label("MiB").classes("text-sm text-[#4C566A]")
+                self.memory_percent = ui.label("used / total · Usage unavailable").classes("text-sm text-[#4C566A] tabular-nums")
+                self.memory_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
+                self.memory_progress.set_visibility(False)
+            with ui.column().classes("min-w-0 gap-1"):
+                ui.label("Requests").classes("text-sm text-[#4C566A]")
+                self.requests = ui.label("Unavailable / Unavailable").classes("text-xl tabular-nums")
+                ui.label("running / waiting").classes("text-sm text-[#4C566A]")
+            with ui.column().classes("min-w-0 gap-1"):
+                ui.label("KV cache").classes("text-sm text-[#4C566A]")
+                with ui.row().classes("w-full flex-nowrap items-baseline gap-1"):
+                    self.kv_cache = ui.label("Unavailable").classes("text-xl tabular-nums")
+                    ui.label("%").classes("text-sm text-[#4C566A]")
+                ui.label("cache used").classes("text-sm text-[#4C566A]")
+                self.kv_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
+                self.kv_progress.set_visibility(False)
         self.gpus_label = ui.label("GPU data unavailable")
         self.gpus_table = self._table("GPUs", {
             "index": "Index", "name": "Name", "utilization": "Utilization", "memory": "Memory (MiB)",
@@ -269,17 +287,16 @@ class _OksaPage:
             self.partial = True
         memory = status.get("host_memory") if isinstance(status.get("host_memory"), dict) else {}
         total = memory.get("total_mib")
-        self.memory.set_text("Host memory: " + self._metric(memory.get("used_mib")) + " / "
-                             + self._metric(total if self._number(total) and total > 0 else None) + " MiB; "
-                             + self._metric(memory.get("used_pct"), "%", 100))
+        self.memory.set_text(self._metric(memory.get("used_mib")) + " / "
+                             + self._metric(total if self._number(total) and total > 0 else None))
+        self.memory_percent.set_text("used / total · " + self._metric(memory.get("used_pct"), "%", 100))
         self._progress(self.memory_progress, memory.get("used_pct"))
-        self.model_status.set_text("Active model: " + self._text(status.get("active_model"))
-                                   + "; selected: " + self._text(status.get("selected_model")))
+        self.model_status.set_text("Active model: " + self._text(status.get("active_model")))
+        self.selected_model.set_text("Selected model: " + self._text(status.get("selected_model")))
         metrics = status.get("metrics") if isinstance(status.get("metrics"), dict) else {}
-        self.requests.set_text("Requests running / waiting: "
-                               + self._metric(metrics.get("running_requests"), integer=True) + " / "
+        self.requests.set_text(self._metric(metrics.get("running_requests"), integer=True) + " / "
                                + self._metric(metrics.get("waiting_requests"), integer=True))
-        self.kv_cache.set_text("KV cache: " + self._metric(metrics.get("kv_cache_usage_pct"), "%", 100))
+        self.kv_cache.set_text(self._metric(metrics.get("kv_cache_usage_pct"), maximum=100))
         self._progress(self.kv_progress, metrics.get("kv_cache_usage_pct"))
         gpus = status.get("gpus")
         self.gpus_table.rows = []
@@ -345,7 +362,7 @@ class _OksaPage:
         elapsed = age + max(0, time.monotonic() - self.status_received) if known else None
         stale = not known or self.status_failed or metadata.get("stale") or metadata.get("error") is not None or elapsed > maximum
         if known:
-            self.freshness.set_text(("Stale · " if stale else "") + f"Sampled {sampled} · {int(elapsed)}s old"
+            self.freshness.set_text(("Stale · " if stale else "") + f"{int(elapsed)}s old · Sampled {sampled}"
                                     + (" · Some readings unavailable" if self.partial else ""))
         else:
             self.freshness.set_text("Freshness unavailable" if self.status is not None else
