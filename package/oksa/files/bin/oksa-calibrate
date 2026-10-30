@@ -190,8 +190,11 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
                 if (value.get("context") != context or value.get("sequences") != sequences
                         or value.get("utilization") != utilization):
                     raise ValueError("Calibration probe returned mismatched parameters")
+                metrics = value.get("metrics") or {}
+                estimated = metrics.get("estimated_max_model_len")
+                if estimated is not None and (type(estimated) is not int or not 0 < estimated < 1e18):
+                    raise ValueError("Invalid probe estimated_max_model_len")
                 if value["status"] == "passed":
-                    metrics = value.get("metrics", {})
                     for key in ("tokens_per_second", "peak_gpu_memory_bytes", "minimum_host_available_bytes", "kv_cache_tokens"):
                         number = metrics.get(key)
                         if type(number) not in (int, float) or not 0 < number < 1e18:
@@ -221,25 +224,40 @@ def kv_cache_tokens(trial):
     return tokens if type(tokens) is int else 0
 
 
+def estimated_max_model_len(trial):
+    tokens = (trial.get("metrics") or {}).get("estimated_max_model_len")
+    return tokens if type(tokens) is int and tokens > 0 else 0
+
+
 def search_context(test, trials):
     passed, failed = 512, MAX_CONTEXT + 512
-    cache_tokens = kv_cache_tokens(trials[-1])
-    while True:
-        bound = min(MAX_CONTEXT, cache_tokens // 512 * 512) + 512
-        measured = passed < bound <= failed
-        if measured:
-            failed = bound
-        if failed - passed <= 512:
-            return passed
-        candidate = failed - 512 if measured else (passed + failed) // 1024 * 512
+    probe_bound = False
+    while failed - passed > 512:
+        if failed > MAX_CONTEXT:
+            candidate = MAX_CONTEXT
+        elif probe_bound:
+            candidate = failed - 512
+        else:
+            candidate = (passed + failed) // 1024 * 512
+        probe_bound = False
         outcome = test(candidate)
         if outcome == "passed":
             passed = candidate
-            cache_tokens = kv_cache_tokens(trials[-1])
         elif outcome in ("capacity", "timeout"):
             failed = candidate
+            estimated = estimated_max_model_len(trials[-1]) if outcome == "capacity" and candidate >= 8192 else 0
+            if estimated:
+                if estimated < 8192:
+                    if passed < 8192 < failed:
+                        failed = 8192
+                else:
+                    bound = min(MAX_CONTEXT, estimated // 512 * 512) + 512
+                    if passed < bound <= failed:
+                        failed = bound
+                        probe_bound = True
         else:
             raise ValueError(f"Invalid context trial outcome: {outcome}")
+    return passed
 
 
 def calibrate(manifest, node, identity, fingerprint):

@@ -26,6 +26,7 @@ MEMORY_ERRORS = re.compile(
     r"Free memory on device[^\n]*less than desired GPU memory utilization", re.IGNORECASE
 )
 KV_CACHE = re.compile(r"GPU KV cache size:\s*([\d,]+)\s+tokens")
+ESTIMATED_CONTEXT = re.compile(r"estimated maximum model length is\s*([\d,]+)", re.IGNORECASE)
 PREEMPTIONS = re.compile(r'^vllm:num_preemptions_total(\{[^\n]*\})?\s+(\S+)', re.MULTILINE)
 
 
@@ -173,6 +174,10 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
                     raise RuntimeError(log_errors[0])
                 text = log_text(log)
                 if child.returncode >= 0 and MEMORY_ERRORS.search(text):
+                    estimates = [value for raw in ESTIMATED_CONTEXT.findall(text)
+                                 if (value := int(raw.replace(",", ""))) > 0]
+                    if estimates:
+                        metrics["estimated_max_model_len"] = min(estimates)
                     raise CapacityError("candidate reported memory capacity exhaustion")
                 raise RuntimeError(f"candidate exited with code {child.returncode}")
         if check_deadline and time.monotonic() >= trial_deadline:
