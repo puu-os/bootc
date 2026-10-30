@@ -50,8 +50,8 @@ def memory_info():
     return values
 
 
-def kubectl(*args, payload=None):
-    command = ["/usr/bin/kubectl", "--kubeconfig=/var/lib/rancher/k3s/k3s.yaml", "--request-timeout=20s", *args]
+def kubectl(*args, payload=None, request_timeout=20):
+    command = ["/usr/bin/kubectl", "--kubeconfig=/var/lib/rancher/k3s/k3s.yaml", f"--request-timeout={request_timeout}s", *args]
     result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
                             capture_output=True, text=True, timeout=150)
     if result.returncode:
@@ -108,7 +108,8 @@ def apply_profile(manifest, result, node):
 
 
 def delete_probe():
-    kubectl("delete", "pod", POD, "-n", NAMESPACE, "--ignore-not-found", "--wait=true", "--timeout=120s", "-o", "name")
+    kubectl("delete", "pod", POD, "-n", NAMESPACE, "--ignore-not-found", "--wait=true", "--timeout=120s", "-o", "name",
+            request_timeout=130)
 
 
 def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds):
