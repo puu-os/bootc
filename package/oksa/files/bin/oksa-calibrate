@@ -16,6 +16,7 @@ import time
 
 from oksa_calibration_state import MODEL, RESULT_PATH, STATUS_PATH, ZERO_LIMITS, atomic_record, boot_id, read_record, valid_result
 from oksa_model_serving import STATE_DIR, read_first_line
+from oksa_model_removal import wait_for_stopped_pods
 SOURCE_PATH = Path("/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml")
 MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai-2-27b.yaml")
 PROBE_PATH = Path(__file__).with_name("oksa-calibration-probe")
@@ -375,7 +376,7 @@ def run(force=False):
     deployment["spec"]["replicas"] = 0
     ensure_namespace()
     apply_profile(manifest, dict(limits=ZERO_LIMITS), None)
-    kubectl("wait", "--for=delete", "pod", "-n", NAMESPACE, "-l", f"app.kubernetes.io/name={MODEL}", "--timeout=120s")
+    wait_for_stopped_pods(f"app.kubernetes.io/name={MODEL}", kubeconfig="/var/lib/rancher/k3s/k3s.yaml")
     delete_probe()
     node = kubectl("get", "node", identity["node"], "-o", "json")
     if identity["gpus"]:

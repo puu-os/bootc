@@ -13,6 +13,7 @@ import textwrap
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oksa_model_serving as ms
 from oksa_calibration_state import STATUS_PATH
+from oksa_model_removal import wait_for_stopped_pods
 from oksa_workload_evaluation import PlannedWorkload, WorkloadEvaluator
 
 
@@ -442,15 +443,31 @@ def stop_generic_workloads(keep_app: str = "") -> None:
     selector = f"{ms.label_namespace()}/model-name"
     if keep_app:
         selector += f",app.kubernetes.io/name!={keep_app}"
-    deployments = ms.run_kubectl(
-        "get", "deployment", "-n", ms.OKSA_NAMESPACE, "-l", selector, "-o", "name"
-    ).stdout.split()
-    if deployments:
-        ms.run_kubectl("scale", "-n", ms.OKSA_NAMESPACE, *deployments, "--replicas=0")
+    result = ms.run_kubectl(
+        "get", "deployment", "-n", ms.OKSA_NAMESPACE, "-l", selector,
+        "-o", "json", "--request-timeout=5s", timeout=10,
+    )
+    deployments = json.loads(result.stdout)
+    if not isinstance(deployments, dict) or not isinstance(deployments.get("items"), list):
+        raise ValueError("Invalid Kubernetes deployment response during shutdown")
+    names, pod_selectors = [], []
+    for deployment in deployments["items"]:
+        metadata = deployment["metadata"]
+        pod_selector = deployment["spec"]["selector"]
+        labels = pod_selector.get("matchLabels", {})
+        if (not isinstance(labels, dict) or not labels.get("app.kubernetes.io/name")
+                or not labels.get(f"{ms.label_namespace()}/model-name") or pod_selector.get("matchExpressions")
+                or any(not isinstance(value, str) for value in labels.values())):
+            raise ValueError("Cannot safely identify generated deployment pods for shutdown")
+        names.append(f"deployment/{metadata['name']}")
+        pod_selectors.append(selector + "," + ",".join(f"{key}={value}" for key, value in labels.items()))
+    if names:
         ms.run_kubectl(
-            "wait", "--for=delete", "pod", "-n", ms.OKSA_NAMESPACE,
-            "-l", selector, "--timeout=120s"
+            "scale", "-n", ms.OKSA_NAMESPACE, *names, "--replicas=0",
+            "--request-timeout=20s", timeout=30,
         )
+        for pod_selector in pod_selectors:
+            wait_for_stopped_pods(pod_selector)
 
 
 def reconcile(dry_run: bool, require_reconcile: bool = False) -> None:
@@ -526,12 +543,9 @@ def reconcile(dry_run: bool, require_reconcile: bool = False) -> None:
         if state.calibrated is not None and (disabled or selected_model):
             calibrated_manifest = state.calibrated.manifest_with_replicas(int(bonsai_active))
             ms.atomic_write_text(ms.CALIBRATED_MANIFEST_PATH, json.dumps(calibrated_manifest) + "\n")
-            ms.run_kubectl("apply", "-f", str(ms.CALIBRATED_MANIFEST_PATH))
+            ms.run_kubectl("apply", "-f", str(ms.CALIBRATED_MANIFEST_PATH), "--request-timeout=20s", timeout=30)
             if not bonsai_active:
-                ms.run_kubectl(
-                    "wait", "--for=delete", "pod", "-n", ms.OKSA_NAMESPACE,
-                    "-l", f"app.kubernetes.io/name={ms.CALIBRATION_MODEL}", "--timeout=120s"
-                )
+                wait_for_stopped_pods(f"app.kubernetes.io/name={ms.CALIBRATION_MODEL}")
 
     if manifest_changed:
         ms.atomic_write_text(manifest, manifest_content)
