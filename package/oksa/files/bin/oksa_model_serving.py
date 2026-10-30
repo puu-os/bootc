@@ -1585,6 +1585,7 @@ def sync_litellm_models(
             and dep.get("model_name") == expected["model_name"]
             and params.get("model") == expected["model"]
             and params.get("api_base") == expected["api_base"]
+            and params.get("allowed_openai_params") == ["reasoning_effort"]
         )
 
     kept = False
@@ -1612,6 +1613,7 @@ def sync_litellm_models(
                     "model": expected["model"],
                     "api_base": expected["api_base"],
                     "api_key": "none",
+                    "allowed_openai_params": ["reasoning_effort"],
                 },
                 "model_info": {"id": expected["id"]},
             },
