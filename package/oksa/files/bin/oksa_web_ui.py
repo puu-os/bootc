@@ -51,9 +51,47 @@ class _OksaPage:
         self.secret = ""
 
     def build(self) -> None:
-        ui.label("Oksa Administration")
-        self.warning_label = ui.label("")
-        with ui.tabs() as self.tabs:
+        ui.dark_mode(False)
+        ui.colors(
+            primary="#2B5B84", secondary="#2F6B6E", accent="#3E4C5E",
+            dark="#242933", dark_page="#E3E7EE", positive="#276749",
+            negative="#9E2A38", info="#2B5B84", warning="#8A4B08",
+        )
+        ui.add_css('''
+            :root { color-scheme: light; }
+            body, .q-tab-panels { background: #E3E7EE; color: #242933; }
+            .q-card, .q-table__card, .q-markup-table, .q-menu, .q-select__dialog, .q-expansion-item {
+                background: #ECEFF4; color: #242933;
+            }
+            .q-menu .q-item { color: #242933; }
+            .q-field__label,
+            .q-field__marginal,
+            .q-table__bottom,
+            .q-checkbox__inner:not(.q-checkbox__inner--truthy):not(.q-checkbox__inner--indet) {
+                color: #4C566A;
+            }
+            .q-field__native,
+            .q-field__input { color: #242933; }
+            .q-field__native::placeholder,
+            .q-field__input::placeholder { color: #4C566A; opacity: 1; }
+            /* Important Quasar utilities are layered, so overrides must be layered too. */
+            @layer overrides {
+                .q-btn--standard,
+                .q-notification,
+                .q-notification .q-btn,
+                .q-checkbox__inner--truthy .q-checkbox__svg,
+                .q-checkbox__inner--indet .q-checkbox__svg {
+                    color: #F4F6F9 !important;
+                }
+                :focus-visible:not(.q-field__native) {
+                    outline: 2px solid #2B5B84 !important; outline-offset: 3px;
+                }
+            }
+            .q-field:has(:focus-visible) { outline: 2px solid #2B5B84; outline-offset: 3px; }
+        ''')
+        ui.label("OKSA").classes("text-xl font-semibold")
+        self.warning_label = ui.label("").classes("text-warning")
+        with ui.tabs().classes("max-w-full") as self.tabs:
             for name in ("Monitoring", "Models", "Users", "Settings"):
                 ui.tab(name)
         with ui.tab_panels(self.tabs, value="Monitoring").classes("w-full"):
@@ -82,7 +120,7 @@ class _OksaPage:
             columns=[{"name": key, "field": key, "label": label, "sortable": True}
                      for key, label in fields.items()],
             rows=[], row_key=row_key, selection="single" if selection else None, pagination=10,
-        ).classes("w-full")
+        ).props("color=primary").classes("w-full")
 
     @staticmethod
     def _number(value, maximum: float = math.inf, *, integer: bool = False) -> bool:
@@ -151,12 +189,12 @@ class _OksaPage:
         for control in controls:
             control.enable()
 
-    async def _confirm(self, message: str) -> bool:
+    async def _confirm(self, message: str, action: str, *, dangerous: bool = False) -> bool:
         with ui.dialog() as dialog, ui.card():
-            ui.label(message)
+            ui.label(message).classes("whitespace-pre-line break-words max-h-[60vh] overflow-y-auto")
             with ui.row():
-                ui.button("Cancel", on_click=lambda: dialog.submit(False))
-                ui.button("Confirm", on_click=lambda: dialog.submit(True))
+                ui.button("Cancel", color="accent", on_click=lambda: dialog.submit(False)).props("outline")
+                ui.button(action, color="negative" if dangerous else "primary", on_click=lambda: dialog.submit(True))
         try:
             return await dialog is True and not self.client.is_deleted
         finally:
@@ -183,8 +221,8 @@ class _OksaPage:
             await self._load_pull()
 
     def _build_monitoring(self) -> None:
-        ui.button("Refresh monitoring", on_click=self._load_monitoring)
-        self.monitoring_error = ui.label("")
+        ui.button("Refresh monitoring", color="accent", on_click=self._load_monitoring).props("outline")
+        self.monitoring_error = ui.label("").classes("text-negative")
         self.api_status = ui.label("Admin API: waiting for first update")
         self.freshness = ui.label("Waiting for first readings")
         self.inference = ui.label("Inference: Unavailable")
@@ -326,24 +364,24 @@ class _OksaPage:
 
     def _build_models(self) -> None:
         with ui.row():
-            ui.button("Refresh models", on_click=self._load_models)
+            ui.button("Refresh models", color="accent", on_click=self._load_models).props("outline")
             self.start_button = ui.button("Start selected", on_click=lambda: self._model_action("start"))
-            self.stop_button = ui.button("Stop serving", on_click=lambda: self._model_action("stop"))
-            self.remove_button = ui.button("Remove selected", on_click=lambda: self._model_action("remove"))
+            self.stop_button = ui.button("Stop serving", color="negative", on_click=lambda: self._model_action("stop")).props("outline")
+            self.remove_button = ui.button("Remove selected", color="negative", on_click=lambda: self._model_action("remove")).props("outline")
             ui.button("Download model", on_click=self._open_download)
         self.model_controls = [self.start_button, self.stop_button, self.remove_button]
         self.models_summary = ui.label("Catalog not loaded")
-        self.models_error = ui.label("")
+        self.models_error = ui.label("").classes("text-negative")
         self.models_table = self._table("Installed models", {
             "name": "Name", "repo_id": "Repository", "storage": "Storage", "quantization": "Quantization", "state": "State",
         }, selection=True)
         self.models_table.on_select(self._model_selection)
         self.pull_summary = ui.label("Download activity not loaded")
-        self.pull_error = ui.label("")
+        self.pull_error = ui.label("").classes("text-negative")
         self.pull_progress = ui.linear_progress(show_value=False).props("indeterminate").classes("w-full")
         self.pull_progress.set_visibility(False)
         with ui.expansion("Download log").classes("w-full"):
-            self.pull_log = ui.textarea("Service-owned worker log").props("readonly").classes("w-full")
+            self.pull_log = ui.textarea("Download log").props("readonly").classes("w-full")
         self._model_selection()
 
     @staticmethod
@@ -421,7 +459,7 @@ class _OksaPage:
             message = {"start": f"Start {name}? This replaces the current serving selection.",
                        "stop": "Stop all model serving? Applications will lose inference access.",
                        "remove": f"Permanently remove {name}? If serving, it must be safely stopped before files are deleted."}[action]
-            if not await self._confirm(message):
+            if not await self._confirm(message, {"start": "Start model", "stop": "Stop serving", "remove": "Remove model"}[action], dangerous=action != "start"):
                 return
             self.generations["models"] += 1
             self.generations["status"] += 1
@@ -452,15 +490,15 @@ class _OksaPage:
 
     def _build_download_dialog(self) -> None:
         with ui.dialog() as self.download_dialog, ui.card().classes("w-full"):
-            ui.label("Download model")
+            ui.label("Download model").classes("text-lg font-semibold uppercase").props("role=heading aria-level=2")
             self.repo = ui.input("Hugging Face repository", on_change=self._invalidate_inspection).classes("w-full")
             self.download_name = ui.input("Storage ID (optional)", on_change=self._invalidate_inspection).classes("w-full")
             self.revision = ui.input("Revision", value="main", on_change=self._invalidate_inspection).classes("w-full")
-            self.inspection_text = ui.label("Inspect before downloading. Downloads are pinned to the inspected commit.")
-            self.download_error = ui.label("")
+            self.inspection_text = ui.label("Inspect before downloading.")
+            self.download_error = ui.label("").classes("text-negative")
             with ui.row():
-                self.download_cancel = ui.button("Close", on_click=self.download_dialog.close)
-                self.inspect_button = ui.button("Inspect", on_click=self._inspect)
+                self.download_cancel = ui.button("Close", color="accent", on_click=self.download_dialog.close).props("outline")
+                self.inspect_button = ui.button("Inspect", color="accent", on_click=self._inspect).props("outline")
                 self.download_button = ui.button("Download inspected revision", on_click=self._download)
         self.download_button.disable()
         self.download_dialog.on_value_change(lambda event: self._invalidate_inspection() if not event.value else None)
@@ -481,7 +519,7 @@ class _OksaPage:
         self.inspection = None
         if hasattr(self, "download_button") and not self.client.is_deleted:
             self.download_button.disable()
-            self.inspection_text.set_text("Inputs changed or dialog closed. Inspect before downloading.")
+            self.inspection_text.set_text("Inspect before downloading.")
 
     async def _inspect(self) -> None:
         if not self.download_dialog.value or "download" in self.busy or not self._begin("inspect", [self.inspect_button]):
@@ -531,7 +569,8 @@ class _OksaPage:
         self.download_dialog.props("persistent")
         try:
             if inspection["fits"] is False and not await self._confirm(
-                f"Force download of incompatible model {inspection['repo_id']} @ {inspection['revision']}? It may not run on this host."
+                f"Force download of incompatible model {inspection['repo_id']} @ {inspection['revision']}? It may not run on this host.",
+                "Force download", dangerous=True,
             ):
                 return
             if (not self.download_dialog.value or self.inspection is not inspection
@@ -547,7 +586,7 @@ class _OksaPage:
                 return
             if self._success(reply):
                 self.download_dialog.close()
-                ui.notify("Download started; the service worker continues if this page closes.")
+                ui.notify("Download started")
             else:
                 message = "Download start was not confirmed. Check Download Activity before any manual retry. " + self._error(reply)
                 self.download_error.set_text(message)
@@ -560,23 +599,22 @@ class _OksaPage:
                 self.download_button.set_enabled(self.inspection is not None)
 
     def _build_users(self) -> None:
-        ui.label("Manage API users and their keys. These are not Open WebUI chat accounts.")
-        self.users_error = ui.label("")
+        self.users_error = ui.label("").classes("text-negative")
         with ui.column().classes("w-full") as self.users_list:
             with ui.row():
-                ui.button("Refresh users", on_click=self._load_users)
+                ui.button("Refresh users", color="accent", on_click=self._load_users).props("outline")
                 ui.button("Create user", on_click=self._open_user)
-                ui.button("View selected user's keys", on_click=self._show_selected_user)
+                ui.button("View selected user's keys", color="accent", on_click=self._show_selected_user).props("outline")
             search = ui.input("Find user by ID or email")
             self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection=True, row_key="user_id")
             search.bind_value_to(self.users_table, "filter")
         with ui.column().classes("w-full") as self.user_detail:
             with ui.row():
-                ui.button("All users", on_click=self._show_users)
-                ui.button("Refresh keys", on_click=self._load_users)
-                self.delete_user_button = ui.button("Delete user", on_click=self._delete_user)
+                ui.button("All users", color="accent", on_click=self._show_users).props("outline")
+                ui.button("Refresh keys", color="accent", on_click=self._load_users).props("outline")
+                self.delete_user_button = ui.button("Delete user", color="negative", on_click=self._delete_user).props("outline")
                 self.create_key_button = ui.button("Create key", on_click=self._open_key)
-                self.revoke_button = ui.button("Revoke selected key", on_click=self._revoke_key)
+                self.revoke_button = ui.button("Revoke selected key", color="negative", on_click=self._revoke_key).props("outline")
             self.owner_label = ui.label("")
             self.keys_count = ui.label("Keys not loaded")
             self.keys_table = self._table("User API keys", {"name": "Name", "models": "Models", "status": "Status", "expires": "Expires"}, selection=True)
@@ -685,14 +723,14 @@ class _OksaPage:
 
     def _build_user_dialog(self) -> None:
         with ui.dialog() as self.user_dialog, ui.card():
-            ui.label("Create API user")
+            ui.label("Create user").classes("text-lg font-semibold uppercase").props("role=heading aria-level=2")
             self.new_user_id = ui.input("User ID")
             self.new_user_email = ui.input("Email (optional)", validation={
                 "Enter a valid email address": lambda value: not value or re.fullmatch(r"[^@\s]+@[^@\s]+", value) is not None,
             }).props("type=email")
-            self.new_user_error = ui.label("")
+            self.new_user_error = ui.label("").classes("text-negative")
             with ui.row():
-                self.user_cancel = ui.button("Cancel", on_click=self.user_dialog.close)
+                self.user_cancel = ui.button("Cancel", color="accent", on_click=self.user_dialog.close).props("outline")
                 self.user_submit = ui.button("Create user", on_click=self._create_user)
 
     def _open_user(self) -> None:
@@ -743,7 +781,7 @@ class _OksaPage:
         if owner is None or not self._begin("user", self.user_controls):
             return
         try:
-            if not await self._confirm(f"Permanently delete user {owner} and ALL their API keys? This cannot be undone."):
+            if not await self._confirm(f"Permanently delete user {owner} and ALL their API keys? This cannot be undone.", "Delete user", dangerous=True):
                 return
             self.generations["users"] += 1
             reply = await self._call("DELETE", "/api/users/" + quote(owner, safe=""))
@@ -774,7 +812,7 @@ class _OksaPage:
         self.key_form_generation = 0
         self.key_model_names: set[str] = set()
         with ui.dialog() as self.key_dialog, ui.card().classes("w-full"):
-            ui.label("Create API key")
+            ui.label("Create key").classes("text-lg font-semibold uppercase").props("role=heading aria-level=2")
             self.key_owner_label = ui.label("")
             self.key_alias = ui.input("Name").classes("w-full")
             self.key_access = ui.select({"all": "All models (including future models)", "selected": "Selected models only"}, value="all", label="Allowed models")
@@ -782,9 +820,9 @@ class _OksaPage:
             self.key_models.bind_visibility_from(self.key_access, "value", backward=lambda value: value == "selected")
             self.key_duration = ui.input("Expires in (optional, e.g. 30d, 24h)")
             self.key_model_error = ui.label("")
-            self.key_error = ui.label("")
+            self.key_error = ui.label("").classes("text-negative")
             with ui.row():
-                self.key_cancel = ui.button("Cancel", on_click=self.key_dialog.close)
+                self.key_cancel = ui.button("Cancel", color="accent", on_click=self.key_dialog.close).props("outline")
                 self.key_submit = ui.button("Create key", on_click=self._create_key)
         self.key_dialog.on_value_change(lambda event: self._close_key_form() if not event.value else None)
 
@@ -886,7 +924,7 @@ class _OksaPage:
         if not self._begin("user", self.user_controls):
             return
         try:
-            if not await self._confirm(f"Revoke {key.get('key_alias') or key.get('key_name') or 'Unnamed key'} for {owner}? Applications using it will lose access."):
+            if not await self._confirm(f"Revoke {key.get('key_alias') or key.get('key_name') or 'Unnamed key'} for {owner}? Applications using it will lose access.", "Revoke key", dangerous=True):
                 return
             self.generations["users"] += 1
             reply = await self._call("DELETE", "/api/keys/" + quote(key["token"], safe=""))
@@ -902,19 +940,19 @@ class _OksaPage:
 
     def _build_secret_dialog(self) -> None:
         with ui.dialog() as self.secret_dialog, ui.card().classes("w-full"):
-            ui.label("API key created — copy now; it will not be shown again.")
+            ui.label("Key created").classes("text-lg font-semibold uppercase").props("role=heading aria-level=2")
+            ui.label("Shown once.").classes("text-warning")
             self.secret_owner_label = ui.label("")
-            self.secret_input = ui.input("New secret").props("readonly autocomplete=off").classes("w-full")
-            ui.label("Use Copy, or select the text and use your browser's Copy command. Automatic clipboard access requires HTTPS or localhost.")
+            self.secret_input = ui.input("API key").props("readonly autocomplete=off").classes("w-full")
             with ui.row():
                 ui.button("Copy", on_click=self._copy_secret)
-                ui.button("Done", on_click=self.secret_dialog.close)
+                ui.button("Done", color="accent", on_click=self.secret_dialog.close).props("outline")
         self.secret_dialog.on_value_change(lambda event: self._clear_secret() if not event.value else None)
 
     def _copy_secret(self) -> None:
         if self.secret and self.secret_dialog.value:
             ui.clipboard.write(self.secret)
-            ui.notify("Copy requested. If unavailable, select the secret and copy it manually.")
+            ui.notify("Copy requested")
 
     def _clear_secret(self) -> None:
         self.secret = ""
@@ -932,15 +970,14 @@ class _OksaPage:
             self.secret_dialog.close()
 
     def _build_settings(self) -> None:
-        ui.label("Outbound HTTP contact")
-        ui.label("Published in outbound User-Agent headers, including Open WebUI Wikimedia image search.")
+        ui.label("Outbound HTTP contact").classes("text-lg font-semibold uppercase").props("role=heading aria-level=2")
         self.contact = ui.input("Contact", placeholder="https://helpdesk.example.org", on_change=self._settings_edited).classes("w-full")
         self.settings_effective = ui.label("Effective User-Agent: unavailable")
-        self.settings_error = ui.label("")
+        self.settings_error = ui.label("").classes("text-negative")
         with ui.row():
-            self.settings_refresh = ui.button("Refresh settings", on_click=self._load_settings)
+            self.settings_refresh = ui.button("Refresh settings", color="accent", on_click=self._load_settings).props("outline")
             self.settings_save = ui.button("Save", on_click=lambda: self._save_settings(False))
-            self.settings_clear = ui.button("Clear", on_click=lambda: self._save_settings(True))
+            self.settings_clear = ui.button("Clear", color="negative", on_click=lambda: self._save_settings(True)).props("outline")
         self.settings_controls = [self.contact, self.settings_refresh, self.settings_save, self.settings_clear]
 
     def _settings_edited(self) -> None:
