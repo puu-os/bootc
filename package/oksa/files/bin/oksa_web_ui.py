@@ -114,12 +114,12 @@ class _OksaPage:
         ui.timer(2.5, self._poll)
 
     @staticmethod
-    def _table(title: str, fields: dict[str, str], *, selection: bool = False, row_key: str = "id"):
+    def _table(title: str, fields: dict[str, str], *, selection: str | None = None, row_key: str = "id"):
         return ui.table(
             title=title,
             columns=[{"name": key, "field": key, "label": label, "sortable": True}
                      for key, label in fields.items()],
-            rows=[], row_key=row_key, selection="single" if selection else None, pagination=10,
+            rows=[], row_key=row_key, selection=selection, pagination=10,
         ).props("color=primary").classes("w-full")
 
     @staticmethod
@@ -188,6 +188,8 @@ class _OksaPage:
             return
         for control in controls:
             control.enable()
+        if name == "user":
+            self._users_selection()
 
     async def _confirm(self, message: str, action: str, *, dangerous: bool = False) -> bool:
         with ui.dialog() as dialog, ui.card():
@@ -391,7 +393,7 @@ class _OksaPage:
         self.models_error = ui.label("").classes("text-negative")
         self.models_table = self._table("Installed models", {
             "name": "Name", "repo_id": "Repository", "storage": "Storage", "quantization": "Quantization", "state": "State",
-        }, selection=True)
+        }, selection="single")
         self.models_table.on_select(self._model_selection)
         self.pull_summary = ui.label("Download activity not loaded")
         self.pull_error = ui.label("").classes("text-negative")
@@ -619,25 +621,37 @@ class _OksaPage:
         self.users_error = ui.label("").classes("text-negative")
         with ui.column().classes("w-full") as self.users_list:
             with ui.row():
-                ui.button("Refresh users", color="accent", on_click=self._load_users).props("outline")
-                ui.button("Create user", on_click=self._open_user)
-                ui.button("View selected user's keys", color="accent", on_click=self._show_selected_user).props("outline")
+                self.create_user_button = ui.button("Create user", on_click=self._open_user)
+                self.delete_users_button = ui.button("Delete selected users", color="negative", on_click=self._delete_selected_users).props("outline")
+            self.delete_users_button.disable()
             search = ui.input("Find user by ID or email")
-            self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection=True, row_key="user_id")
+            self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
+            self.users_table.on_select(self._users_selection)
+            self.users_table.add_slot("body-cell-user_id", '''
+                <q-td :props="props">
+                    <q-btn flat dense no-caps color="primary" class="underline" :label="props.value"
+                        @click.stop="$parent.$emit('open-user', props.row.user_id)" />
+                </q-td>
+            ''')
+            self.users_table.on("open-user", lambda event: self._show_user(event.args))
+            self.users_table.on("rowClick", lambda event: self._show_user(event.args), js_handler="(evt, row) => { if (!evt?.target?.closest?.('.q-table--col-auto-width, .q-checkbox')) emit(row.user_id); }")
             search.bind_value_to(self.users_table, "filter")
         with ui.column().classes("w-full") as self.user_detail:
             with ui.row():
                 ui.button("All users", color="accent", on_click=self._show_users).props("outline")
-                ui.button("Refresh keys", color="accent", on_click=self._load_users).props("outline")
                 self.delete_user_button = ui.button("Delete user", color="negative", on_click=self._delete_user).props("outline")
                 self.create_key_button = ui.button("Create key", on_click=self._open_key)
                 self.revoke_button = ui.button("Revoke selected key", color="negative", on_click=self._revoke_key).props("outline")
             self.owner_label = ui.label("")
             self.keys_count = ui.label("Keys not loaded")
-            self.keys_table = self._table("User API keys", {"name": "Name", "models": "Models", "status": "Status", "expires": "Expires"}, selection=True)
+            self.keys_table = self._table("User API keys", {"name": "Name", "models": "Models", "status": "Status", "expires": "Expires"}, selection="single")
         self.user_detail.set_visibility(False)
-        self.user_controls = [self.delete_user_button, self.create_key_button, self.revoke_button]
+        self.user_controls = [self.create_user_button, self.delete_users_button, self.delete_user_button, self.create_key_button, self.revoke_button]
 
+    def _users_selection(self) -> None:
+        count = len(self.users_table.selected)
+        self.delete_users_button.set_text(f"Delete selected users ({count})" if count else "Delete selected users")
+        self.delete_users_button.set_enabled(count > 0 and "user" not in self.busy)
     @staticmethod
     def _expiry(value) -> datetime | None:
         if not isinstance(value, str):
@@ -685,12 +699,13 @@ class _OksaPage:
             counts: dict[str, int] = {}
             if keys_ok:
                 for key in keys:
-                    if self._key_status(key) == "Enabled":
+                    if key.get("key_alias") != "open-webui" and self._key_status(key) == "Enabled":
                         counts[key.get("user_id")] = counts.get(key.get("user_id"), 0) + 1
             self.users_table.rows = [{"user_id": user["user_id"], "email": user.get("user_email") or "—",
                                       "enabled": str(counts.get(user["user_id"], 0)) if keys_ok and owner is None else "Unavailable"}
                                      for user in self.users]
             self.users_table.selected = []
+            self._users_selection()
             self.users_table.update()
             self.keys = {}
             self.keys_table.selected = []
@@ -708,36 +723,36 @@ class _OksaPage:
                         "models": ", ".join(str(model) for model in key["models"]) if isinstance(key.get("models"), list) and key["models"] else "All models (including future models)",
                         "status": self._key_status(key), "expires": str(key.get("expires")) if self._expiry(key.get("expires")) else "Unknown" if key.get("expires") else "Never",
                     } for identity, key in self.keys.items()]
-                self.keys_count.set_text(f"{len(self.keys)} keys" if keys_ok else "API keys unavailable; refresh before acting.")
+                self.keys_count.set_text(f"{len(self.keys)} keys" if keys_ok else "API keys unavailable; reopen this user before acting.")
                 if users_ok and user is None:
-                    self.users_error.set_text("Selected user is no longer in the confirmed user list. Return to All users and refresh.")
+                    self.users_error.set_text("This user is no longer in the confirmed user list. Return to All users.")
+            else:
+                self.owner_label.set_text("")
+                self.keys_count.set_text("Keys not loaded")
             self.keys_table.update()
 
-    async def _show_selected_user(self) -> None:
-        if not self.users_table.selected or "user" in self.busy:
-            return
-        owner = self.users_table.selected[0].get("user_id")
-        if not any(user["user_id"] == owner for user in self.users):
-            return
+    def _set_owner(self, owner: str | None) -> None:
         self.owner = owner
         self.keys = {}
         self.keys_table.rows = []
         self.keys_table.selected = []
         self.keys_table.update()
-        self.owner_label.set_text("User: " + owner)
-        self.keys_count.set_text("Loading API keys…")
-        self.users_list.set_visibility(False)
-        self.user_detail.set_visibility(True)
+        self.owner_label.set_text("User: " + owner if owner is not None else "")
+        self.keys_count.set_text("Loading API keys…" if owner is not None else "Keys not loaded")
+        self.users_list.set_visibility(owner is None)
+        self.user_detail.set_visibility(owner is not None)
+
+    async def _show_user(self, owner: str) -> None:
+        if not isinstance(owner, str) or "user" in self.busy or not any(user["user_id"] == owner for user in self.users):
+            return
+        self._set_owner(owner)
         await self._load_users()
 
     async def _show_users(self) -> None:
         if "user" in self.busy:
             return
-        self.owner = None
-        self.users_list.set_visibility(True)
-        self.user_detail.set_visibility(False)
+        self._set_owner(None)
         await self._load_users()
-
     def _build_user_dialog(self) -> None:
         with ui.dialog() as self.user_dialog, ui.card():
             ui.label("Create user").classes("text-lg font-semibold uppercase").props("role=heading aria-level=2")
@@ -780,11 +795,9 @@ class _OksaPage:
             if self._success(reply) and isinstance(reply[1].get("result"), dict) and reply[1]["result"].get("user_id") == owner:
                 self.user_dialog.close()
                 ui.notify("User created")
-                self.owner = owner
-                self.users_list.set_visibility(False)
-                self.user_detail.set_visibility(True)
+                self._set_owner(owner)
             else:
-                message = f"Creation of user {owner} was not confirmed. The user may exist; refresh before manually retrying. " + self._error(reply)
+                message = f"Creation of user {owner} was not confirmed. Check the user list before retrying. " + self._error(reply)
                 self.new_user_error.set_text(message)
                 self._warn("user-create:" + owner, message)
             await self._load_users()
@@ -794,32 +807,60 @@ class _OksaPage:
                 self.user_dialog.props(remove="persistent")
 
     async def _delete_user(self) -> None:
-        owner = self.owner
-        if owner is None or not self._begin("user", self.user_controls):
+        if self.owner is not None:
+            await self._delete_users([self.owner])
+
+    async def _delete_selected_users(self) -> None:
+        owners = [row.get("user_id") for row in self.users_table.selected]
+        if not owners or any(not isinstance(owner, str) or not any(user["user_id"] == owner for user in self.users) for owner in owners):
+            return
+        await self._delete_users(list(dict.fromkeys(owners)))
+
+    async def _delete_users(self, owners: list[str]) -> None:
+        if not self._begin("user", self.user_controls):
             return
         try:
-            if not await self._confirm(f"Permanently delete user {owner} and ALL their API keys? This cannot be undone.", "Delete user", dangerous=True):
+            message = (f"Permanently delete user {owners[0]} and ALL their API keys? This cannot be undone." if len(owners) == 1 else
+                       f"Permanently delete {len(owners)} users and ALL their API keys? This cannot be undone.\n\n" + "\n".join(owners))
+            if not await self._confirm(message, "Delete user" if len(owners) == 1 else f"Delete {len(owners)} users", dangerous=True):
+                return
+            if not self.client.has_socket_connection or not all(any(user["user_id"] == owner for user in self.users) for owner in owners):
+                return
+            if self.user_detail.visible and owners != [self.owner]:
                 return
             self.generations["users"] += 1
-            reply = await self._call("DELETE", "/api/users/" + quote(owner, safe=""))
-            if self.client.is_deleted:
-                return
-            data = reply[1]
-            if self._success(reply) and data.get("outcome") == "deleted" and data.get("deleted") is True:
-                ui.notify("User and their API keys deleted")
-                self.warnings.pop("user-delete:" + owner, None)
-                self.warning_label.set_text("\n".join(self.warnings.values()))
-                if self.owner == owner:
-                    self.owner = None
-                    self.user_detail.set_visibility(False)
-                    self.users_list.set_visibility(True)
-            elif data.get("outcome") in ("invalid", "protected", "not_started"):
-                self._warn("user-delete:" + owner, self._error(reply))
-            else:
-                revoked = data.get("confirmed_revoked_keys")
-                summary = f" {revoked} key(s) confirmed revoked." if type(revoked) is int and revoked >= 0 else ""
-                self._warn("user-delete:" + owner, str(data.get("warning") or
-                           f"Deletion of user {owner} was not confirmed; keys may have been revoked.{summary} Refresh before retrying. " + self._error(reply)))
+            deleted = 0
+            for index, owner in enumerate(owners):
+                if self.client.is_deleted:
+                    return
+                if not self.client.has_socket_connection:
+                    self._warn("user-delete:" + owner,
+                               f"Browser disconnected during user deletion. Batch stopped: {deleted} deletion(s) confirmed; {len(owners) - index} user(s) not attempted.")
+                    break
+                reply = await self._call("DELETE", "/api/users/" + quote(owner, safe=""))
+                if self.client.is_deleted:
+                    return
+                data = reply[1]
+                if self._success(reply) and data.get("outcome") == "deleted" and data.get("deleted") is True:
+                    deleted += 1
+                    self.warnings.pop("user-delete:" + owner, None)
+                    self.warning_label.set_text("\n".join(self.warnings.values()))
+                    if self.owner == owner:
+                        self._set_owner(None)
+                else:
+                    if data.get("outcome") in ("invalid", "protected", "not_started"):
+                        message = self._error(reply)
+                    else:
+                        revoked = data.get("confirmed_revoked_keys")
+                        summary = f" {revoked} key(s) confirmed revoked." if type(revoked) is int and revoked >= 0 else ""
+                        message = str(data.get("warning") or
+                                      f"Deletion of user {owner} was not confirmed; keys may have been revoked.{summary} Check the user list before retrying. " + self._error(reply))
+                    if len(owners) > 1:
+                        message = f"{owner}: {message} Batch stopped: {deleted} deletion(s) confirmed; {len(owners) - index - 1} user(s) not attempted."
+                    self._warn("user-delete:" + owner, message)
+                    break
+            if deleted:
+                ui.notify("User and their API keys deleted" if len(owners) == 1 else f"{deleted} users and their API keys deleted")
             await self._load_users()
         finally:
             self._end("user", self.user_controls)
@@ -923,7 +964,7 @@ class _OksaPage:
             else:
                 if isinstance(data, dict):
                     data.pop("key", None)
-                message = f"Key creation for {owner} was not confirmed. The key may exist; refresh keys before manually retrying."
+                message = f"Key creation for {owner} was not confirmed. Check the key list before retrying."
                 self.key_error.set_text(message)
                 self._warn("key-create:" + owner, message)
             await self._load_users()
@@ -950,7 +991,7 @@ class _OksaPage:
             if self._success(reply):
                 ui.notify("API key revocation confirmed")
             else:
-                self._warn("key-revoke:" + owner, f"Key revocation for {owner} was not confirmed; the key may still grant access. Refresh before manually retrying. " + self._error(reply))
+                self._warn("key-revoke:" + owner, f"Key revocation for {owner} was not confirmed; the key may still grant access. Check the key list before retrying. " + self._error(reply))
             await self._load_users()
         finally:
             self._end("user", self.user_controls)
