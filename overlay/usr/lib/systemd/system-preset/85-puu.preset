@@ -7,8 +7,8 @@ enable puu-model-serving-labeler.timer
 enable puu-vllm-planner.timer
 enable puu-vllm-preseed.service
 enable puu-bonsai-calibration.service
-enable nvidia-cdi-refresh.service
-enable nvidia-cdi-refresh.path
+enable puu-nvidia-cdi-refresh.service
+enable puu-nvidia-cdi-refresh.path
 enable iwd.service
 enable avahi-daemon.service
 disable containerd.service
