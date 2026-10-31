@@ -226,46 +226,46 @@ class _OksaPage:
             await self._load_pull()
 
     def _build_monitoring(self) -> None:
-        with ui.column().classes("w-full min-w-0 gap-1"):
-            self.model_status = ui.label("Active model: Unavailable").classes("text-2xl font-semibold w-full break-words")
-            self.inference = ui.label("Inference: Unavailable").classes("text-xl font-medium w-full break-words")
-            self.selected_model = ui.label("Selected model: Unavailable").classes("text-sm text-[#4C566A] w-full break-words")
         with ui.row().classes("w-full items-center justify-between gap-2"):
-            with ui.column().classes("min-w-0 gap-1"):
-                self.freshness = ui.label("Waiting for first readings").classes("tabular-nums")
-                self.api_status = ui.label("Admin API: waiting for first update").classes("text-sm text-[#4C566A]")
+            self.freshness = ui.label("Waiting for first readings").classes("text-sm text-[#4C566A] tabular-nums")
             ui.button("Refresh monitoring", color="accent", on_click=self._load_monitoring).props("outline")
         self.monitoring_error = ui.label("").classes("text-negative")
-        with ui.grid().classes("w-full grid-cols-1 md:grid-cols-3 gap-6"):
-            with ui.column().classes("min-w-0 gap-1"):
+        self.monitoring_error.set_visibility(False)
+        with ui.grid().classes("w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"):
+            with ui.card().props("flat").classes("w-full p-4 gap-1"):
+                ui.label("Serving").classes("text-sm text-[#4C566A]")
+                self.inference = ui.label("Unavailable").classes("text-xl font-semibold break-words")
+                self.model_status = ui.label("No active model").classes("text-sm text-[#4C566A] w-full break-words")
+            with ui.card().props("flat").classes("w-full p-4 gap-1"):
                 ui.label("Host memory").classes("text-sm text-[#4C566A]")
-                with ui.row().classes("w-full flex-nowrap items-baseline gap-1"):
-                    self.memory = ui.label("Unavailable / Unavailable").classes("text-xl tabular-nums min-w-0 break-words")
-                    ui.label("MiB").classes("text-sm text-[#4C566A]")
-                self.memory_percent = ui.label("used / total · Usage unavailable").classes("text-sm text-[#4C566A] tabular-nums")
+                self.memory = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums break-words")
+                self.memory_percent = ui.label("").classes("text-sm text-[#4C566A] tabular-nums")
+                self.memory_percent.set_visibility(False)
                 self.memory_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.memory_progress.set_visibility(False)
-            with ui.column().classes("min-w-0 gap-1"):
+            with ui.card().props("flat").classes("w-full p-4 gap-1"):
                 ui.label("Requests").classes("text-sm text-[#4C566A]")
-                self.requests = ui.label("Unavailable / Unavailable").classes("text-xl tabular-nums")
-                ui.label("running / waiting").classes("text-sm text-[#4C566A]")
-            with ui.column().classes("min-w-0 gap-1"):
+                self.requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
+                self.requests_caption = ui.label("").classes("text-sm text-[#4C566A]")
+                self.requests_caption.set_visibility(False)
+            with ui.card().props("flat").classes("w-full p-4 gap-1"):
                 ui.label("KV cache").classes("text-sm text-[#4C566A]")
-                with ui.row().classes("w-full flex-nowrap items-baseline gap-1"):
-                    self.kv_cache = ui.label("Unavailable").classes("text-xl tabular-nums")
-                    ui.label("%").classes("text-sm text-[#4C566A]")
-                ui.label("cache used").classes("text-sm text-[#4C566A]")
+                self.kv_cache = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
+                self.kv_caption = ui.label("").classes("text-sm text-[#4C566A]")
+                self.kv_caption.set_visibility(False)
                 self.kv_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.kv_progress.set_visibility(False)
-        self.gpus_label = ui.label("GPU data unavailable")
+        self.gpus_label = ui.label("GPU data unavailable").classes("text-sm text-[#4C566A]")
         self.gpus_table = self._table("GPUs", {
             "index": "Index", "name": "Name", "utilization": "Utilization", "memory": "Memory (MiB)",
             "temperature": "Temperature", "power": "Power",
         })
-        self.workloads_label = ui.label("Workload data unavailable")
+        self.gpus_table.set_visibility(False)
+        self.workloads_label = ui.label("Workload data unavailable").classes("text-sm text-[#4C566A]")
         self.workloads_table = self._table("Workloads", {
             "name": "Name", "phase": "Phase", "ready": "Ready", "restarts": "Restarts",
         })
+        self.workloads_table.set_visibility(False)
 
     async def _load_monitoring(self) -> None:
         requested = time.monotonic()
@@ -275,37 +275,90 @@ class _OksaPage:
         data = reply[1]
         if not self._success(reply) or ("status" in data and data["status"] is not None and not isinstance(data["status"], dict)):
             self.status_failed = True
-            self.api_status.set_text("Admin API: unavailable")
             self.monitoring_error.set_text("Monitoring update failed. " + self._error(reply))
+            self.monitoring_error.set_visibility(True)
             self._render_freshness()
             return
         self.status_failed = False
-        self.api_status.set_text("Admin API: reachable")
         self.status = data.get("status")
         self.snapshot = data.get("snapshot") if isinstance(data.get("snapshot"), dict) else {}
         self.status_received = requested
-        self.monitoring_error.set_text(str(self.snapshot.get("error") or ""))
+        error_text = str(self.snapshot.get("error") or "")
+        self.monitoring_error.set_text(error_text)
+        self.monitoring_error.set_visibility(bool(error_text))
         self.partial = False
         if self.status is None:
             self._render_freshness()
             return
         status = self.status
-        if (status.get("model_status") not in ("stopped", "no-model", "not-ready", "ready")
+        model_state = status.get("model_status")
+        if (model_state not in ("stopped", "no-model", "not-ready", "ready")
                 or status.get("gateway_status") not in ("ready", "authentication-required", "unreachable")):
             self.partial = True
         memory = status.get("host_memory") if isinstance(status.get("host_memory"), dict) else {}
-        total = memory.get("total_mib")
-        self.memory.set_text(self._metric(memory.get("used_mib")) + " / "
-                             + self._metric(total if self._number(total) and total > 0 else None))
-        self.memory_percent.set_text("used / total · " + self._metric(memory.get("used_pct"), "%", 100))
-        self._progress(self.memory_progress, memory.get("used_pct"))
-        self.model_status.set_text("Active model: " + self._text(status.get("active_model")))
-        self.selected_model.set_text("Selected model: " + self._text(status.get("selected_model")))
+        used, total, used_pct = memory.get("used_mib"), memory.get("total_mib"), memory.get("used_pct")
+        if self._number(used) and self._number(total) and total > 0:
+            self.memory.set_text(f"{self._storage(used)} / {self._storage(total)}")
+        else:
+            self.partial = True
+            self.memory.set_text("Unavailable")
+        if self._number(used_pct, 100):
+            self.memory_percent.set_text(f"{used_pct:g}% used")
+            self.memory_percent.set_visibility(True)
+        else:
+            self.partial = True
+            self.memory_percent.set_text("")
+            self.memory_percent.set_visibility(False)
+        self._progress(self.memory_progress, used_pct)
+
+        active_raw = status.get("active_model")
+        selected_raw = status.get("selected_model")
+        if not isinstance(active_raw, str) or not active_raw.strip():
+            self.partial = True
+            active_text = "Model unavailable"
+        elif active_raw == "-":
+            active_text = "No active model"
+        else:
+            active_text = active_raw
+        if isinstance(selected_raw, str) and selected_raw.strip() and selected_raw not in ("-", active_raw):
+            active_text += f" · Selected: {selected_raw}"
+        elif not isinstance(selected_raw, str) or not selected_raw.strip():
+            self.partial = True
+        self.model_status.set_text(active_text)
+
         metrics = status.get("metrics") if isinstance(status.get("metrics"), dict) else {}
-        self.requests.set_text(self._metric(metrics.get("running_requests"), integer=True) + " / "
-                               + self._metric(metrics.get("waiting_requests"), integer=True))
-        self.kv_cache.set_text(self._metric(metrics.get("kv_cache_usage_pct"), maximum=100))
-        self._progress(self.kv_progress, metrics.get("kv_cache_usage_pct"))
+        running, waiting = metrics.get("running_requests"), metrics.get("waiting_requests")
+        idle_caption = "starting" if model_state == "not-ready" else "no active runtime" if model_state in ("stopped", "no-model") else ""
+        if self._number(running, integer=True) and self._number(waiting, integer=True):
+            self.requests.set_text(f"{int(running)} / {int(waiting)}")
+            self.requests_caption.set_text("running / waiting")
+            self.requests_caption.set_visibility(True)
+        elif idle_caption:
+            self.requests.set_text("—")
+            self.requests_caption.set_text(idle_caption)
+            self.requests_caption.set_visibility(True)
+        else:
+            self.partial = True
+            self.requests.set_text("Unavailable")
+            self.requests_caption.set_text("")
+            self.requests_caption.set_visibility(False)
+
+        kv_pct = metrics.get("kv_cache_usage_pct")
+        if self._number(kv_pct, 100):
+            self.kv_cache.set_text(f"{kv_pct:g}%")
+            self.kv_caption.set_text("cache used")
+            self.kv_caption.set_visibility(True)
+        elif idle_caption:
+            self.kv_cache.set_text("—")
+            self.kv_caption.set_text(idle_caption)
+            self.kv_caption.set_visibility(True)
+        else:
+            self.partial = True
+            self.kv_cache.set_text("Unavailable")
+            self.kv_caption.set_text("")
+            self.kv_caption.set_visibility(False)
+        self._progress(self.kv_progress, kv_pct)
+
         gpus = status.get("gpus")
         self.gpus_table.rows = []
         self.gpus_label.set_text("No GPUs reported" if gpus == [] else "" if isinstance(gpus, list) else "GPU data unavailable")
@@ -325,7 +378,11 @@ class _OksaPage:
                 })
         else:
             self.partial = True
+        has_gpus = bool(self.gpus_table.rows)
+        self.gpus_table.set_visibility(has_gpus)
+        self.gpus_label.set_visibility(not has_gpus)
         self.gpus_table.update()
+
         workloads = status.get("workloads")
         self.workloads_table.rows = []
         self.workloads_label.set_text("No workloads reported" if workloads == [] else "" if isinstance(workloads, list) else "Workload data unavailable")
@@ -344,6 +401,9 @@ class _OksaPage:
                 })
         else:
             self.partial = True
+        has_workloads = bool(self.workloads_table.rows)
+        self.workloads_table.set_visibility(has_workloads)
+        self.workloads_label.set_visibility(not has_workloads)
         self.workloads_table.update()
         self._render_freshness()
 
@@ -371,22 +431,27 @@ class _OksaPage:
         elapsed = age + max(0, time.monotonic() - self.status_received) if known else None
         stale = not known or self.status_failed or metadata.get("stale") or error is not None or elapsed > maximum
         if known:
-            self.freshness.set_text(("Stale · " if stale else "") + f"{int(elapsed)}s old · Sampled {sampled}"
-                                    + (" · Some readings unavailable" if self.partial else ""))
+            parts = []
+            if stale:
+                parts.append("Stale")
+            parts.append(f"Updated {int(elapsed)}s ago")
+            if self.partial:
+                parts.append("Some readings unavailable")
+            self.freshness.set_text(" · ".join(parts))
         else:
-            self.freshness.set_text("Freshness unavailable" if self.status is not None else
-                                    "Update failed · No successful readings" if self.status_failed else
-                                    "Collection failed · No readings" if metadata.get("error") else "Waiting for first readings")
+            self.freshness.set_text("Update failed" if self.status_failed else
+                                    "Collection failed" if error else
+                                    "Freshness unavailable" if self.status is not None else "Waiting for first readings")
         inference = "Unavailable"
         if self.status is not None:
             if stale:
                 inference = "Unverified — stale readings" if known else "Unverified — freshness unavailable"
             else:
                 model, gateway = self.status.get("model_status"), self.status.get("gateway_status")
-                inference = {"stopped": "Stopped", "no-model": "No model loaded", "not-ready": "Model not ready"}.get(model, "Unavailable")
+                inference = {"stopped": "Stopped", "no-model": "No model loaded", "not-ready": "Starting…"}.get(model, "Unavailable")
                 if model == "ready":
-                    inference = {"ready": "Ready", "authentication-required": "Unverified — gateway authentication required"}.get(gateway, "Gateway unavailable")
-        self.inference.set_text("Inference: " + inference)
+                    inference = {"ready": "Ready", "authentication-required": "Gateway auth required"}.get(gateway, "Gateway unavailable")
+        self.inference.set_text(inference)
 
     def _build_models(self) -> None:
         with ui.row():
