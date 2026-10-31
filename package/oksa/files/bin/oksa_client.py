@@ -60,22 +60,67 @@ class OksaClient:
             raise OksaClientError(code, str(payload.get("error", error.message)), payload) from error
         if mutation:
             return {"ok": True, "job": reply.unpack()[0]}
+        return reply.unpack()[0]
+
+    def get_job(self, path: str) -> dict:
+        Contract.validate("GetJob", (path,))
         try:
-            return Contract.decode(reply.unpack()[0])
-        except OksaError as error:
-            raise OksaClientError(error.code, str(error)) from error
+            reply = self.connect().call_sync(Contract.BUS, path, Contract.JOB, "GetSnapshot",
+                                             None, GLib.VariantType.new("(a{sv})"),
+                                             Gio.DBusCallFlags.NONE, int(self.timeout * 1000), None)
+            return reply.unpack()[0]
+        except GLib.Error:
+            return self.call("GetJob", path)
+
+    def cancel_job(self, path: str) -> bool:
+        Contract.validate("GetJob", (path,))
+        try:
+            self.connect().call_sync(Contract.BUS, path, Contract.JOB, "Cancel",
+                                     None, None, Gio.DBusCallFlags.NONE, int(self.timeout * 1000), None)
+            return True
+        except GLib.Error as error:
+            remote = Gio.DBusError.get_remote_error(error)
+            code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
+            Gio.DBusError.strip_remote_error(error)
+            raise OksaClientError(code, error.message, {"ok": False, "code": code, "error": error.message}) from error
+
+    def get_managed_objects(self) -> dict:
+        try:
+            reply = self.connect().call_sync(Contract.BUS, Contract.PATH, "org.freedesktop.DBus.ObjectManager",
+                                             "GetManagedObjects", None, GLib.VariantType.new("(a{oa{sa{sv}}})"),
+                                             Gio.DBusCallFlags.NONE, int(self.timeout * 1000), None)
+            return reply.unpack()[0]
+        except GLib.Error as error:
+            remote = Gio.DBusError.get_remote_error(error)
+            code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
+            Gio.DBusError.strip_remote_error(error)
+            raise OksaClientError(code, error.message, {"ok": False, "code": code, "error": error.message}) from error
+
+    def get_properties(self, interface: str = Contract.BUS, path: str = Contract.PATH) -> dict:
+        try:
+            reply = self.connect().call_sync(Contract.BUS, path, "org.freedesktop.DBus.Properties",
+                                             "GetAll", GLib.Variant("(s)", (interface,)),
+                                             GLib.VariantType.new("(a{sv})"), Gio.DBusCallFlags.NONE,
+                                             int(self.timeout * 1000), None)
+            return reply.unpack()[0]
+        except GLib.Error as error:
+            remote = Gio.DBusError.get_remote_error(error)
+            code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
+            Gio.DBusError.strip_remote_error(error)
+            raise OksaClientError(code, error.message, {"ok": False, "code": code, "error": error.message}) from error
 
     def wait_job(self, path: str, timeout: float = 600) -> dict:
         deadline = time.monotonic() + timeout
         while True:
-            snapshot = self.call("GetJob", path)
+            snapshot = self.get_job(path)
             if snapshot["state"] == "succeeded":
                 return snapshot["result"]
-            if snapshot["state"] == "failed":
-                error = snapshot["error"] or {"code": "OperationFailed", "message": "Job failed"}
-                payload = snapshot["result"] if snapshot["result"] is not None else {
-                    "ok": False, "code": error["code"], "error": error["message"], "job": path}
-                raise OksaClientError(error["code"], error["message"], payload)
+            if snapshot["state"] in ("failed", "canceled"):
+                error = snapshot.get("error") or {"code": "OperationFailed", "message": "Job failed"}
+                payload = snapshot.get("result") if snapshot.get("result") is not None else {
+                    "ok": False, "code": error.get("code", "OperationFailed"),
+                    "error": error.get("message", "Job failed"), "job": path}
+                raise OksaClientError(error.get("code", "OperationFailed"), error.get("message", "Job failed"), payload)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise OksaClientError("Timeout", "Waiting timed out; the job is still running",
