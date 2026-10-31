@@ -31,11 +31,6 @@ KV_CACHE = re.compile(r"GPU KV cache size:\s*([\d,]+)\s+tokens")
 ESTIMATED_CONTEXT = re.compile(r"estimated maximum model length is\s*([\d,]+)", re.IGNORECASE)
 PREEMPTIONS = re.compile(r'^vllm:num_preemptions_total(\{[^\n]*\})?\s+(\S+)', re.MULTILINE)
 def query_accelerator_memory(torch_mod):
-    if hasattr(torch_mod, "accelerator") and hasattr(torch_mod.accelerator, "memory"):
-        try:
-            return torch_mod.accelerator.memory.get_memory_info()
-        except Exception:
-            pass
     if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
         return torch_mod.cuda.mem_get_info()
     if hasattr(torch_mod, "xpu") and torch_mod.xpu.is_available():
