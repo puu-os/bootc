@@ -372,7 +372,7 @@ def calibrate(manifest, node, identity, fingerprint, model_name=MODEL, status_fi
         mark_incomplete(error.reason)
         publish("running", f"{error}; applying the best verified profile. Maximum capacity was not established.", status_file=status_file)
     context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
-    batched_tokens = min(8192, max(2048, context * sequences))
+    batched_tokens = min(8192, context * sequences)
     result.update(reason="measured", completed_at=time.time(), metrics=best["metrics"], limits=dict(
         max_model_len=context, max_num_seqs=sequences, max_num_batched_tokens=batched_tokens,
         gpu_memory_utilization=utilization, memory_bytes=budget))
