@@ -273,7 +273,7 @@ class _OksaPage:
         if reply is None:
             return
         data = reply[1]
-        if not self._success(reply) or "status" not in data or (data["status"] is not None and not isinstance(data["status"], dict)):
+        if not self._success(reply) or ("status" in data and data["status"] is not None and not isinstance(data["status"], dict)):
             self.status_failed = True
             self.api_status.set_text("Admin API: unavailable")
             self.monitoring_error.set_text("Monitoring update failed. " + self._error(reply))
@@ -286,7 +286,10 @@ class _OksaPage:
         self.status_received = requested
         self.monitoring_error.set_text(str(self.snapshot.get("error") or ""))
         self.partial = False
-        status = self.status or {}
+        if self.status is None:
+            self._render_freshness()
+            return
+        status = self.status
         if (status.get("model_status") not in ("stopped", "no-model", "not-ready", "ready")
                 or status.get("gateway_status") not in ("ready", "authentication-required", "unreachable")):
             self.partial = True
@@ -360,12 +363,13 @@ class _OksaPage:
         except ValueError:
             parsed = None
         age, maximum = metadata.get("age_seconds"), metadata.get("max_age_seconds")
+        error = metadata.get("error")
         known = (self.status is not None and parsed is not None and parsed.tzinfo is not None
                  and self._number(age) and self._number(maximum) and maximum > 0
                  and type(metadata.get("stale")) is bool
-                 and "error" in metadata and (metadata["error"] is None or isinstance(metadata["error"], str)))
+                 and (error is None or isinstance(error, str)))
         elapsed = age + max(0, time.monotonic() - self.status_received) if known else None
-        stale = not known or self.status_failed or metadata.get("stale") or metadata.get("error") is not None or elapsed > maximum
+        stale = not known or self.status_failed or metadata.get("stale") or error is not None or elapsed > maximum
         if known:
             self.freshness.set_text(("Stale · " if stale else "") + f"{int(elapsed)}s old · Sampled {sampled}"
                                     + (" · Some readings unavailable" if self.partial else ""))
