@@ -60,15 +60,4 @@ define K3S_INSTALL_TARGET_CMDS
 	done
 endef
 
-define K3S_INSTALL_INIT_SYSTEMD
-	$(INSTALL) -D -m 0644 $(K3S_PKGDIR)/files/k3s.service \
-		$(TARGET_DIR)/usr/lib/systemd/system/k3s.service
-	$(INSTALL) -D -m 0644 $(K3S_PKGDIR)/files/k3s.conf \
-		$(TARGET_DIR)/usr/lib/tmpfiles.d/k3s.conf
-endef
-
 $(eval $(golang-package))
-
-# Reconfigure when support files change so they are reinstalled and the
-# file accounting from the configure/install steps stays consistent.
-$(K3S_TARGET_CONFIGURE): $(wildcard $(K3S_PKGDIR)/files/*) $(K3S_PKGDIR)/k3s.mk
