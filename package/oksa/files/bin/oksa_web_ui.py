@@ -649,7 +649,9 @@ class _OksaPage:
                 self.delete_users_button = ui.button("Delete selected users", color="negative", on_click=self._delete_selected_users).props("outline")
             self.delete_users_button.disable()
             search = ui.input("Find user by ID or email")
+            self.users_empty = ui.label("Loading users…")
             self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
+            self.users_table.set_visibility(False)
             self.users_table.on_select(self._users_selection)
             self.users_table.add_slot("body-cell-user_id", '''
                 <q-td :props="props">
@@ -716,7 +718,8 @@ class _OksaPage:
             if users_ok:
                 self.users = [{"user_id": user["user_id"], "user_email": user.get("user_email")} for user in users]
             else:
-                errors.append("Unable to refresh users; previous list may be stale. " + self._error(users_reply))
+                message = "Unable to refresh users; previous list may be stale. " if self.users else "Unable to load users. "
+                errors.append(message + self._error(users_reply))
             if not keys_ok:
                 errors.append("API keys unavailable. " + self._error(keys_reply))
             self.users_error.set_text(" ".join(errors))
@@ -728,6 +731,9 @@ class _OksaPage:
             self.users_table.rows = [{"user_id": user["user_id"], "email": user.get("user_email") or "—",
                                       "enabled": str(counts.get(user["user_id"], 0)) if keys_ok and owner is None else "Unavailable"}
                                      for user in self.users]
+            self.users_table.set_visibility(bool(self.users))
+            self.users_empty.set_text("No users yet." if users_ok else "Users unavailable.")
+            self.users_empty.set_visibility(not self.users)
             self.users_table.selected = []
             self._users_selection()
             self.users_table.update()
