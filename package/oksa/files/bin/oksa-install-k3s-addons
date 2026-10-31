@@ -38,6 +38,8 @@ POSTGRESQL_MANIFEST = "38-postgresql.yaml"
 API_ROUTE_MANIFEST = "22-puu-api.yaml"
 HOSTS_FILE = Path("/etc/hosts")
 AVAHI_API_UNIT = "puu-avahi-api-alias.service"
+AVAHI_OKSA_UNIT = "puu-avahi-oksa-alias.service"
+OKSA_ROUTE_MANIFEST = "46-oksa-route.yaml"
 
 MASTER_KEY_CREDENTIAL = "litellm-master-key"
 MASTER_KEY_STORE = Path("/etc/credstore.encrypted")
@@ -186,6 +188,7 @@ def ensure_api_route(manifest_dst: Path) -> None:
 
     host_fqdns = ms.discover_host_fqdns()
     api_hostnames = [f"api.{fqdn}" for fqdn in host_fqdns]
+    oksa_hostnames = [f"oksa.{fqdn}" for fqdn in host_fqdns]
     host_lines = "\n".join(f"    - {host}" for host in api_hostnames)
     ms.atomic_write_text(
         manifest_dst / API_ROUTE_MANIFEST,
@@ -211,7 +214,32 @@ spec:
         0o644,
     )
 
-    existing.append(f"{address} {' '.join(host_fqdns + api_hostnames)} # puu-api")
+    oksa_host_lines = "\n".join(f"    - {host}" for host in oksa_hostnames)
+    ms.atomic_write_text(
+        manifest_dst / OKSA_ROUTE_MANIFEST,
+        f"""apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: oksa
+  namespace: {OKSA_NAMESPACE}
+spec:
+  parentRefs:
+    - name: puu-gateway
+  hostnames:
+{oksa_host_lines}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: oksa
+          port: 8088
+""",
+        0o644,
+    )
+
+    existing.append(f"{address} {' '.join(host_fqdns + api_hostnames + oksa_hostnames)} # puu-api")
     ms.atomic_write_text(HOSTS_FILE, "\n".join(existing) + "\n", 0o644)
 
     avahi_api = f"api.{ms.avahi_host_fqdn()}"
@@ -228,6 +256,26 @@ spec:
             "-R",
             "-f",
             avahi_api,
+            address,
+        ],
+        capture_output=True,
+        check=False,
+    )
+
+    avahi_oksa = f"oksa.{ms.avahi_host_fqdn()}"
+    subprocess.run(["/usr/bin/systemctl", "stop", AVAHI_OKSA_UNIT], capture_output=True, check=False)
+    subprocess.run(
+        [
+            "/usr/bin/systemd-run",
+            f"--unit={AVAHI_OKSA_UNIT}",
+            "--collect",
+            "--property=Restart=on-failure",
+            "--property=After=avahi-daemon.service",
+            "/usr/bin/avahi-publish",
+            "-a",
+            "-R",
+            "-f",
+            avahi_oksa,
             address,
         ],
         capture_output=True,

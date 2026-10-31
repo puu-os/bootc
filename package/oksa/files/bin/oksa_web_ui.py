@@ -6,15 +6,14 @@ from datetime import datetime, timezone
 import math
 import re
 import time
-from urllib.parse import quote
 
 from nicegui import run, ui
 
-from oksa_web_service import OksaWebService
+from oksa_client import OksaClient, OksaClientError
 
 
 class OksaWebUI:
-    def __init__(self, service: OksaWebService) -> None:
+    def __init__(self, service: OksaClient) -> None:
         self.service = service
 
     def mount(self) -> None:
@@ -26,7 +25,7 @@ class OksaWebUI:
 
 
 class _OksaPage:
-    def __init__(self, service: OksaWebService) -> None:
+    def __init__(self, service: OksaClient) -> None:
         self.service = service
         self.client = ui.context.client
         self.locks = {name: asyncio.Lock() for name in ("status", "pull", "models", "users", "settings")}
@@ -148,23 +147,26 @@ class _OksaPage:
     def _error(reply: tuple[int, dict]) -> str:
         return str(reply[1].get("error") or f"Invalid service response (status {reply[0]})")
 
-    async def _call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    async def _call(self, method: str, *args, wait: bool = True) -> tuple[int, dict]:
         try:
-            result = await run.io_bound(self.service.request, method, path, body)
-        except Exception:
-            return 0, {"ok": False, "error": "Service request failed; its result could not be confirmed."}
-        if (not isinstance(result, tuple) or len(result) != 2 or type(result[0]) is not int
-                or not isinstance(result[1], dict)):
-            return 0, {"ok": False, "error": "Invalid service response; its result could not be confirmed."}
-        return result
+            result = await run.io_bound(self.service.call, method, *args)
+            if isinstance(result, dict) and "job" in result and wait:
+                result = await run.io_bound(self.service.wait_job, result["job"], timeout=600)
+        except OksaClientError as error:
+            return 0, {"ok": False, **error.payload, "error": str(error)}
+        except (OSError, ValueError, TimeoutError) as error:
+            return 0, {"ok": False, "error": f"Service result could not be confirmed: {error}"}
+        if not isinstance(result, dict):
+            return 0, {"ok": False, "error": "Service result could not be confirmed."}
+        return 200, result
 
-    async def _load(self, name: str, path: str) -> tuple[int, dict] | None:
+    async def _load(self, name: str, method: str) -> tuple[int, dict] | None:
         self.generations[name] += 1
         generation = self.generations[name]
         async with self.locks[name]:
             if generation != self.generations[name] or self.client.is_deleted:
                 return None
-            reply = await self._call("GET", path)
+            reply = await self._call(method)
             if generation != self.generations[name] or self.client.is_deleted:
                 return None
             return reply
@@ -266,7 +268,7 @@ class _OksaPage:
 
     async def _load_monitoring(self) -> None:
         requested = time.monotonic()
-        reply = await self._load("status", "/api/status")
+        reply = await self._load("status", "GetStatus")
         if reply is None:
             return
         data = reply[1]
@@ -423,7 +425,7 @@ class _OksaPage:
         self.remove_button.set_enabled(available and model is not None and model.get("removable") is not False)
 
     async def _load_models(self) -> None:
-        reply = await self._load("models", "/api/models")
+        reply = await self._load("models", "ListModels")
         if reply is None:
             return
         models = reply[1].get("models")
@@ -445,20 +447,25 @@ class _OksaPage:
         self._model_selection()
 
     async def _load_pull(self) -> None:
-        reply = await self._load("pull", "/api/models/pull/status")
+        reply = await self._load("pull", "ListJobs")
         if reply is None:
             return
-        pull = reply[1].get("pull")
-        if not self._success(reply) or not isinstance(pull, dict) or type(pull.get("running")) is not bool:
+        jobs = reply[1].get("jobs")
+        if (not self._success(reply) or not isinstance(jobs, list)
+                or not all(isinstance(job, dict) and self._number(job.get("started_at")) for job in jobs)):
             self.pull_error.set_text("Download activity unavailable; previous activity may be stale. " + self._error(reply))
             return
-        running = pull["running"]
-        self.pull_error.set_text(str(pull.get("error") or ""))
-        self.pull_summary.set_text(("Downloading " if running else "Download failed: " if pull.get("error") else
-                                    "Completed " if pull.get("complete") is True else "No download in progress: ") + str(pull.get("repo_id") or ""))
+        downloads = [job for job in jobs if job.get("operation") == "DownloadModel"]
+        job = max(downloads, key=lambda item: item["started_at"], default={})
+        state = job.get("state")
+        running = state in ("queued", "running")
+        error = str(job.get("error") or "")
+        self.pull_error.set_text(error)
+        label = "Downloading " if running else "Download failed: " if error else "Completed " if state == "succeeded" else "No download in progress: "
+        self.pull_summary.set_text(label + str(job.get("repo_id") or ""))
         self.pull_progress.set_visibility(running)
-        self.pull_log.set_value(str(pull.get("progress") or pull.get("error") or ""))
-        finished = pull.get("ended_at")
+        self.pull_log.set_value(str(job.get("progress") or error))
+        finished = job.get("ended_at")
         refresh = not running and (self.pull_running or (finished and finished != self.pull_finished))
         self.pull_running = running
         self.pull_finished = finished
@@ -484,7 +491,8 @@ class _OksaPage:
             self.generations["status"] += 1
             self.status_failed = True
             self._render_freshness()
-            reply = await self._call("DELETE", "/api/models/" + quote(model["id"], safe="")) if action == "remove" else await self._call("POST", "/api/models/" + action, {"name": model["id"]} if action == "start" else {})
+            method = {"start": "StartModel", "stop": "StopServing", "remove": "RemoveModel"}[action]
+            reply = await self._call(method, *(() if action == "stop" else (model["id"],)))
             if self.client.is_deleted:
                 return
             data = reply[1]
@@ -551,7 +559,7 @@ class _OksaPage:
             if not inputs[0]:
                 self.download_error.set_text("Repository ID is required.")
                 return
-            reply = await self._call("POST", "/api/models/inspect", {"repo_id": inputs[0], "revision": inputs[2]})
+            reply = await self._call("InspectModel", inputs[0], inputs[2])
             if (self.client.is_deleted or not self.download_dialog.value or generation != self.inspection_generation
                     or inputs != self._download_inputs()):
                 return
@@ -597,10 +605,8 @@ class _OksaPage:
                     or inspection["inputs"] != self._download_inputs()):
                 return
             self.inspection = None
-            reply = await self._call("POST", "/api/models/pull", {
-                "repo_id": inspection["repo_id"], "name": inspection["name"], "revision": inspection["revision"],
-                "force": inspection["fits"] is False,
-            })
+            reply = await self._call("DownloadModel", inspection["repo_id"], inspection["name"] or "",
+                                     inspection["revision"], inspection["fits"] is False, wait=False)
             if self.client.is_deleted:
                 return
             if self._success(reply):
@@ -680,8 +686,8 @@ class _OksaPage:
             if generation != self.generations["users"] or self.client.is_deleted:
                 return
             users_reply, keys_reply = await asyncio.gather(
-                self._call("GET", "/api/users"),
-                self._call("GET", "/api/keys" + ("?user_id=" + quote(owner, safe="") if owner is not None else "")),
+                self._call("ListUsers"),
+                self._call("ListKeys", owner or ""),
             )
             if generation != self.generations["users"] or owner != self.owner or self.client.is_deleted:
                 return
@@ -789,7 +795,7 @@ class _OksaPage:
         self.user_dialog.props("persistent")
         self.generations["users"] += 1
         try:
-            reply = await self._call("POST", "/api/users", {"user_id": owner, "email": email or None})
+            reply = await self._call("CreateUser", owner, email or "", -1.0)
             if self.client.is_deleted:
                 return
             if self._success(reply) and isinstance(reply[1].get("result"), dict) and reply[1]["result"].get("user_id") == owner:
@@ -837,7 +843,7 @@ class _OksaPage:
                     self._warn("user-delete:" + owner,
                                f"Browser disconnected during user deletion. Batch stopped: {deleted} deletion(s) confirmed; {len(owners) - index} user(s) not attempted.")
                     break
-                reply = await self._call("DELETE", "/api/users/" + quote(owner, safe=""))
+                reply = await self._call("DeleteUser", owner)
                 if self.client.is_deleted:
                     return
                 data = reply[1]
@@ -907,7 +913,7 @@ class _OksaPage:
         async with self.locks["models"]:
             if self.client.is_deleted or generation != self.key_form_generation or not self.key_dialog.value:
                 return
-            reply = await self._call("GET", "/api/models")
+            reply = await self._call("ListModels")
         if self.client.is_deleted or generation != self.key_form_generation or not self.key_dialog.value:
             return
         models = reply[1].get("models")
@@ -939,10 +945,8 @@ class _OksaPage:
         self.generations["users"] += 1
         generation = self.key_form_generation
         try:
-            reply = await self._call("POST", "/api/keys", {
-                "user_id": owner, "alias": alias, "models": models,
-                "duration": str(self.key_duration.value or "").strip() or None,
-            })
+            reply = await self._call("CreateKey", owner, alias, models, -1.0,
+                                     str(self.key_duration.value or "").strip())
             data = reply[1].get("key")
             if self.client.is_deleted:
                 if isinstance(data, dict):
@@ -985,7 +989,7 @@ class _OksaPage:
             if not await self._confirm(f"Revoke {key.get('key_alias') or key.get('key_name') or 'Unnamed key'} for {owner}? Applications using it will lose access.", "Revoke key", dangerous=True):
                 return
             self.generations["users"] += 1
-            reply = await self._call("DELETE", "/api/keys/" + quote(key["token"], safe=""))
+            reply = await self._call("RevokeKey", key["token"])
             if self.client.is_deleted:
                 return
             if self._success(reply):
@@ -1045,7 +1049,7 @@ class _OksaPage:
         if "settings" in self.busy:
             return
         generation = self.settings_generation
-        reply = await self._load("settings", "/api/settings")
+        reply = await self._load("settings", "GetSettings")
         if reply is None:
             return
         data = reply[1]
@@ -1065,7 +1069,7 @@ class _OksaPage:
             return
         self.generations["settings"] += 1
         try:
-            reply = await self._call("POST", "/api/settings", {"http_user_agent_contact": contact})
+            reply = await self._call("SetContact", contact)
             if self.client.is_deleted:
                 return
             data = reply[1]

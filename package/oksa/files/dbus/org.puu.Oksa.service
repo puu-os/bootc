@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.puu.Oksa
+Exec=/usr/libexec/puu/oksa-daemon
+User=root
+SystemdService=puu-oksa.service

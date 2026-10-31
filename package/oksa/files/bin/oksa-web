@@ -2,104 +2,35 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
-import argparse
-import json
-from pathlib import Path
+import os
 import sys
-import urllib.parse
+from pathlib import Path
 
-from fastapi import Request
-from fastapi.responses import JSONResponse, Response
-from nicegui import app, run, ui
+for extra_path in ("/usr/libexec/puu", "/usr/local/usr/libexec/puu"):
+    if Path(extra_path).is_dir() and extra_path not in sys.path:
+        sys.path.insert(0, extra_path)
 
-libexec_dir = Path("/usr/libexec/puu")
-for directory in (libexec_dir, Path(__file__).resolve().parent):
-    if directory.is_dir() and str(directory) not in sys.path:
-        sys.path.insert(0, str(directory))
+from nicegui import app, ui
 
-from oksa_web_service import OksaWebService
+from oksa_client import OksaClient
 from oksa_web_ui import OksaWebUI
 
 
-class OksaApi:
-    def __init__(self, service: OksaWebService) -> None:
-        self.service = service
-
+class OksaWebApplication:
     @staticmethod
-    def response(status: int, payload: dict) -> JSONResponse:
-        return JSONResponse(payload, status_code=status, headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-        })
+    def run() -> None:
+        host = os.environ.get("OKSA_WEB_HOST", "0.0.0.0")
+        port = int(os.environ.get("OKSA_WEB_PORT", "8088"))
+        client = OksaClient()
+        app.on_shutdown(client.close)
 
-    @staticmethod
-    def _origin(url: str, *, allow_slash: bool = False) -> tuple[str, str, int] | None:
-        try:
-            parsed = urllib.parse.urlsplit(url)
-            port = parsed.port
-        except ValueError:
-            return None
-        scheme = parsed.scheme.lower()
-        allowed_paths = {"", "/"} if allow_slash else {""}
-        if (scheme not in {"http", "https"} or not parsed.hostname
-                or parsed.username is not None or parsed.password is not None
-                or parsed.path not in allowed_paths or parsed.query or parsed.fragment):
-            return None
-        return scheme, parsed.hostname.lower(), port or (443 if scheme == "https" else 80)
+        @app.get("/health")
+        def health() -> dict[str, str]:
+            return {"status": "ok"}
 
-    async def handle(self, request: Request) -> Response:
-        if request.method == "OPTIONS":
-            return Response(status_code=204)
-        if request.method in {"POST", "DELETE"}:
-            origin = request.headers.get("origin")
-            if origin is not None:
-                parsed_origin = self._origin(origin)
-                target_origin = self._origin(
-                    f"{request.url.scheme}://{request.headers.get('host', '')}",
-                    allow_slash=True,
-                )
-                if parsed_origin is None or target_origin is None or parsed_origin != target_origin:
-                    return self.response(403, {"ok": False, "error": "Cross-origin mutations are not allowed"})
-        body = None
-        if request.method == "POST":
-            raw = bytearray()
-            async for chunk in request.stream():
-                if len(raw) + len(chunk) > 1024 * 1024:
-                    return self.response(400, {"ok": False, "error": "Invalid JSON body"})
-                raw.extend(chunk)
-            try:
-                body = json.loads(raw) if raw else {}
-            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-                return self.response(400, {"ok": False, "error": "Invalid JSON body"})
-            if not isinstance(body, dict):
-                return self.response(400, {"ok": False, "error": "Invalid JSON body"})
-        raw_path = request.scope.get("raw_path")
-        try:
-            path = raw_path.decode("ascii") if raw_path is not None else urllib.parse.quote(request.url.path, safe="/")
-            query = request.scope.get("query_string", b"").decode("ascii")
-        except UnicodeDecodeError:
-            return self.response(400, {"ok": False, "error": "Invalid request URL"})
-        if query:
-            path += "?" + query
-        result = await run.io_bound(self.service.request, request.method, path, body)
-        if result is None:
-            return self.response(503, {"ok": False, "error": "Service is shutting down"})
-        status, payload = result
-        return self.response(status, payload)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="OKSA administration")
-    parser.add_argument("--host", default="0.0.0.0", help="Listen host address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8088, help="Listen port (default: 8088)")
-    args = parser.parse_args()
-    service = OksaWebService()
-    api = OksaApi(service)
-    app.add_api_route("/api/{path:path}", api.handle, methods=["GET", "POST", "DELETE", "OPTIONS"], include_in_schema=False)
-    app.on_startup(service.start)
-    app.on_shutdown(service.close)
-    OksaWebUI(service).mount()
-    ui.run(host=args.host, port=args.port, title="OKSA", show=False, reload=False)
+        OksaWebUI(client).mount()
+        ui.run(host=host, port=port, title="OKSA", show=False, reload=False)
 
 
 if __name__ == "__main__":
-    main()
+    OksaWebApplication.run()

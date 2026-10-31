@@ -8,20 +8,20 @@ version = "1.0"
 requires-python = ">=3.10"
 description = "Puu model-serving administration and service bootstrap"
 license = { file = "LICENSE" }
-dependencies = ["nicegui==3.18.0"]
+dependencies = ["nicegui==3.18.0", "PyGObject"]
 
 [tool.hatch.build]
 dev-mode-dirs = ["bin"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/bin", "/manifests", "/systemd", "/vllm", "/oksa.conf", "/LICENSE", "/pyproject.toml"]
+include = ["/bin", "/dbus", "/manifests", "/systemd", "/vllm", "/oksa.conf", "/LICENSE", "/pyproject.toml"]
 exclude = ["__pycache__"]
 
 [tool.hatch.build.targets.wheel]
 bypass-selection = true
 
 [tool.hatch.build.targets.wheel.shared-data]
-"bin/oksa" = "usr/bin/oksa"
+"bin/oksa-daemon" = "usr/libexec/puu/oksa-daemon"
 "bin/oksa-install-k3s-addons" = "usr/libexec/puu/oksa-install-k3s-addons"
 "bin/oksa-discover-vllm-models" = "usr/libexec/puu/oksa-discover-vllm-models"
 "bin/oksa-label-model-serving-node" = "usr/libexec/puu/oksa-label-model-serving-node"
@@ -38,12 +38,15 @@ bypass-selection = true
 "bin/oksa_user_deletion.py" = "usr/libexec/puu/oksa_user_deletion.py"
 "bin/oksa_calibration_state.py" = "usr/libexec/puu/oksa_calibration_state.py"
 "bin/oksa_settings.py" = "usr/libexec/puu/oksa_settings.py"
-"bin/oksa_web_service.py" = "usr/libexec/puu/oksa_web_service.py"
+"bin/oksa_control.py" = "usr/libexec/puu/oksa_control.py"
+"bin/oksa_dbus.py" = "usr/libexec/puu/oksa_dbus.py"
+"bin/oksa_client.py" = "usr/libexec/puu/oksa_client.py"
 "bin/oksa_web_ui.py" = "usr/libexec/puu/oksa_web_ui.py"
+"bin/oksa_accelerator.py" = "usr/libexec/puu/oksa_accelerator.py"
 
 [tool.hatch.envs.default]
 installer = "uv"
 
 [tool.hatch.envs.default.scripts]
 web = "python bin/oksa-web {args}"
-cli = "python bin/oksa {args}"
+daemon = "python bin/oksa-daemon {args}"
