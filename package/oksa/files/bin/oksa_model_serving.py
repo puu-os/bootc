@@ -1632,6 +1632,7 @@ def collect_vllm_metrics(active_model: str) -> tuple[str, dict]:
         "vllm:num_requests_running": "running_requests",
         "vllm:num_requests_waiting": "waiting_requests",
         "vllm:kv_cache_usage_perc": "kv_cache_usage_pct",
+        "vllm:gpu_cache_usage_perc": "kv_cache_usage_pct",
         "vllm:gpu_cache_usage_factor": "kv_cache_usage_pct",
         "vllm:num_requests_swapped": "swapped_requests",
     }
@@ -1690,6 +1691,12 @@ def collect_serving_status() -> dict:
     ):
         active_model = CALIBRATION_MODEL
     model_status, metrics = collect_vllm_metrics(active_model)
+    if model_status == "unavailable" and active_model != "-" and workloads is not None:
+        prefix = (CALIBRATION_MODEL if is_calibration_model(active_model) else f"puu-vllm-{model_id(active_model)}") + "-"
+        if any(isinstance(w.get("name"), str) and w["name"].startswith(prefix)
+               and w.get("phase") in ("Pending", "Running") and w.get("ready") is False and (w.get("restarts") or 0) == 0
+               for w in workloads):
+            model_status = "not-ready"
     if model_status == "no-model" and (workloads is None or selected_model != "-"):
         model_status = "unavailable"
     if not serving_enabled and model_status != "ready":
