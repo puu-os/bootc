@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import math
 import os
 from pathlib import Path
 import re
@@ -49,17 +50,17 @@ class AcceleratorDevice:
 
 @dataclasses.dataclass
 class AcceleratorTelemetry:
-    index: int
-    name: str
+    index: int | None
+    name: str | None
     vendor: str
-    memory_used_mib: int = 0
-    memory_total_mib: int = 0
-    gpu_util_pct: int = 0
-    temperature_c: int = 0
-    power_w: int = 0
+    memory_used_mib: int | float | None = None
+    memory_total_mib: int | float | None = None
+    gpu_util_pct: int | float | None = None
+    temperature_c: int | float | None = None
+    power_w: int | float | None = None
 
     def as_dict(self) -> dict:
-        return dataclasses.asdict(self)
+        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
 
 
 class AcceleratorDiscovery:
@@ -329,15 +330,16 @@ class NvidiaBackend:
             if len(parts) < 7:
                 continue
 
+            raw_name = ", ".join(parts[1:-5]).strip()
             parsed_telemetry = AcceleratorTelemetry(
-                index=parse_int_safe(parts[0], 0),
-                name=parts[1],
+                index=parse_int_optional(parts[0]),
+                name=None if not raw_name or raw_name in ("N/A", "[N/A]") else raw_name,
                 vendor=AcceleratorVendor.NVIDIA.value,
-                gpu_util_pct=parse_int_safe(parts[2], 0),
-                memory_used_mib=parse_int_safe(parts[3], 0),
-                memory_total_mib=parse_int_safe(parts[4], 0),
-                temperature_c=parse_int_safe(parts[5], 0),
-                power_w=parse_int_safe(parts[6], 0),
+                gpu_util_pct=parse_number_optional(parts[-5]),
+                memory_used_mib=parse_number_optional(parts[-4]),
+                memory_total_mib=parse_number_optional(parts[-3]),
+                temperature_c=parse_number_optional(parts[-2]),
+                power_w=parse_number_optional(parts[-1]),
             )
             items.append(parsed_telemetry.as_dict())
 
@@ -381,6 +383,48 @@ class NvidiaBackend:
             return []
 
 
+class AmdSysfsBackend:
+    @classmethod
+    def collect_telemetry(cls, devices: list[AcceleratorDevice]) -> list[dict] | None:
+        items: list[dict] = []
+        for idx, dev in enumerate(devices):
+            pci_dir = AcceleratorDiscovery.PCI_BUS_PATH / dev.pci_id
+            if not pci_dir.is_dir():
+                continue
+            used = AcceleratorDiscovery._read_sysfs_int(pci_dir / "mem_info_vram_used")
+            total = dev.memory_total_bytes or AcceleratorDiscovery._read_sysfs_int(pci_dir / "mem_info_vram_total")
+            util_raw = None
+            try:
+                util_raw = int((pci_dir / "gpu_busy_percent").read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                pass
+            temp_c = None
+            power_w = None
+            for hwmon in sorted((pci_dir / "hwmon").glob("hwmon*")) if (pci_dir / "hwmon").is_dir() else ():
+                if temp_c is None:
+                    milli_c = AcceleratorDiscovery._read_sysfs_int(hwmon / "temp1_input")
+                    if milli_c > 0:
+                        temp_c = round(milli_c / 1000.0, 1)
+                if power_w is None:
+                    for pfile in ("power1_average", "power1_input"):
+                        microwatt = AcceleratorDiscovery._read_sysfs_int(hwmon / pfile)
+                        if microwatt > 0:
+                            power_w = round(microwatt / 1_000_000.0, 1)
+                            break
+            telemetry = AcceleratorTelemetry(
+                index=idx,
+                name=dev.name or dev.driver or AcceleratorVendor.AMD.value,
+                vendor=AcceleratorVendor.AMD.value,
+                memory_used_mib=used // (1024 * 1024) if total > 0 else None,
+                memory_total_mib=total // (1024 * 1024) if total > 0 else None,
+                gpu_util_pct=util_raw,
+                temperature_c=temp_c,
+                power_w=power_w,
+            )
+            items.append(telemetry.as_dict())
+        return items if items else None
+
+
 class AcceleratorManager:
     @classmethod
     def collect_telemetry(cls) -> list[dict] | None:
@@ -388,6 +432,8 @@ class AcceleratorManager:
         vendor = AcceleratorDiscovery.primary_vendor(devices)
         if vendor == AcceleratorVendor.NVIDIA:
             return NvidiaBackend.collect_telemetry()
+        if vendor == AcceleratorVendor.AMD:
+            return AmdSysfsBackend.collect_telemetry(AcceleratorDiscovery.primary_devices(devices))
         return None
 
     @classmethod
@@ -417,6 +463,23 @@ class AcceleratorManager:
 
 def os_access_executable(path: Path) -> bool:
     return os.access(path, os.X_OK)
+
+
+def parse_int_optional(val: str) -> int | None:
+    try:
+        return int(val.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_number_optional(val: str) -> int | float | None:
+    try:
+        parsed = float(val.strip())
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return int(parsed) if parsed.is_integer() else round(parsed, 1)
 
 
 def parse_int_safe(val: str, default: int) -> int:
