@@ -77,21 +77,31 @@ def kubectl(*args, payload=None, request_timeout=20):
 
 
 def set_limits(command, limits):
-    command = [arg for arg in command if arg.split("=", 1)[0] not in (
-        "--enable-prefix-caching", "--no-enable-prefix-caching",
-        "--enable-chunked-prefill", "--no-enable-chunked-prefill",
-        "--kv-cache-dtype")]
-    for flag, key in (("--max-model-len", "max_model_len"), ("--max-num-seqs", "max_num_seqs"),
-                      ("--max-num-batched-tokens", "max_num_batched_tokens"),
-                      ("--gpu-memory-utilization", "gpu_memory_utilization")):
-        if flag in command:
-            command[command.index(flag) + 1] = str(limits[key])
-        else:
-            command.extend([flag, str(limits[key])])
-    opts = ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
+    replacements = {
+        "--max-model-len": str(limits["max_model_len"]),
+        "--max-num-seqs": str(limits["max_num_seqs"]),
+        "--max-num-batched-tokens": str(limits["max_num_batched_tokens"]),
+        "--gpu-memory-utilization": str(limits["gpu_memory_utilization"]),
+    }
     if limits.get("kv_cache_dtype"):
-        opts.extend(["--kv-cache-dtype", limits["kv_cache_dtype"]])
-    return command + opts
+        replacements["--kv-cache-dtype"] = str(limits["kv_cache_dtype"])
+    result = []
+    index = 0
+    while index < len(command):
+        arg = command[index]
+        option = arg.split("=", 1)[0]
+        if option in replacements or option in (
+                "--enable-prefix-caching", "--no-enable-prefix-caching",
+                "--enable-chunked-prefill", "--no-enable-chunked-prefill"):
+            if option in replacements and "=" not in arg:
+                if index + 1 < len(command) and not command[index + 1].startswith("--"):
+                    index += 1
+        else:
+            result.append(arg)
+        index += 1
+    for option, value in replacements.items():
+        result.extend((option, value))
+    return result + ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
 
 
 def deployment_of(manifest, model_name=None):
