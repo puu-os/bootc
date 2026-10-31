@@ -315,7 +315,7 @@ def parse_float(val: Any, default: float = 0.0) -> float:
 
 def has_nvidia_hardware() -> bool:
     from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
-    if AcceleratorDiscovery.primary_vendor() == AcceleratorVendor.NVIDIA:
+    if any(dev.vendor == AcceleratorVendor.NVIDIA for dev in AcceleratorDiscovery.scan_devices()):
         return True
     has_bin = Path("/usr/libexec/puu/puu-has-nvidia-hardware")
     if has_bin.is_file() and os.access(has_bin, os.X_OK):

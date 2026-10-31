@@ -58,7 +58,7 @@ class GpuProbe:
 
     @property
     def cuda_ready(self) -> bool:
-        return self.count > 0 and self.available
+        return self.count > 0 and self.available and self.accelerator not in ("amd", "intel")
 
 
 def smi(*args: str) -> subprocess.CompletedProcess:
@@ -93,6 +93,8 @@ def probe_accelerator(probe: GpuProbe) -> None:
     joined = " ".join(names).lower()
     if "gb10" in joined or "grace blackwell" in joined:
         probe.accelerator = "gb10"
+    elif names:
+        probe.accelerator = "nvidia"
 
 
 NVLINK_RE = re.compile(r"^NV(\d+)$")
@@ -133,11 +135,12 @@ def apply_uma_memory(probe: GpuProbe) -> None:
 
 def probe_gpus() -> GpuProbe:
     probe = GpuProbe()
-    devices = AcceleratorDiscovery.scan_devices()
-    if not devices:
+    scanned = AcceleratorDiscovery.scan_devices()
+    if not scanned:
         return probe
 
-    vendor = AcceleratorDiscovery.primary_vendor()
+    vendor = AcceleratorDiscovery.primary_vendor(scanned)
+    devices = AcceleratorDiscovery.primary_devices(scanned)
     if vendor == AcceleratorVendor.NVIDIA:
         if not SMI_BIN.is_file() or not os.access(SMI_BIN, os.X_OK):
             sys.exit(f"oksa-label-model-serving-node: NVIDIA hardware found but {SMI_BIN} is missing")
@@ -152,15 +155,16 @@ def probe_gpus() -> GpuProbe:
         if probe.accelerator == "gb10":
             probe.unified_memory = True
             apply_uma_memory(probe)
-    elif vendor == AcceleratorVendor.AMD:
+    elif vendor in (AcceleratorVendor.AMD, AcceleratorVendor.INTEL):
         probe.available = True
         probe.count = len(devices)
-        probe.accelerator = "amd"
-    elif vendor == AcceleratorVendor.INTEL:
-        probe.available = True
-        probe.count = len(devices)
-        probe.accelerator = "intel"
-
+        probe.accelerator = vendor.value
+        mems = [dev.memory_total_bytes // (1024 * 1024) for dev in devices if dev.memory_total_bytes > 0]
+        if mems:
+            probe.memory_mib = sum(mems)
+            probe.memory_max_mib = max(mems)
+            probe.memory_per_gpu = ",".join(str(m) for m in mems)
+            probe.memory_source = "sysfs"
     return probe
 
 
