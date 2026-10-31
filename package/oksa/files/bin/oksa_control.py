@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import unicodedata
+from gi.repository import GLib
 
 import oksa_calibration_state as calibration
 import oksa_model_removal as removal
@@ -29,28 +30,28 @@ class Contract:
     JOB = "org.puu.Oksa.Job"
     MAX_JSON = 1024 * 1024
     METHODS = {
-        "GetStatus": ((), "s", False),
-        "ListModels": ((), "s", False),
-        "InspectModel": ((('repo', 's'), ('revision', 's')), "s", False),
+        "GetStatus": ((), "a{sv}", False),
+        "ListModels": ((), "a{sv}", False),
+        "InspectModel": ((('repo', 's'), ('revision', 's')), "a{sv}", False),
         "DownloadModel": ((('repo', 's'), ('name', 's'), ('commit', 's'), ('force', 'b')), "o", True),
         "StartModel": ((('name', 's'),), "o", True),
         "StopServing": ((), "o", True),
         "RemoveModel": ((('name', 's'),), "o", True),
-        "ListUsers": ((), "s", False),
-        "GetUser": ((('id', 's'),), "s", False),
-        "CreateUser": ((('id', 's'), ('email', 's'), ('budget', 'd')), "s", False),
+        "ListUsers": ((), "a{sv}", False),
+        "GetUser": ((('id', 's'),), "a{sv}", False),
+        "CreateUser": ((('id', 's'), ('email', 's'), ('budget', 'd')), "a{sv}", False),
         "DeleteUser": ((('id', 's'),), "o", True),
-        "ListKeys": ((('user', 's'),), "s", False),
-        "CreateKey": ((('user', 's'), ('alias', 's'), ('models', 'as'), ('budget', 'd'), ('duration', 's')), "s", False),
-        "RevokeKey": ((('token', 's'),), "s", False),
-        "GetSettings": ((), "s", False),
+        "ListKeys": ((('user', 's'),), "a{sv}", False),
+        "CreateKey": ((('user', 's'), ('alias', 's'), ('models', 'as'), ('budget', 'd'), ('duration', 's')), "a{sv}", False),
+        "RevokeKey": ((('token', 's'),), "a{sv}", False),
+        "GetSettings": ((), "a{sv}", False),
         "SetContact": ((('contact', 's'),), "o", True),
-        "GetCalibration": ((), "s", False),
+        "GetCalibration": ((), "a{sv}", False),
         "Calibrate": ((('force', 'b'),), "o", True),
-        "GetJob": ((('path', 'o'),), "s", False),
-        "ListJobs": ((), "s", False),
+        "GetJob": ((('path', 'o'),), "a{sv}", False),
+        "ListJobs": ((), "a{sv}", False),
     }
-    OPTIONAL_STRINGS = {"email", "contact", "duration", "user"}
+    OPTIONAL_STRINGS = {"email", "contact", "duration", "user", "commit", "revision"}
     MUTATIONS = frozenset({"DownloadModel", "StartModel", "StopServing", "RemoveModel", "CreateUser",
                            "DeleteUser", "CreateKey", "RevokeKey", "SetContact", "Calibrate"})
 
@@ -116,6 +117,28 @@ class Contract:
         except (ValueError, RecursionError) as error:
             raise OksaError("InvalidResult", "Invalid JSON object") from error
         return result
+
+    @classmethod
+    def py_to_variant(cls, val: object) -> GLib.Variant:
+        if val is None:
+            return GLib.Variant("s", "")
+        if isinstance(val, bool):
+            return GLib.Variant("b", val)
+        if isinstance(val, int):
+            return GLib.Variant("x", val)
+        if isinstance(val, float):
+            return GLib.Variant("d", val)
+        if isinstance(val, str):
+            return GLib.Variant("s", val)
+        if isinstance(val, (list, tuple)):
+            return GLib.Variant("av", [GLib.Variant("v", cls.py_to_variant(x)) for x in val if x is not None])
+        if isinstance(val, dict):
+            return GLib.Variant("a{sv}", {str(k): GLib.Variant("v", cls.py_to_variant(v)) for k, v in val.items() if v is not None})
+        return GLib.Variant("s", str(val))
+
+    @classmethod
+    def to_variant_dict(cls, d: dict) -> dict[str, GLib.Variant]:
+        return {str(k): GLib.Variant("v", cls.py_to_variant(v)) for k, v in d.items() if v is not None}
 
 
 class OksaControl:

@@ -48,6 +48,7 @@ class _OksaPage:
         self.settings_generation = 0
         self.settings_loaded = False
         self.secret = ""
+        self.active_pull_job: str | None = None
 
     def build(self) -> None:
         ui.dark_mode(False)
@@ -397,7 +398,10 @@ class _OksaPage:
             "name": "Name", "repo_id": "Repository", "storage": "Storage", "quantization": "Quantization", "state": "State",
         }, selection="single")
         self.models_table.on_select(self._model_selection)
-        self.pull_summary = ui.label("Download activity not loaded")
+        with ui.row().classes("w-full items-center justify-between gap-2"):
+            self.pull_summary = ui.label("Download activity not loaded")
+            self.pull_cancel_button = ui.button("Cancel download", color="negative", on_click=self._cancel_pull).props("outline sm")
+            self.pull_cancel_button.set_visibility(False)
         self.pull_error = ui.label("").classes("text-negative")
         self.pull_progress = ui.linear_progress(show_value=False).props("indeterminate").classes("w-full")
         self.pull_progress.set_visibility(False)
@@ -459,10 +463,13 @@ class _OksaPage:
         job = max(downloads, key=lambda item: item["started_at"], default={})
         state = job.get("state")
         running = state in ("queued", "running")
-        error = str(job.get("error") or "")
+        err_val = job.get("error")
+        error = err_val.get("message") if isinstance(err_val, dict) else str(err_val or "")
         self.pull_error.set_text(error)
-        label = "Downloading " if running else "Download failed: " if error else "Completed " if state == "succeeded" else "No download in progress: "
+        label = "Downloading " if running else "Download failed: " if error else "Canceled " if state == "canceled" else "Completed " if state == "succeeded" else "No download in progress: "
         self.pull_summary.set_text(label + str(job.get("repo_id") or ""))
+        self.active_pull_job = job.get("path") if running else None
+        self.pull_cancel_button.set_visibility(running)
         self.pull_progress.set_visibility(running)
         self.pull_log.set_value(str(job.get("progress") or error))
         finished = job.get("ended_at")
@@ -472,6 +479,17 @@ class _OksaPage:
         if refresh:
             await self._load_models()
 
+    async def _cancel_pull(self) -> None:
+        if not self.active_pull_job:
+            return
+        if not await self._confirm("Cancel model download?", "Cancel download", dangerous=True):
+            return
+        try:
+            await run.io_bound(self.service.cancel_job, self.active_pull_job)
+            ui.notify("Download canceled", type="info")
+        except OksaClientError as error:
+            ui.notify(f"Could not cancel download: {error}", type="negative")
+        await self._load_pull()
     async def _model_action(self, action: str) -> None:
         model = self._selected_model()
         if action != "stop" and (model is None or not isinstance(model.get("id"), str)):

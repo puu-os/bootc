@@ -42,6 +42,20 @@ class Job:
                 "progress": self.progress, "started_at": self.started_at, "ended_at": self.ended_at,
                 "result": self.result, "error": self.error, "repo_id": self.repo_id, "model_name": self.model_name}
 
+    def properties(self) -> dict[str, GLib.Variant]:
+        return {
+            "Path": GLib.Variant("o", self.path),
+            "Operation": GLib.Variant("s", self.operation),
+            "StartedAt": GLib.Variant("d", float(self.started_at)),
+            "EndedAt": GLib.Variant("d", float(self.ended_at or 0.0)),
+            "State": GLib.Variant("s", self.state),
+            "Progress": GLib.Variant("s", self.progress),
+            "Result": GLib.Variant("a{sv}", Contract.to_variant_dict(self.result or {})),
+            "Error": GLib.Variant("a{sv}", Contract.to_variant_dict(self.error or {})),
+            "RepoId": GLib.Variant("s", self.repo_id or ""),
+            "ModelName": GLib.Variant("s", self.model_name or ""),
+        }
+
 
 class JobStore:
     LIMIT = 64
@@ -173,10 +187,21 @@ class OksaDBusService:
     READ_LIMIT = 2
     READ_TIMEOUT = 90
     JOB_TIMEOUT = 6 * 60 * 60
-    JOB_XML = '''<node><interface name="org.puu.Oksa.Job">
-      <method name="GetSnapshot"><arg name="snapshot" type="s" direction="out"/></method>
+    JOB_XML = f'''<node><interface name="{Contract.JOB}">
+      <method name="GetSnapshot"><arg name="snapshot" type="a{{sv}}" direction="out"/></method>
+      <method name="Cancel"/>
       <signal name="Progress"><arg name="progress" type="s"/></signal>
       <signal name="StateChanged"><arg name="state" type="s"/></signal>
+      <property name="Path" type="o" access="read"/>
+      <property name="Operation" type="s" access="read"/>
+      <property name="StartedAt" type="d" access="read"/>
+      <property name="EndedAt" type="d" access="read"/>
+      <property name="State" type="s" access="read"/>
+      <property name="Progress" type="s" access="read"/>
+      <property name="Result" type="a{{sv}}" access="read"/>
+      <property name="Error" type="a{{sv}}" access="read"/>
+      <property name="RepoId" type="s" access="read"/>
+      <property name="ModelName" type="s" access="read"/>
     </interface></node>'''
 
     @classmethod
@@ -185,7 +210,28 @@ class OksaDBusService:
         for name, (args, output, _) in Contract.METHODS.items():
             fields = ''.join(f'<arg name="{field}" type="{kind}" direction="in"/>' for field, kind in args)
             methods.append(f'<method name="{name}">{fields}<arg name="result" type="{output}" direction="out"/></method>')
-        return f'<node><interface name="{Contract.BUS}">{"".join(methods)}</interface></node>'
+        return f'''<node>
+          <interface name="{Contract.BUS}">
+            {"".join(methods)}
+            <property name="Status" type="a{{sv}}" access="read"/>
+            <property name="ActiveModel" type="s" access="read"/>
+            <property name="ServingState" type="s" access="read"/>
+            <property name="Jobs" type="ao" access="read"/>
+          </interface>
+          <interface name="org.freedesktop.DBus.ObjectManager">
+            <method name="GetManagedObjects">
+              <arg name="objects" type="a{{oa{{sa{{sv}}}}}}" direction="out"/>
+            </method>
+            <signal name="InterfacesAdded">
+              <arg name="object_path" type="o"/>
+              <arg name="interfaces_and_properties" type="a{{sa{{sv}}}}"/>
+            </signal>
+            <signal name="InterfacesRemoved">
+              <arg name="object_path" type="o"/>
+              <arg name="interfaces" type="as"/>
+            </signal>
+          </interface>
+        </node>'''
 
     def __init__(self, connection=None, job_dir: Path | None = None, service_class=OksaControl) -> None:
         self.connection = connection if connection is not None else Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
@@ -201,16 +247,25 @@ class OksaDBusService:
         self.store = JobStore(Path(job_dir or os.environ.get("OKSA_JOB_DIR", "/var/lib/oksa/jobs")))
         self.monitoring = StatusSampler(ms.collect_serving_status)
         self.context = multiprocessing.get_context("spawn")
+        self._last_active = None
+        self._last_serving = None
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(36, 1, 0, 0, 0) != 0:
             self.store.close()
             raise OSError(ctypes.get_errno(), "Unable to become child subreaper")
-        self.job_info = Gio.DBusNodeInfo.new_for_xml(self.JOB_XML).interfaces[0]
-        self.root_info = Gio.DBusNodeInfo.new_for_xml(self.introspection()).interfaces[0]
+        node_info = Gio.DBusNodeInfo.new_for_xml(self.introspection())
+        self.root_info = node_info.lookup_interface(Contract.BUS)
+        self.om_info = node_info.lookup_interface("org.freedesktop.DBus.ObjectManager")
+        self.job_info = Gio.DBusNodeInfo.new_for_xml(self.JOB_XML).lookup_interface(Contract.JOB)
         try:
-            self.register(Contract.PATH, self.root_info)
+            self.registrations[Contract.PATH] = self.connection.register_object(
+                Contract.PATH, self.root_info, self.handle_call, self.handle_root_property, None
+            )
+            self.registrations[Contract.PATH + ":om"] = self.connection.register_object(
+                Contract.PATH, self.om_info, self.handle_om_call, None, None
+            )
             for path in self.store.jobs:
-                self.register(path, self.job_info)
+                self.register_job(self.store.jobs[path])
             reply = self.connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                                               "RequestName", GLib.Variant("(su)", (Contract.BUS, 4)),
                                               GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NONE, 5000, None)
@@ -223,8 +278,124 @@ class OksaDBusService:
         self.monitoring.start()
         self.timer = GLib.timeout_add(50, self.poll)
 
-    def register(self, path: str, info) -> None:
-        self.registrations[path] = self.connection.register_object(path, info, self.handle_call, None, None)
+    def register_job(self, job: Job) -> None:
+        self.registrations[job.path] = self.connection.register_object(
+            job.path, self.job_info, self.handle_job_call, self.handle_job_property, None
+        )
+
+    def root_properties(self) -> dict[str, GLib.Variant]:
+        snapshot = self.monitoring.snapshot()
+        status = snapshot.status if isinstance(snapshot.status, dict) else {}
+        active = status.get("active_model") or ""
+        serving = status.get("model_status") or ("ready" if active else "stopped")
+        return {
+            "Status": GLib.Variant("a{sv}", Contract.to_variant_dict(snapshot.to_json())),
+            "ActiveModel": GLib.Variant("s", active),
+            "ServingState": GLib.Variant("s", serving),
+            "Jobs": GLib.Variant("ao", list(self.store.jobs.keys())),
+        }
+
+    def handle_root_property(self, connection, sender, path: str, interface: str, prop_name: str):
+        if interface != Contract.BUS:
+            return None
+        return self.root_properties().get(prop_name)
+
+    def handle_job_property(self, connection, sender, path: str, interface: str, prop_name: str):
+        if interface != Contract.JOB:
+            return None
+        job = self.store.jobs.get(path)
+        if job is None:
+            return None
+        return job.properties().get(prop_name)
+
+    def handle_om_call(self, connection, sender, path, interface, method, parameters, invocation) -> None:
+        try:
+            self.authorize(sender)
+            if method != "GetManagedObjects":
+                raise OksaError("UnknownMethod", f"Unknown method {method}")
+            managed = {
+                job.path: {Contract.JOB: job.properties()}
+                for job in self.store.jobs.values()
+            }
+            invocation.return_value(GLib.Variant("(a{oa{sa{sv}}})", (managed,)))
+        except OksaError as error:
+            self.return_error(invocation, error)
+        except Exception as error:
+            logging.exception("ObjectManager call failed")
+            self.return_error(invocation, OksaError("OperationFailed", str(error)))
+
+    def handle_job_call(self, connection, sender, path: str, interface: str, method: str, parameters, invocation) -> None:
+        try:
+            self.authorize(sender)
+            if self.closed:
+                raise OksaError("Unavailable", "Daemon is shutting down")
+            if interface != Contract.JOB:
+                raise OksaError("UnknownMethod", f"Unknown interface {interface}")
+            if method == "GetSnapshot":
+                self.return_snapshot(path, sender, invocation)
+            elif method == "Cancel":
+                self.cancel_job(path, sender, invocation)
+            else:
+                raise OksaError("UnknownMethod", f"Unknown job method {method}")
+        except OksaError as error:
+            self.return_error(invocation, error)
+        except Exception as error:
+            logging.exception("Job call failed")
+            self.return_error(invocation, OksaError("OperationFailed", str(error)))
+
+    def cancel_job(self, path: str, sender: str, invocation) -> None:
+        job = self.store.jobs.get(path)
+        if job is None:
+            raise OksaError("NotFound", "Unknown or expired job")
+        if job.state != "running":
+            raise OksaError("InvalidState", f"Job is not running (state: {job.state})")
+        worker = next((w for w in self.workers if w.job and w.job.path == path), None)
+        if worker is not None:
+            try:
+                os.killpg(worker.process.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            self.finish(worker, None, {"code": "Canceled", "message": "Operation was canceled by user"})
+        else:
+            job.state = "canceled"
+            job.ended_at = time.time()
+            job.error = {"code": "Canceled", "message": "Operation was canceled by user"}
+            self.store.save(job)
+            self.emit(job, "StateChanged", job.state)
+            changed = {
+                "State": GLib.Variant("s", job.state),
+                "EndedAt": GLib.Variant("d", float(job.ended_at)),
+                "Error": GLib.Variant("a{sv}", Contract.to_variant_dict(job.error)),
+            }
+            try:
+                self.connection.emit_signal(
+                    None, job.path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                    GLib.Variant("(sa{sv}as)", (Contract.JOB, changed, []))
+                )
+            except Exception:
+                pass
+        invocation.return_value(None)
+
+    def notify_status_if_changed(self) -> None:
+        snapshot = self.monitoring.snapshot()
+        status = snapshot.status if isinstance(snapshot.status, dict) else {}
+        active = status.get("active_model") or ""
+        serving = status.get("model_status") or ("ready" if active else "stopped")
+        if active != self._last_active or serving != self._last_serving:
+            self._last_active = active
+            self._last_serving = serving
+            changed = {
+                "ActiveModel": GLib.Variant("s", active),
+                "ServingState": GLib.Variant("s", serving),
+                "Status": GLib.Variant("a{sv}", Contract.to_variant_dict(snapshot.to_json())),
+            }
+            try:
+                self.connection.emit_signal(
+                    None, Contract.PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                    GLib.Variant("(sa{sv}as)", (Contract.BUS, changed, []))
+                )
+            except Exception:
+                pass
 
     def authorize(self, sender: str) -> None:
         reply = self.connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
@@ -236,8 +407,7 @@ class OksaDBusService:
 
     @staticmethod
     def return_error(invocation, error: OksaError) -> None:
-        invocation.return_dbus_error(Contract.BUS + ".Error." + error.code,
-                                     Contract.encode({"ok": False, "code": error.code, "error": str(error)[:4096]}))
+        invocation.return_dbus_error(Contract.BUS + ".Error." + error.code, str(error)[:4096])
 
     def handle_call(self, connection, sender, path, interface, method, parameters, invocation) -> None:
         try:
@@ -245,16 +415,13 @@ class OksaDBusService:
             if self.closed:
                 raise OksaError("Unavailable", "Daemon is shutting down")
             args = parameters.unpack()
-            if interface == Contract.JOB and method == "GetSnapshot":
-                self.return_snapshot(path, sender, invocation)
-                return
             if interface != Contract.BUS or path != Contract.PATH:
                 raise OksaError("UnknownMethod", "Unknown domain method")
             Contract.validate(method, args)
             if method == "GetJob":
                 self.return_snapshot(args[0], sender, invocation)
             elif method == "GetStatus":
-                invocation.return_value(GLib.Variant("(s)", (Contract.encode(self.monitoring.snapshot().to_json()),)))
+                invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict(self.monitoring.snapshot().to_json()),)))
             elif method == "ListJobs":
                 snapshots = []
                 for job in self.store.jobs.values():
@@ -264,7 +431,7 @@ class OksaDBusService:
                     if job.error:
                         snapshot["error"] = {"code": job.error["code"], "message": job.error["message"][:512]}
                     snapshots.append(snapshot)
-                invocation.return_value(GLib.Variant("(s)", (Contract.encode({"ok": True, "jobs": snapshots}),)))
+                invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict({"ok": True, "jobs": snapshots}),)))
             else:
                 mutation = Contract.METHODS[method][2]
                 exclusive = Contract.MUTATIONS | {"ListModels"}
@@ -287,19 +454,37 @@ class OksaDBusService:
             raise OksaError("NotFound", "Unknown or expired job")
         if len(job.subscribers) < 128:
             job.subscribers.add(sender)
-        invocation.return_value(GLib.Variant("(s)", (Contract.encode(job.snapshot()),)))
+        invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict(job.snapshot()),)))
 
     def launch(self, method: str, args: tuple, sender: str, invocation, mutation: bool) -> None:
         job = None
         if mutation:
             for path in self.store.prune(reserve=1):
-                self.connection.unregister_object(self.registrations.pop(path))
+                reg = self.registrations.pop(path, None)
+                if reg is not None:
+                    self.connection.unregister_object(reg)
+                self.connection.emit_signal(
+                    None, Contract.PATH, "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved",
+                    GLib.Variant("(oas)", (path, [Contract.JOB]))
+                )
+                self.connection.emit_signal(
+                    None, Contract.PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                    GLib.Variant("(sa{sv}as)", (Contract.BUS, {"Jobs": GLib.Variant("ao", list(self.store.jobs.keys()))}, []))
+                )
             job = Job(Contract.PATH + "/jobs/" + uuid.uuid4().hex, method, time.time(), subscribers={sender})
             if method == "DownloadModel":
                 job.repo_id, job.model_name = args[:2]
             self.store.save(job)
             self.store.jobs[job.path] = job
-            self.register(job.path, self.job_info)
+            self.register_job(job)
+            self.connection.emit_signal(
+                None, Contract.PATH, "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
+                GLib.Variant("(oa{sa{sv}})", (job.path, {Contract.JOB: job.properties()}))
+            )
+            self.connection.emit_signal(
+                None, Contract.PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                GLib.Variant("(sa{sv}as)", (Contract.BUS, {"Jobs": GLib.Variant("ao", list(self.store.jobs.keys()))}, []))
+            )
         parent, child = self.context.Pipe(duplex=False)
         process = self.context.Process(target=Worker.run, args=(child, self.service_class, method, args))
         try:
@@ -335,18 +520,30 @@ class OksaDBusService:
         if worker.job:
             job = worker.job
             job.result, job.error = result, error
-            job.state = "failed" if error else "succeeded"
+            job.state = "canceled" if (error and error.get("code") == "Canceled") else ("failed" if error else "succeeded")
             job.ended_at = time.time()
             self.store.save(job)
             self.emit(job, "StateChanged", job.state)
+            changed = {
+                "State": GLib.Variant("s", job.state),
+                "EndedAt": GLib.Variant("d", float(job.ended_at)),
+                "Result": GLib.Variant("a{sv}", Contract.to_variant_dict(job.result or {})),
+                "Error": GLib.Variant("a{sv}", Contract.to_variant_dict(job.error or {})),
+            }
+            try:
+                self.connection.emit_signal(
+                    None, job.path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                    GLib.Variant("(sa{sv}as)", (Contract.JOB, changed, []))
+                )
+            except Exception:
+                pass
         elif error:
             self.return_error(worker.invocation, OksaError(error["code"], error["message"]))
         else:
-            worker.invocation.return_value(GLib.Variant("(s)", (Contract.encode(result),)))
+            worker.invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict(result),)))
         self.dispose(worker)
         if worker.operation in Contract.MUTATIONS:
             self.monitoring.invalidate()
-
     def dispose(self, worker: Invocation) -> None:
         process = worker.process
         try:
@@ -361,7 +558,10 @@ class OksaDBusService:
                 os.waitpid(-process.pid, 0)
             except ChildProcessError:
                 break
-        worker.channel.close()
+        try:
+            worker.channel.close()
+        except OSError:
+            pass
         process.close()
         self.workers.remove(worker)
 
@@ -385,6 +585,13 @@ class OksaDBusService:
                         worker.job.progress = packet["text"]
                         self.store.save(worker.job)
                         self.emit(worker.job, "Progress", worker.job.progress)
+                        try:
+                            self.connection.emit_signal(
+                                None, worker.job.path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                GLib.Variant("(sa{sv}as)", (Contract.JOB, {"Progress": GLib.Variant("s", worker.job.progress)}, []))
+                            )
+                        except Exception:
+                            pass
                     elif kind in ("result", "error"):
                         self.finish(worker, packet.get("result"), packet.get("error"))
                         terminal = True
@@ -396,8 +603,10 @@ class OksaDBusService:
                     self.finish(worker, None, {"code": "Timeout", "message": "Operation exceeded its time limit; verify state before retrying"})
                 elif not worker.process.is_alive() and (eof or not worker.channel.poll()):
                     self.finish(worker, None, {"code": "WorkerFailed", "message": "Worker exited without a result"})
+            self.notify_status_if_changed()
         except Exception:
             logging.exception("Job processing failed; shutting down to avoid losing operation errors")
+            self.timer = None
             self.loop.quit()
             return False
         return not self.closed
@@ -416,8 +625,12 @@ class OksaDBusService:
             return
         self.closed = True
         self.loop.quit()
-        if hasattr(self, "timer"):
-            GLib.source_remove(self.timer)
+        if getattr(self, "timer", None) is not None:
+            try:
+                GLib.source_remove(self.timer)
+            except Exception:
+                pass
+            self.timer = None
         self.monitoring.close()
         for worker in tuple(self.workers):
             try:
