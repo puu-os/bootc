@@ -14,7 +14,12 @@ from statistics import median
 import subprocess
 import time
 
-from oksa_calibration_state import MODEL, RESULT_PATH, STATUS_PATH, ZERO_LIMITS, atomic_record, boot_id, read_record, valid_result
+from oksa_calibration_state import (
+    MODEL, RESULT_PATH, STATUS_PATH, ZERO_LIMITS,
+    atomic_record, boot_id, read_record, valid_result,
+    result_path, status_path
+)
+from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
 from oksa_model_serving import STATE_DIR, read_first_line
 from oksa_model_removal import wait_for_stopped_pods
 SOURCE_PATH = Path("/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml")
@@ -36,8 +41,8 @@ class CalibrationTimeout(TimeoutError):
         self.reason = reason
 
 
-def publish(state, message, fingerprint=""):
-    atomic_record(STATUS_PATH, dict(schema=1, boot_id=boot_id(), state=state,
+def publish(state, message, fingerprint="", status_file=STATUS_PATH):
+    atomic_record(status_file, dict(schema=1, boot_id=boot_id(), state=state,
                                   message=message[:512], fingerprint=fingerprint, updated_at=time.time()))
 
 
@@ -74,26 +79,68 @@ def kubectl(*args, payload=None, request_timeout=20):
 def set_limits(command, limits):
     command = [arg for arg in command if arg.split("=", 1)[0] not in (
         "--enable-prefix-caching", "--no-enable-prefix-caching",
-        "--enable-chunked-prefill", "--no-enable-chunked-prefill")]
+        "--enable-chunked-prefill", "--no-enable-chunked-prefill",
+        "--kv-cache-dtype")]
     for flag, key in (("--max-model-len", "max_model_len"), ("--max-num-seqs", "max_num_seqs"),
                       ("--max-num-batched-tokens", "max_num_batched_tokens"),
                       ("--gpu-memory-utilization", "gpu_memory_utilization")):
-        command[command.index(flag) + 1] = str(limits[key])
-    return command + ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
+        if flag in command:
+            command[command.index(flag) + 1] = str(limits[key])
+        else:
+            command.extend([flag, str(limits[key])])
+    opts = ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
+    if limits.get("kv_cache_dtype"):
+        opts.extend(["--kv-cache-dtype", limits["kv_cache_dtype"]])
+    return command + opts
 
 
-def deployment_of(manifest):
-    return next(item for item in manifest["items"] if item["kind"] == "Deployment" and item["metadata"]["name"] == MODEL)
+def deployment_of(manifest, model_name=None):
+    target = model_name or MODEL
+    for item in manifest.get("items", []):
+        if item.get("kind") == "Deployment":
+            name = item.get("metadata", {}).get("name", "")
+            app_label = item.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name", "")
+            if name == target or app_label == target:
+                return item
+    return next(item for item in manifest["items"] if item["kind"] == "Deployment")
 
 
-def apply_profile(manifest, result, node):
+def resolve_target(model=None, manifest=None):
+    if manifest:
+        src = Path(manifest)
+        if not src.is_file():
+            raise FileNotFoundError(f"Manifest not found: {src}")
+        name = model or src.stem.split("-", 1)[-1]
+        dest = Path("/var/lib/rancher/k3s/server/manifests") / src.name
+        return name, src, dest
+    if model:
+        for directory in (Path("/usr/share/puu/k3s/manifests"), Path("/var/lib/rancher/k3s/server/manifests")):
+            if not directory.exists():
+                continue
+            for p in directory.glob(f"*{model}*.yaml"):
+                dest = Path("/var/lib/rancher/k3s/server/manifests") / p.name
+                return model, p, dest
+        raise FileNotFoundError(f"No manifest found for model: {model}")
+    selected_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(STATE_DIR / "selected-model")))
+    active = read_first_line(selected_file) if selected_file.exists() else ""
+    if active:
+        for directory in (Path("/usr/share/puu/k3s/manifests"), Path("/var/lib/rancher/k3s/server/manifests")):
+            if not directory.exists():
+                continue
+            for p in directory.glob(f"*{active}*.yaml"):
+                dest = Path("/var/lib/rancher/k3s/server/manifests") / p.name
+                return active, p, dest
+    return MODEL, SOURCE_PATH, MANIFEST_PATH
+
+
+def apply_profile(manifest, result, node, model_name=MODEL, manifest_dest=MANIFEST_PATH):
     manifest = copy.deepcopy(manifest)
-    deployment = deployment_of(manifest)
+    deployment = deployment_of(manifest, model_name)
     limits = result["limits"]
     selected = read_first_line(Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(STATE_DIR / "selected-model"))))
     disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(STATE_DIR / "serving.disabled")))
-    deployment["spec"]["replicas"] = int(limits["max_num_seqs"] > 0 and not disabled.exists() and selected in ("", MODEL))
-    if limits["max_num_seqs"]:
+    deployment["spec"]["replicas"] = int(limits["max_num_seqs"] > 0 and not disabled.exists() and selected in ("", model_name))
+    if limits["max_num_seqs"] and node is not None:
         spec = deployment["spec"]["template"]["spec"]
         spec["nodeSelector"]["kubernetes.io/hostname"] = node["metadata"]["labels"]["kubernetes.io/hostname"]
         container = spec["containers"][0]
@@ -103,7 +150,7 @@ def apply_profile(manifest, result, node):
         container["resources"]["requests"]["memory"] = str(min(4 * 1024**3, limits["memory_bytes"]))
         container.setdefault("env", []).extend([dict(name="HF_HUB_OFFLINE", value="1"),
                                                 dict(name="TRANSFORMERS_OFFLINE", value="1")])
-    atomic_record(MANIFEST_PATH, manifest)
+    atomic_record(manifest_dest, manifest)
     kubectl("apply", "-f", "-", payload=manifest)
 
 
@@ -145,7 +192,7 @@ def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, r
     return dict(apiVersion="v1", kind="Pod", metadata=dict(name=POD, namespace=NAMESPACE), spec=spec)
 
 
-def run_trial(deployment, node, context, sequences, utilization, memory_bytes, reserve, deadline, trial_number):
+def run_trial(deployment, node, context, sequences, utilization, memory_bytes, reserve, deadline, trial_number, status_file=STATUS_PATH):
     started = time.monotonic()
     seconds = min(2100, int(deadline - started))
     if seconds < 1:
@@ -153,7 +200,7 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
     trial_deadline = started + seconds
     message = (f"Trial {trial_number}/{MAX_TRIALS}: testing {context} context tokens, "
                f"{sequences} simultaneous requests; GPU-memory budget {utilization:.0%}.")
-    publish("running", message)
+    publish("running", message, status_file=status_file)
     pod = probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds)
 
     def timed_out(message):
@@ -167,7 +214,7 @@ def run_trial(deployment, node, context, sequences, utilization, memory_bytes, r
         next_update = started + 10
         while time.monotonic() < trial_deadline:
             if time.monotonic() >= next_update:
-                publish("running", f"{message} Elapsed {int(time.monotonic() - started)}s.")
+                publish("running", f"{message} Elapsed {int(time.monotonic() - started)}s.", status_file=status_file)
                 next_update = time.monotonic() + 10
             current = kubectl("get", "pod", POD, "-n", NAMESPACE, "-o", "json")
             deadline_exceeded = current.get("status", {}).get("reason") == "DeadlineExceeded"
@@ -262,16 +309,16 @@ def search_context(test, trials):
     return passed
 
 
-def calibrate(manifest, node, identity, fingerprint):
+def calibrate(manifest, node, identity, fingerprint, model_name=MODEL, status_file=STATUS_PATH):
     memory = memory_info()
     reserve = max(2 * 1024**3, memory["MemTotal"] // 5)
     budget = max(0, memory["MemAvailable"] - reserve)
-    result = dict(schema=1, model=MODEL, state="complete", fingerprint=fingerprint, identity=identity,
+    result = dict(schema=1, model=model_name, state="complete", fingerprint=fingerprint, identity=identity,
                   completed_at=time.time(), reason="insufficient-memory", limits=dict(ZERO_LIMITS), trials=[],
                   search_complete=True, incomplete_reasons=[])
     if not budget:
         return result
-    deployment = deployment_of(manifest)
+    deployment = deployment_of(manifest, model_name)
     deadline = time.monotonic() + MAX_SECONDS
     trials = result["trials"]
     best = None
@@ -286,11 +333,11 @@ def calibrate(manifest, node, identity, fingerprint):
             raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
         if len(trials) >= MAX_TRIALS:
             raise CalibrationTimeout("trial-budget", "Calibration trial budget exhausted")
-        value = run_trial(deployment, node, context, sequences, utilization, budget, reserve, deadline, len(trials) + 1)
+        value = run_trial(deployment, node, context, sequences, utilization, budget, reserve, deadline, len(trials) + 1, status_file=status_file)
         trials.append(value)
         if value["status"] == "timeout":
             mark_incomplete("candidate-timeout")
-            publish("running", "Candidate timed out; capacity is inconclusive. Continuing calibration within the remaining budget.")
+            publish("running", "Candidate timed out; capacity is inconclusive. Continuing calibration within the remaining budget.", status_file=status_file)
         return value
 
     def test(context, sequences, utilization):
@@ -323,19 +370,22 @@ def calibrate(manifest, node, identity, fingerprint):
         if best is None:
             raise CalibrationTimeout(error.reason, f"{error}; no profile passed. Restart calibration manually to retry.") from error
         mark_incomplete(error.reason)
-        publish("running", f"{error}; applying the best verified profile. Maximum capacity was not established.")
+        publish("running", f"{error}; applying the best verified profile. Maximum capacity was not established.", status_file=status_file)
     context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
+    batched_tokens = min(8192, max(2048, context * sequences))
     result.update(reason="measured", completed_at=time.time(), metrics=best["metrics"], limits=dict(
-        max_model_len=context, max_num_seqs=sequences, max_num_batched_tokens=min(8192, context * sequences),
+        max_model_len=context, max_num_seqs=sequences, max_num_batched_tokens=batched_tokens,
         gpu_memory_utilization=utilization, memory_bytes=budget))
     return result
 
 
-def hardware_identity():
-    from oksa_model_serving import has_nvidia_hardware, resolve_k3s_node_name
+def hardware_identity(source_path=SOURCE_PATH):
+    from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
+    from oksa_model_serving import resolve_k3s_node_name
 
     gpus = []
-    if has_nvidia_hardware():
+    vendor = AcceleratorDiscovery.primary_vendor()
+    if vendor == AcceleratorVendor.NVIDIA and Path("/usr/bin/nvidia-smi").exists():
         value = subprocess.run(["nvidia-smi", "--query-gpu=name,uuid,memory.total,driver_version", "--format=csv,noheader,nounits"],
                                capture_output=True, text=True, check=True, timeout=15)
         gpus = sorted(line.strip() for line in value.stdout.splitlines() if line.strip())
@@ -343,10 +393,20 @@ def hardware_identity():
             raise RuntimeError("NVIDIA hardware present but no usable GPU reported")
         models = {tuple(line.split(", ")[i] for i in (0, 2)) for line in gpus}
         if len(models) > 1:
-            raise RuntimeError("Bonsai calibration requires matching local GPUs; mixed-GPU placement is not yet supported")
+            raise RuntimeError("Calibration requires matching local GPUs; mixed-GPU placement is not yet supported")
+    elif vendor != AcceleratorVendor.UNKNOWN:
+        devices = AcceleratorDiscovery.scan_devices()
+        for dev in devices:
+            gpus.append(f"{dev.name or dev.vendor.value}, {dev.pci_id}, {dev.memory_total_bytes}, {dev.driver}")
+        if not gpus:
+            raise RuntimeError(f"{vendor.value} accelerator hardware present but no usable device reported")
+        drivers = {dev.driver for dev in devices}
+        if len(drivers) > 1:
+            raise RuntimeError("Calibration requires matching local accelerators; mixed-driver placement is not yet supported")
+    manifest_content = source_path.read_text() if source_path.exists() else ""
     return dict(machine_id=Path("/etc/machine-id").read_text().strip(), kernel=os.uname().release,
                 architecture=os.uname().machine, memory_bytes=memory_info()["MemTotal"], gpus=gpus,
-                node=resolve_k3s_node_name(), manifest=SOURCE_PATH.read_text(),
+                node=resolve_k3s_node_name(), manifest=manifest_content,
                 controller=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 probe=hashlib.sha256(PROBE_PATH.read_bytes()).hexdigest())
 
@@ -365,26 +425,40 @@ def ensure_namespace(namespace=NAMESPACE):
             time.sleep(1)
 
 
-def run(force=False):
-    publish("running", "Preparing measured Bonsai calibration.")
-    identity = hardware_identity()
+def run(force=False, model_name=MODEL, source_path=SOURCE_PATH, manifest_path=MANIFEST_PATH):
+    res_path = result_path(model_name)
+    st_path = status_path(model_name)
+    publish("running", f"Preparing measured {model_name} calibration.", status_file=st_path)
+    identity = hardware_identity(source_path)
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    manifest = kubectl("create", "--dry-run=client", "--validate=false", "-f", str(SOURCE_PATH), "-o", "json")
+    manifest = kubectl("create", "--dry-run=client", "--validate=false", "-f", str(source_path), "-o", "json")
     manifest = json.loads(render_manifest(json.dumps(manifest)))
     if manifest.get("kind") != "List":
-        raise ValueError("Expected Bonsai manifest list")
-    deployment = deployment_of(manifest)
+        raise ValueError(f"Expected manifest list for {model_name}")
+    deployment = deployment_of(manifest, model_name)
     deployment["spec"]["replicas"] = 0
     ensure_namespace()
-    apply_profile(manifest, dict(limits=ZERO_LIMITS), None)
-    wait_for_stopped_pods(f"app.kubernetes.io/name={MODEL}", kubeconfig="/var/lib/rancher/k3s/k3s.yaml")
+    apply_profile(manifest, dict(limits=ZERO_LIMITS), None, model_name, manifest_path)
+    wait_for_stopped_pods(f"app.kubernetes.io/name={model_name}", kubeconfig="/var/lib/rancher/k3s/k3s.yaml")
     delete_probe()
     node = kubectl("get", "node", identity["node"], "-o", "json")
     if identity["gpus"]:
+        vendor = AcceleratorDiscovery.primary_vendor()
         ready_deadline = time.monotonic() + 300
         while True:
             labels = node["metadata"].get("labels", {})
-            if labels.get(f"{label_namespace()}/cuda-ready") == "true" and labels.get(f"{label_namespace()}/cdi-ready") == "true" and int(node.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu", "0")) > 0:
+            allocatable = node.get("status", {}).get("allocatable", {})
+            if vendor == AcceleratorVendor.NVIDIA:
+                ready = (labels.get(f"{label_namespace()}/cuda-ready") == "true" and
+                         labels.get(f"{label_namespace()}/cdi-ready") == "true" and
+                         int(allocatable.get("nvidia.com/gpu", "0")) > 0)
+            elif vendor == AcceleratorVendor.AMD:
+                ready = int(allocatable.get("amd.com/gpu", "0")) > 0 or labels.get(f"{label_namespace()}/accelerator") == "amd"
+            elif vendor == AcceleratorVendor.INTEL:
+                ready = int(allocatable.get("intel.com/gpu", "0")) > 0 or labels.get(f"{label_namespace()}/accelerator") == "intel"
+            else:
+                ready = True
+            if ready:
                 break
             if time.monotonic() >= ready_deadline:
                 raise RuntimeError("GPU driver, CDI or device plugin is not ready")
@@ -393,22 +467,22 @@ def run(force=False):
     cached = None
     if not force:
         try:
-            cached = read_record(RESULT_PATH)
+            cached = read_record(res_path)
         except (FileNotFoundError, ValueError):
             pass
-    if (cached is not None and valid_result(cached) and cached["fingerprint"] == fingerprint
+    if (cached is not None and valid_result(cached, model=model_name) and cached["fingerprint"] == fingerprint
             and cached["search_complete"] and cached["reason"] != "insufficient-memory"):
         result = cached
     elif not identity["gpus"]:
-        result = dict(schema=1, model=MODEL, state="complete", fingerprint=fingerprint, identity=identity,
+        result = dict(schema=1, model=model_name, state="complete", fingerprint=fingerprint, identity=identity,
                       completed_at=time.time(), reason="no-gpu", limits=dict(ZERO_LIMITS), trials=[],
                       search_complete=True, incomplete_reasons=[])
     else:
-        result = calibrate(manifest, node, identity, fingerprint)
-    if not valid_result(result):
+        result = calibrate(manifest, node, identity, fingerprint, model_name=model_name, status_file=st_path)
+    if not valid_result(result, model=model_name):
         raise ValueError("Invalid calibration result")
-    atomic_record(RESULT_PATH, result)
-    apply_profile(manifest, result, node)
+    atomic_record(res_path, result)
+    apply_profile(manifest, result, node, model_name, manifest_path)
     limits = result["limits"]
     if not result["search_complete"]:
         reasons = ", ".join(reason.replace("-", " ") for reason in result["incomplete_reasons"])
@@ -419,7 +493,7 @@ def run(force=False):
         message = f"Measured {limits['max_model_len']} context tokens and {limits['max_num_seqs']} simultaneous requests."
     else:
         message = f"Calibration complete with zero limits: {result['reason']}."
-    publish("complete", message, fingerprint)
+    publish("complete", message, fingerprint, status_file=st_path)
     print(message, flush=True)
 
 
@@ -428,23 +502,28 @@ def interrupted(signum, frame):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Measure and apply local Bonsai inference limits")
+    parser = argparse.ArgumentParser(description="Measure and apply local model inference limits")
     parser.add_argument("--force", action="store_true", help="Measure again even if a matching result is cached")
+    parser.add_argument("--model", type=str, default=None, help="Model identifier to calibrate (defaults to active model or bonsai-2-27b)")
+    parser.add_argument("--manifest", type=str, default=None, help="Path to manifest for calibration")
     arguments = parser.parse_args()
     if os.geteuid() != 0:
         raise PermissionError("Calibration requires root")
-    STATUS_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    model_name, src_path, dest_path = resolve_target(arguments.model, arguments.manifest)
+    st_path = status_path(model_name)
+    st_path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
-    with open(STATUS_PATH.parent / "lock", "w") as lock:
+    lock_file = st_path.parent / f"lock-{model_name}" if model_name != MODEL else st_path.parent / "lock"
+    with open(lock_file, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
-            run(force=arguments.force)
+            run(force=arguments.force, model_name=model_name, source_path=src_path, manifest_path=dest_path)
         except CalibrationTimeout as error:
-            publish("error", str(error))
+            publish("error", str(error), status_file=st_path)
             return 75
         except Exception as error:
-            publish("error", str(error))
+            publish("error", str(error), status_file=st_path)
             raise
     subprocess.run([str(Path(__file__).with_name("oksa-plan-vllm-workloads"))], check=True)
 

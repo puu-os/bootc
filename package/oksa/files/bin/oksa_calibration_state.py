@@ -15,6 +15,15 @@ MODEL = "bonsai-2-27b"
 ZERO_LIMITS = dict(max_model_len=0, max_num_seqs=0, max_num_batched_tokens=0,
                    gpu_memory_utilization=0, memory_bytes=0)
 
+def result_path(model=MODEL):
+    return Path(f"/var/lib/puu/calibration/{model}.json")
+
+
+def status_path(model=MODEL):
+    if model == MODEL:
+        return STATUS_PATH
+    return Path(f"/run/puu-calibration/status-{model}.json")
+
 
 def read_record(path):
     info = path.parent.lstat()
@@ -65,8 +74,13 @@ def boot_id():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def valid_result(value):
-    if not isinstance(value, dict) or value.get("schema") != 1 or value.get("model") != MODEL or value.get("state") != "complete":
+def valid_result(value, model=MODEL):
+    if not isinstance(value, dict) or value.get("schema") != 1 or value.get("state") != "complete":
+        return False
+    if model is not None:
+        if value.get("model") != model:
+            return False
+    elif not isinstance(value.get("model"), str) or not value.get("model"):
         return False
     if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("fingerprint", ""))):
         return False
@@ -108,16 +122,16 @@ def valid_result(value):
     if metrics["kv_cache_tokens"] < limits["max_model_len"] * limits["max_num_seqs"]:
         return False
     return (512 <= limits["max_model_len"] <= 262144
-            and 1 <= limits["max_num_seqs"] <= 8
-            and limits["max_num_batched_tokens"] == min(8192, limits["max_model_len"] * limits["max_num_seqs"])
-            and 0.5 <= utilization <= 0.9 and limits["memory_bytes"] > 0
+            and 1 <= limits["max_num_seqs"] <= 32
+            and 512 <= limits["max_num_batched_tokens"] <= 65536
+            and 0.5 <= utilization <= 0.95 and limits["memory_bytes"] > 0
             and bool(identity["gpus"]) and value.get("reason") == "measured")
 
 
-def applied_result():
-    result = read_record(RESULT_PATH)
-    status = read_record(STATUS_PATH)
-    if (not valid_result(result) or status.get("boot_id") != boot_id()
+def applied_result(model=MODEL):
+    result = read_record(result_path(model))
+    status = read_record(status_path(model))
+    if (not valid_result(result, model=model) or status.get("boot_id") != boot_id()
             or status.get("state") != "complete" or status.get("fingerprint") != result["fingerprint"]):
         raise ValueError("Calibration has not been applied during this boot")
     return result
