@@ -269,9 +269,7 @@ def ensure_litellm_auth(manifest_dst: Path) -> str:
     master_key = master_key_from_credential()
     old_key = secret_value(manifest_dst / MASTER_KEY_MANIFEST, "masterkey")
     management_key = master_key or old_key or "sk-" + secrets.token_urlsafe(32)
-    legacy_auth = auth_manifest.is_file() and "name: PUU_LITELLM_MASTER_KEY" in auth_manifest.read_text()
-    legacy_salt = old_key if legacy_auth else "puu-litellm-salt"
-    salt_key = secret_value(manifest_dst / MASTER_KEY_MANIFEST, "saltkey") or legacy_salt or "puu-litellm-salt"
+    salt_key = secret_value(manifest_dst / MASTER_KEY_MANIFEST, "saltkey") or "puu-litellm-salt"
     checksum = hashlib.sha256(json.dumps([management_key, salt_key]).encode()).hexdigest()
     write_secret(manifest_dst, MASTER_KEY_MANIFEST, MASTER_KEY_SECRET_NAME, {"masterkey": management_key, "saltkey": salt_key})
     ms.atomic_write_text(

@@ -39,8 +39,7 @@ CALIBRATED_MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai
 
 def is_calibration_model(name: str) -> bool:
     return isinstance(name, str) and name.lower() in (
-        CALIBRATION_MODEL, f"prism-ml/{CALIBRATION_MODEL}",
-        CALIBRATION_REPO.lower(), CALIBRATION_REPO.rsplit("/", 1)[-1].lower(),
+        CALIBRATION_MODEL, CALIBRATION_REPO.lower(),
     )
 
 
@@ -1429,137 +1428,11 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
     return True, f"Key {key_or_alias} revoked"
 
 
-def _legacy_model_map(state_dir: Path = STATE_DIR) -> dict[str, str]:
-    mapping = {
-        CALIBRATION_MODEL: CALIBRATION_REPO,
-        f"prism-ml/{CALIBRATION_MODEL}": CALIBRATION_REPO,
-        CALIBRATION_REPO.rsplit("/", 1)[-1].lower(): CALIBRATION_REPO,
-    }
-    for internal, _, _ in read_models_list(state_dir / "models.list"):
-        public = public_model_name(internal, state_dir)
-        if public != internal:
-            mapping[internal] = public
-            mapping[internal.lower()] = public
-    return mapping
-
-
-def _map_model_ref(value: str, mapping: dict[str, str]) -> str:
-    return mapping.get(value) or mapping.get(value.lower()) or value
-
-
-def _policy_patch(obj: dict, mapping: dict[str, str]) -> tuple[bool, dict]:
-    patch: dict[str, Any] = {}
-    budget_map = obj.get("model_max_budget")
-    if isinstance(budget_map, dict) and any(
-        isinstance(k, str) and _map_model_ref(k, mapping) != k for k in budget_map
-    ):
-        return False, {}
-    models = obj.get("models")
-    if isinstance(models, list) and models and all(isinstance(m, str) for m in models):
-        migrated = list(dict.fromkeys(_map_model_ref(m, mapping) for m in models))
-        if migrated != models:
-            patch["models"] = migrated
-    aliases = obj.get("aliases")
-    if isinstance(aliases, dict) and aliases:
-        migrated_aliases = {
-            k: (_map_model_ref(v, mapping) if isinstance(v, str) else v)
-            for k, v in aliases.items()
-        }
-        if migrated_aliases != aliases:
-            patch["aliases"] = migrated_aliases
-    metadata = obj.get("metadata")
-    if isinstance(metadata, dict):
-        meta_budget = metadata.get("model_max_budget")
-        if isinstance(meta_budget, dict) and any(
-            isinstance(k, str) and _map_model_ref(k, mapping) != k for k in meta_budget
-        ):
-            return False, {}
-        new_meta = dict(metadata)
-        meta_changed = False
-        for field in ("model_rpm_limit", "model_tpm_limit"):
-            limits = metadata.get(field)
-            if not isinstance(limits, dict) or not limits:
-                continue
-            rekeyed = {}
-            for k, v in limits.items():
-                nk = _map_model_ref(k, mapping) if isinstance(k, str) else k
-                if nk in rekeyed and rekeyed[nk] != v:
-                    return False, {}
-                if nk != k and nk in limits and limits[nk] != v:
-                    return False, {}
-                rekeyed[nk] = v
-            if rekeyed != limits:
-                new_meta[field] = rekeyed
-                meta_changed = True
-        if meta_changed:
-            patch["metadata"] = new_meta
-    return True, patch
-
-
-def migrate_litellm_model_restrictions(
-    state_dir: Path = STATE_DIR,
-    master_key: str | None = None,
-) -> bool:
-    mapping = _legacy_model_map(state_dir)
-    ok, keys = litellm_key_list(master_key=master_key, include_service=True)
-    if not ok or not isinstance(keys, list):
-        return False
-    team_ids: set[str] = set()
-    for key_obj in keys:
-        tid = key_obj.get("team_id")
-        if isinstance(tid, str) and tid:
-            team_ids.add(tid)
-        valid, patch = _policy_patch(key_obj, mapping)
-        if not valid or not patch:
-            continue
-        token = key_obj.get("token") or key_obj.get("key")
-        if not isinstance(token, str) or not token:
-            return False
-        status, _ = litellm_api_call("POST", "/key/update", payload={"key": token, **patch}, master_key=master_key)
-        if status != 200:
-            return False
-    ok, users = litellm_user_list(master_key=master_key)
-    if not ok or not isinstance(users, list):
-        return False
-    for user_obj in users:
-        for tid in user_obj.get("teams") or []:
-            if isinstance(tid, str) and tid:
-                team_ids.add(tid)
-        valid, patch = _policy_patch(user_obj, mapping)
-        if not valid or not patch:
-            continue
-        uid = user_obj.get("user_id")
-        if not isinstance(uid, str) or not uid:
-            return False
-        status, _ = litellm_api_call("POST", "/user/update", payload={"user_id": uid, **patch}, master_key=master_key)
-        if status != 200:
-            return False
-    for tid in sorted(team_ids):
-        status, resp = litellm_api_call(
-            "GET", "/team/info?" + urllib.parse.urlencode({"team_id": tid}), master_key=master_key
-        )
-        if status == 404:
-            continue
-        if status != 200:
-            return False
-        team_obj = resp.get("team_info") if isinstance(resp.get("team_info"), dict) else resp
-        if not isinstance(team_obj, dict):
-            return False
-        valid, patch = _policy_patch(team_obj, mapping)
-        if not valid or not patch:
-            continue
-        status, _ = litellm_api_call("POST", "/team/update", payload={"team_id": tid, **patch}, master_key=master_key)
-        if status != 200:
-            return False
-    return True
-
-
 def sync_litellm_models(
     active_model: str | None,
     state_dir: Path = STATE_DIR,
     master_key: str | None = None,
 ) -> bool:
-    migrate_litellm_model_restrictions(state_dir, master_key=master_key)
     status, resp = litellm_api_call("GET", "/model/info", master_key=master_key)
     if status != 200 or not isinstance(resp.get("data"), list):
         return False
