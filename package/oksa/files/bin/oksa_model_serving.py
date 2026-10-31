@@ -314,7 +314,10 @@ def parse_float(val: Any, default: float = 0.0) -> float:
 
 
 def has_nvidia_hardware() -> bool:
-    has_bin = Path("/usr/libexec/puu/has-nvidia-hardware")
+    from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
+    if AcceleratorDiscovery.primary_vendor() == AcceleratorVendor.NVIDIA:
+        return True
+    has_bin = Path("/usr/libexec/puu/puu-has-nvidia-hardware")
     if has_bin.is_file() and os.access(has_bin, os.X_OK):
         return subprocess.run([str(has_bin)]).returncode == 0
     return False
@@ -1511,51 +1514,8 @@ def sync_litellm_models(
 
 
 def collect_gpu_telemetry() -> list[dict] | None:
-    nvidia_smi = shutil.which("nvidia-smi")
-    if not nvidia_smi:
-        return None
-    try:
-        proc = subprocess.run(
-            [
-                nvidia_smi,
-                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if proc.returncode != 0:
-        return None
-    gpus = []
-    for line in proc.stdout.splitlines():
-        if not line.strip():
-            continue
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) != 7:
-            return None
-        gpu = {}
-        try:
-            gpu["index"] = int(parts[0])
-        except ValueError:
-            pass
-        if parts[1] and parts[1] != "N/A":
-            gpu["name"] = parts[1]
-        for key, raw in zip(
-            ("gpu_util_pct", "memory_used_mib", "memory_total_mib", "temperature_c", "power_w"),
-            parts[2:],
-        ):
-            try:
-                value = float(raw)
-            except ValueError:
-                continue
-            if math.isfinite(value):
-                gpu[key] = value
-        gpus.append(gpu)
-    return gpus
+    from oksa_accelerator import AcceleratorManager
+    return AcceleratorManager.collect_telemetry()
 
 
 def collect_host_memory() -> dict:

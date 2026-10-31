@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oksa_model_serving as ms
+from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
 
 IGNORE_IFACE_PREFIXES = ("lo", "docker", "veth", "cni", "flannel")
 SMI_BIN = Path("/usr/bin/nvidia-smi")
@@ -132,27 +133,33 @@ def apply_uma_memory(probe: GpuProbe) -> None:
 
 def probe_gpus() -> GpuProbe:
     probe = GpuProbe()
+    devices = AcceleratorDiscovery.scan_devices()
+    if not devices:
+        return probe
 
-    if ms.has_nvidia_hardware():
+    vendor = AcceleratorDiscovery.primary_vendor()
+    if vendor == AcceleratorVendor.NVIDIA:
         if not SMI_BIN.is_file() or not os.access(SMI_BIN, os.X_OK):
             sys.exit(f"oksa-label-model-serving-node: NVIDIA hardware found but {SMI_BIN} is missing")
         probe.available = True
-
-    if probe.available:
         probe_gpu_memory(probe)
         res_q = smi("-q")
         if res_q.returncode == 0 and re.search(r"Addressing Mode\s*:\s*(HMM|ATS)", res_q.stdout):
             probe.unified_memory = True
-
-    if probe.available:
         probe_accelerator(probe)
-
-    if probe.available and probe.count > 1:
-        probe_nvlink(probe)
-
-    if probe.accelerator == "gb10":
-        probe.unified_memory = True
-        apply_uma_memory(probe)
+        if probe.count > 1:
+            probe_nvlink(probe)
+        if probe.accelerator == "gb10":
+            probe.unified_memory = True
+            apply_uma_memory(probe)
+    elif vendor == AcceleratorVendor.AMD:
+        probe.available = True
+        probe.count = len(devices)
+        probe.accelerator = "amd"
+    elif vendor == AcceleratorVendor.INTEL:
+        probe.available = True
+        probe.count = len(devices)
+        probe.accelerator = "intel"
 
     return probe
 

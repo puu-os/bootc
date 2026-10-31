@@ -20,7 +20,9 @@ import time
 LOG_LIMIT = 16 * 1024 * 1024
 RESPONSE_LIMIT = 2 * 1024 * 1024
 MEMORY_ERRORS = re.compile(
-    r"CUDA out of memory|torch(?:\.cuda)?\.OutOfMemoryError|"
+    r"CUDA out of memory|HIP out of memory|hipErrorOutOfMemory|"
+    r"torch(?:\.(?:cuda|xpu))?\.OutOfMemoryError|"
+    r"OutOfMemoryError|ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY|"
     r"No available memory for the cache blocks|"
     r"max seq len[^\n]*larger than[^\n]*KV cache|"
     r"Free memory on device[^\n]*less than desired GPU memory utilization", re.IGNORECASE
@@ -28,6 +30,17 @@ MEMORY_ERRORS = re.compile(
 KV_CACHE = re.compile(r"GPU KV cache size:\s*([\d,]+)\s+tokens")
 ESTIMATED_CONTEXT = re.compile(r"estimated maximum model length is\s*([\d,]+)", re.IGNORECASE)
 PREEMPTIONS = re.compile(r'^vllm:num_preemptions_total(\{[^\n]*\})?\s+(\S+)', re.MULTILINE)
+def query_accelerator_memory(torch_mod):
+    if hasattr(torch_mod, "accelerator") and hasattr(torch_mod.accelerator, "memory"):
+        try:
+            return torch_mod.accelerator.memory.get_memory_info()
+        except Exception:
+            pass
+    if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
+        return torch_mod.cuda.mem_get_info()
+    if hasattr(torch_mod, "xpu") and torch_mod.xpu.is_available():
+        return torch_mod.xpu.mem_get_info()
+    return 0, 0
 
 
 class CapacityError(Exception):
@@ -163,7 +176,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
         if available < reserve:
             raise CapacityError("host MemAvailable below reserve")
         try:
-            free, total = torch.cuda.mem_get_info()
+            free, total = query_accelerator_memory(torch)
         except torch.OutOfMemoryError as error:
             raise CapacityError(str(error)) from error
         metrics["peak_gpu_memory_bytes"] = max(metrics["peak_gpu_memory_bytes"], total - free)
