@@ -395,7 +395,7 @@ def hardware_identity(source_path=SOURCE_PATH):
         if len(models) > 1:
             raise RuntimeError("Calibration requires matching local GPUs; mixed-GPU placement is not yet supported")
     elif vendor != AcceleratorVendor.UNKNOWN:
-        devices = AcceleratorDiscovery.scan_devices()
+        devices = AcceleratorDiscovery.primary_devices()
         for dev in devices:
             gpus.append(f"{dev.name or dev.vendor.value}, {dev.pci_id}, {dev.memory_total_bytes}, {dev.driver}")
         if not gpus:
