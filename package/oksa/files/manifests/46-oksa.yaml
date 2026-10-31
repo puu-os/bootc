@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oksa
+  namespace: oksa
+  labels:
+    app.kubernetes.io/name: oksa
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oksa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oksa
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: oksa
+          image: quay.io/puu/oksa:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8088
+          env:
+            - name: DBUS_SYSTEM_BUS_ADDRESS
+              value: "unix:path=/run/puu/oksa-proxy/bus"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: dbus-proxy
+              mountPath: /run/puu/oksa-proxy
+      volumes:
+        - name: dbus-proxy
+          hostPath:
+            path: /run/puu/oksa-proxy
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oksa
+  namespace: oksa
+  labels:
+    app.kubernetes.io/name: oksa
+spec:
+  selector:
+    app.kubernetes.io/name: oksa
+  ports:
+    - name: http
+      port: 8088
+      targetPort: http

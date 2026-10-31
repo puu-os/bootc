@@ -1,0 +1,9 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+from oksa_dbus import OksaDaemon
+
+
+if __name__ == "__main__":
+    OksaDaemon.main()

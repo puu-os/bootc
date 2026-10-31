@@ -16,7 +16,11 @@ OKSA_LICENSE = GPL-2.0+ (native files), Apache-2.0 (CRDs)
 OKSA_LICENSE_FILES = LICENSE LICENSE.Apache-2.0
 OKSA_SETUP_TYPE = hatch
 OKSA_SUBDIR = native
-OKSA_DEPENDENCIES = k3s python-nicegui
+OKSA_DEPENDENCIES = dbus k3s python-gobject python-nicegui xdg-dbus-proxy
+
+define OKSA_USERS
+	oksa -1 oksa -1 * /var/empty /sbin/nologin - OKSA dashboard
+endef
 
 OKSA_FILES = $(OKSA_PKGDIR)/files
 ifeq ($(BR2_aarch64),y)
@@ -48,13 +52,15 @@ define OKSA_INSTALL_ASSETS
 	done
 	chmod 0644 $(TARGET_DIR)/usr/libexec/puu/oksa_*.py
 	chmod 0755 $(TARGET_DIR)/usr/libexec/puu/oksa-init-litellm-db
-	$(INSTALL) -D -m 0755 $(TARGET_DIR)/usr/libexec/puu/oksa-web \
-		$(TARGET_DIR)/usr/bin/oksa-web
+	$(INSTALL) -D -m 0644 $(OKSA_FILES)/dbus/org.puu.Oksa.conf \
+		$(TARGET_DIR)/usr/share/dbus-1/system.d/org.puu.Oksa.conf
+	$(INSTALL) -D -m 0644 $(OKSA_FILES)/dbus/org.puu.Oksa.service \
+		$(TARGET_DIR)/usr/share/dbus-1/system-services/org.puu.Oksa.service
 	$(INSTALL) -D -m 0644 $(OKSA_FILES)/oksa.conf \
 		$(TARGET_DIR)/usr/lib/tmpfiles.d/oksa-services.conf
 	$(foreach manifest,20-agentgateway.yaml 21-llm-d-gateway.yaml \
 		30-llm-d.yaml 30-nvidia-cdi-runtime.yaml 32-nvidia-device-plugin.yaml \
-		40-litellm.yaml 45-open-webui.yaml,\
+		40-litellm.yaml 45-open-webui.yaml 46-oksa.yaml,\
 		$(INSTALL) -D -m 0644 $(OKSA_FILES)/manifests/$(manifest) \
 			$(TARGET_DIR)/usr/share/puu/k3s/manifests/$(manifest)$(sep))
 	$(INSTALL) -D -m 0644 $(OKSA_FILES)/manifests/$(OKSA_BONSAI_MANIFEST_DIR)33-bonsai-2-27b.yaml \
@@ -71,7 +77,7 @@ define OKSA_INSTALL_INIT_SYSTEMD
 		puu-model-serving-labeler.timer puu-vllm-planner.service \
 		puu-vllm-planner.timer puu-vllm-preseed.service \
 		puu-postgresql.service puu-bonsai-calibration.service \
-		puu-oksa-web.service; do \
+		puu-oksa.service puu-oksa-proxy.service; do \
 		$(INSTALL) -D -m 0644 $(OKSA_FILES)/systemd/$$unit \
 			$(TARGET_DIR)/usr/lib/systemd/system/$$unit || exit $$?; \
 	done; \

@@ -1,0 +1,32 @@
+[Unit]
+Description=Puu OKSA D-Bus Proxy for K3s
+Requires=dbus.service puu-oksa.service
+After=dbus.service puu-oksa.service
+ConditionKernelCommandLine=!puu.live
+
+[Service]
+Type=simple
+User=oksa
+Group=oksa
+ExecStart=/usr/bin/xdg-dbus-proxy unix:path=/run/dbus/system_bus_socket /run/puu/oksa-proxy/bus --filter --talk=org.puu.Oksa
+Restart=always
+RestartSec=3s
+UMask=0000
+RuntimeDirectory=puu/oksa-proxy
+RuntimeDirectoryMode=0755
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
