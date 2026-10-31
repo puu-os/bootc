@@ -332,12 +332,12 @@ def model_id(name: str) -> str:
 
 def label_namespace() -> str:
     hostname = socket.getfqdn().lower().rstrip(".")
-    if (len(hostname) > 253 or "." not in hostname
-            or hostname == "localhost.localdomain" or hostname.endswith(".localhost")
+    if (len(hostname) > 253 or hostname in ("localhost", "localhost.localdomain")
+            or hostname.endswith(".localhost")
             or hostname.replace(".", "").isdigit()
             or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part)
                    for part in hostname.split("."))):
-        raise ValueError(f"NSS did not provide a valid fully qualified hostname: {hostname!r}")
+        raise ValueError(f"NSS did not provide a valid hostname for Kubernetes labels: {hostname!r}")
     return hostname
 
 
