@@ -8,8 +8,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
+import shlex
+import stat as statmod
 import subprocess
 import sys
 import urllib.error
@@ -21,6 +24,7 @@ for directory in (Path(__file__).resolve().parent, libexec_dir):
     if directory.is_dir() and str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 import oksa_model_serving as ms
+from oksa_calibration_state import STATUS_PATH
 
 
 def resolve_helper(name: str) -> Path:
@@ -37,10 +41,8 @@ def notify_discovery_and_planner() -> None:
     if os.geteuid() == 0:
         discover_bin = resolve_helper("oksa-discover-vllm-models")
         if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
-            subprocess.run([str(discover_bin)], check=False)
-        planner_bin = resolve_helper("oksa-plan-vllm-workloads")
-        if planner_bin.is_file() and os.access(planner_bin, os.X_OK):
-            subprocess.run([str(planner_bin)], check=False)
+            subprocess.run([str(discover_bin)], check=True)
+        subprocess.run(["systemctl", "start", "--no-block", "puu-vllm-planner.service"], check=True)
 
 
 def download_with_cli(repo_id: str, revision: str, dest_dir: Path) -> bool:
@@ -153,22 +155,77 @@ def preseed_locked(
     hf_meta: dict | None = None,
 ) -> bool:
     dest_dir = models_dir / model_name
+    architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
+    serving_env = ms.generate_serving_env_text(hf_meta, dest_dir) if hf_meta is not None else ""
+    catalog_dir = Path(os.environ.get("PUU_VLLM_MODEL_CATALOG_DIR", "/usr/share/puu/vllm/catalog.d"))
+    runtime_files = {path.absolute() for path in catalog_dir.glob("*.env")}
+    if catalog_file is not None:
+        catalog_file = catalog_file.absolute()
+        runtime_files.add(catalog_file)
+    matched_runtime = False
+    matched_catalog = catalog_file is None
+    for runtime_file in sorted(runtime_files):
+        try:
+            chain = [parent.lstat() for parent in runtime_file.parents]
+            if any(info.st_uid != 0 or info.st_mode & 0o022 or not statmod.S_ISDIR(info.st_mode) for info in chain):
+                raise ValueError("metadata ancestry is not root-owned and protected")
+            with os.fdopen(os.open(runtime_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), encoding="utf-8") as stream:
+                info = os.fstat(stream.fileno())
+                if info.st_uid != 0 or info.st_mode & 0o022 or not statmod.S_ISREG(info.st_mode):
+                    raise ValueError("metadata is not a root-owned protected regular file")
+                runtime_meta = {}
+                for raw_line in stream:
+                    line = raw_line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, _, value = line.partition("=")
+                        runtime_meta[key.strip()] = " ".join(shlex.split(value))
+        except (OSError, ValueError) as exc:
+            print(f"Ignoring untrusted model catalog {runtime_file}: {exc}", file=sys.stderr)
+            if runtime_file == catalog_file:
+                return False
+            continue
+        if (runtime_meta.get("PUU_VLLM_REPO_ID") != repo_id
+                or (runtime_meta.get("PUU_VLLM_REVISION", "main") or "main") != revision
+                or (runtime_file != catalog_file and not re.fullmatch(r"[0-9a-f]{40}", revision))):
+            continue
+        if matched_runtime:
+            raise ValueError(f"duplicate runtime catalog identity: {(repo_id, revision)}")
+        matched_runtime = True
+        profiles = json.loads(runtime_meta.pop("PUU_VLLM_RUNTIME_PROFILES", "{}"))
+        runtime_meta.update(profiles.get(architecture, {}))
+        if runtime_file == catalog_file:
+            matched_catalog = True
+        else:
+            for key in ("PUU_VLLM_MODEL_NAME", "PUU_VLLM_MODEL_PATH", "PUU_VLLM_AUTOSTART"):
+                runtime_meta.pop(key, None)
+        serving_env += "\n" + "\n".join(f"{key}={shlex.quote(value)}" for key, value in runtime_meta.items()) + "\n"
+    if not matched_catalog:
+        print(f"error: catalog identity does not match {(repo_id, revision)}", file=sys.stderr)
+        return False
+    serving_env += f"\nPUU_VLLM_REVISION={shlex.quote(revision)}\n"
     backup_dir = models_dir.parent / f".{model_name}.previous"
+    gpu_lock_path = STATUS_PATH.parent / "lock"
     if backup_dir.exists():
-        with ms.preseed_publish_lock(models_dir, exclusive=True):
-            if dest_dir.exists():
-                shutil.rmtree(backup_dir)
-            else:
-                backup_dir.rename(dest_dir)
+        if dest_dir.exists():
+            shutil.rmtree(backup_dir)
+        else:
+            gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with gpu_lock_path.open("a") as gpu_lock:
+                fcntl.flock(gpu_lock, fcntl.LOCK_EX)
+                with ms.preseed_publish_lock(models_dir, exclusive=True):
+                    backup_dir.rename(dest_dir)
     if ms.verified_preseed(dest_dir, repo_id, revision):
-        if catalog_file is not None:
-            shutil.copyfile(catalog_file, dest_dir / "puu-serving.env")
-        elif hf_meta is not None:
-            ms.atomic_write_text(dest_dir / "puu-serving.env", ms.generate_serving_env_text(hf_meta, dest_dir))
+        gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with gpu_lock_path.open("a") as gpu_lock:
+            fcntl.flock(gpu_lock, fcntl.LOCK_EX)
+            with ms.preseed_publish_lock(models_dir, exclusive=True):
+                ms.atomic_write_text(dest_dir / "puu-serving.env", serving_env)
         print(f"Model {model_name} already present at {dest_dir}")
         return True
 
     files = hf_meta["files"] if hf_meta and "files" in hf_meta else model_files(repo_id, revision)
+    if files is not None:
+        files = [info for info in files if info["path"] not in ("puu-serving.env", ms.PRESEED_MANIFEST)]
     if files is None:
         return False
     manifest = {"repo_id": repo_id, "revision": revision, "files": files}
@@ -193,21 +250,21 @@ def preseed_locked(
         relative = path.relative_to(stage_dir)
         if path.is_file() and not relative.parts[0].startswith(".") and relative.as_posix() not in expected:
             path.unlink()
-    if catalog_file is not None:
-        shutil.copyfile(catalog_file, stage_dir / "puu-serving.env")
-    elif hf_meta is not None:
-        ms.atomic_write_text(stage_dir / "puu-serving.env", ms.generate_serving_env_text(hf_meta, dest_dir))
+    ms.atomic_write_text(stage_dir / "puu-serving.env", serving_env)
     write_manifest(stage_dir, manifest)
-    with ms.preseed_publish_lock(models_dir, exclusive=True):
-        try:
-            if dest_dir.exists():
-                dest_dir.rename(backup_dir)
-            stage_dir.rename(dest_dir)
-        except OSError as exc:
-            if backup_dir.exists() and not dest_dir.exists():
-                backup_dir.rename(dest_dir)
-            print(f"error: failed to publish {model_name}: {exc}", file=sys.stderr)
-            return False
+    gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with gpu_lock_path.open("a") as gpu_lock:
+        fcntl.flock(gpu_lock, fcntl.LOCK_EX)
+        with ms.preseed_publish_lock(models_dir, exclusive=True):
+            try:
+                if dest_dir.exists():
+                    dest_dir.rename(backup_dir)
+                stage_dir.rename(dest_dir)
+            except OSError as exc:
+                if backup_dir.exists() and not dest_dir.exists():
+                    backup_dir.rename(dest_dir)
+                print(f"error: failed to publish {model_name}: {exc}", file=sys.stderr)
+                return False
     if backup_dir.exists():
         shutil.rmtree(backup_dir)
     print(f"Successfully pre-seeded {model_name}")
@@ -237,6 +294,7 @@ def preseed_target(
             print(f"error: failed to inspect Hugging Face repository {repo_id}", file=sys.stderr)
             return False
         estimated_mib = hf_meta.get("estimated_memory_mib", 0)
+        revision = hf_meta.get("resolved_revision", revision)
 
     if estimated_mib > 0:
         fits, reason = ms.check_model_capacity(estimated_mib)
@@ -307,8 +365,9 @@ def main() -> None:
                 else:
                     notify_discovery_and_planner()
             elif "/" in item:
-                name = args.name or item.split("/")[-1].lower()
-                name = re.sub(r"[^a-z0-9._-]+", "-", name).strip("-")
+                name = ms.normalize_storage_id(item, args.name)
+                if not name:
+                    sys.exit("error: invalid model storage ID")
                 if not preseed_target(models_dir, name, item, args.revision, force=args.force):
                     success = False
                 else:

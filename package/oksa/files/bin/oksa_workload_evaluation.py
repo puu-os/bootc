@@ -15,22 +15,14 @@ from oksa_model_serving import label_namespace
 
 
 @dataclasses.dataclass(frozen=True)
-class ModelSnapshot:
-    spec: ModelSpec
-    path_exists: bool
-    model_label: str
-    public_name: str
-    path_error: OSError | ValueError | None = None
-
-
-@dataclasses.dataclass(frozen=True)
 class CalibrationSnapshot:
     applied_max_sequences: int | None = None
-    replicas: int = 1
     error: str = ""
     gpu_memory_utilization: float | None = None
     max_context: int | None = None
     max_sequences: int | None = None
+    max_num_batched_tokens: int = 8192
+    memory_bytes: int = 0
 
     @property
     def pending(self) -> bool:
@@ -42,12 +34,20 @@ class CalibrationSnapshot:
 
 
 @dataclasses.dataclass(frozen=True)
+class ModelSnapshot:
+    spec: ModelSpec
+    path_exists: bool
+    model_label: str
+    public_name: str
+    calibration: CalibrationSnapshot = dataclasses.field(default_factory=CalibrationSnapshot)
+    path_error: OSError | ValueError | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class WorkloadSnapshot:
     models: tuple[ModelSnapshot, ...]
     node: NodeCapacity
     models_dir: Path
-    calibration_model: str
-    calibration: CalibrationSnapshot
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,17 +63,18 @@ class PlannedWorkload:
     app_name: str
     model_label: str
     model_node_label: str
+    max_num_batched_tokens: int = 8192
+    memory_bytes: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
 class WorkloadEvaluation:
     plan: PlannedWorkload | None = None
-    calibrated_active: bool = False
     reasons: tuple[str, ...] = ()
 
     @property
     def capable(self) -> bool:
-        return self.plan is not None or self.calibrated_active
+        return self.plan is not None
 
 
 class PlanError(Exception):
@@ -84,21 +85,12 @@ class PlanError(Exception):
 class WorkloadEvaluator:
     snapshot: WorkloadSnapshot
 
-    def evaluate(self, selected_model: str = "", disabled: bool = False) -> WorkloadEvaluation:
-        calibration = self.snapshot.calibration
+    def evaluate(
+        self, selected_model: str = "", disabled: bool = False, require_calibration: bool = True,
+    ) -> WorkloadEvaluation:
         reasons = []
-        if calibration.pending and selected_model == self.snapshot.calibration_model:
-            reasons.append(f"cannot start calibrated Bonsai: {calibration.error}")
         if disabled:
-            return WorkloadEvaluation(reasons=tuple(reasons))
-        if selected_model == self.snapshot.calibration_model:
-            if not calibration.positive:
-                reasons.append("Bonsai requires a positive calibration applied during this boot")
-            return WorkloadEvaluation(calibrated_active=calibration.positive, reasons=tuple(reasons))
-        if not selected_model and (calibration.pending or calibration.positive):
-            return WorkloadEvaluation(calibrated_active=calibration.positive and calibration.replicas > 0)
-        if calibration.pending:
-            return WorkloadEvaluation(reasons=("waiting for a valid calibration before switching workloads",))
+            return WorkloadEvaluation()
         if selected_model:
             matching = [model for model in self.snapshot.models if model.spec.name == selected_model]
             if not matching:
@@ -106,13 +98,13 @@ class WorkloadEvaluator:
             candidates = matching[:1]
         else:
             candidates = sorted(
-                (model for model in self.snapshot.models
-                 if model.spec.name != self.snapshot.calibration_model and model.spec.autostart),
+                (model for model in self.snapshot.models if model.spec.autostart),
                 key=lambda model: -model.spec.autostart_priority,
             )
         for model in candidates:
             try:
-                plan = self.plan_workload(model, manual_selection=bool(selected_model))
+                plan = self.plan_workload(model, manual_selection=bool(selected_model),
+                                          require_calibration=require_calibration)
             except PlanError as err:
                 reasons.append(f"skipping {model.spec.name}: {err}")
             else:
@@ -143,6 +135,7 @@ class WorkloadEvaluator:
         model: ModelSnapshot,
         shared_reserved_mib: int = 0,
         manual_selection: bool = False,
+        require_calibration: bool = True,
     ) -> PlannedWorkload:
         spec = dataclasses.replace(model.spec)
         node = self.snapshot.node
@@ -155,25 +148,32 @@ class WorkloadEvaluator:
         app_name = f"puu-vllm-{model_label}"
         model_node_label = f"{label_namespace()}/vllm-model-{model_label}"
         gpu_memory_utilization = f"{spec.gpu_memory_utilization:.2f}"
-        calibration = self.snapshot.calibration
-        if calibration.gpu_memory_utilization is not None:
-            gpu_memory_utilization = f"{calibration.gpu_memory_utilization:.2f}"
-        if calibration.max_context is not None and calibration.max_context < spec.max_context:
-            spec = dataclasses.replace(spec, max_context=calibration.max_context)
-        if calibration.max_sequences is not None and calibration.max_sequences < spec.max_concurrent_sequences:
-            spec = dataclasses.replace(spec, max_concurrent_sequences=calibration.max_sequences)
+        calibration = model.calibration
+        if require_calibration and not calibration.positive:
+            raise PlanError(f"calibration required: {calibration.error or 'no positive measured limits'}")
+        if require_calibration:
+            if calibration.max_context is not None:
+                spec = dataclasses.replace(spec, max_context=calibration.max_context)
+            if calibration.max_sequences is not None:
+                spec = dataclasses.replace(spec, max_concurrent_sequences=calibration.max_sequences)
         resource_gpus = 0
         replicas = 1
         assigned_gpu_devices = ""
         interconnect_selector = "none"
 
-        if not spec.path.startswith(f"{models_dir}/"):
-            raise PlanError(f"model path {spec.path} is not under {models_dir}")
+        try:
+            cached_root = spec.cached_model_root
+            local_path = Path(spec.path).resolve()
+            local_root = models_dir.resolve()
+        except (OSError, ValueError, RuntimeError) as err:
+            raise PlanError(f"invalid model path {spec.path}: {err}") from err
+        if cached_root is None and (local_path == local_root or not local_path.is_relative_to(local_root)):
+            raise PlanError(f"model path {spec.path} is not under {models_dir} or a validated HF snapshot")
         if model.path_error is not None:
             raise model.path_error
         if not model.path_exists:
             raise PlanError(f"model path {spec.path} is missing")
-        if spec.same_path_required and spec.path != str(models_dir / spec.name):
+        if spec.same_path_required and cached_root is None and spec.path != str(models_dir / spec.name):
             raise PlanError("model path must be identical on participants")
         if node.gpu_count <= 0 or not node.cuda_ready or not node.cdi_ready:
             raise PlanError("CUDA/CDI GPU capacity is not ready")
@@ -227,6 +227,8 @@ class WorkloadEvaluator:
                 raise PlanError("neither topology NVLink nor fast NIC is available for topology-parallel serving")
             resource_gpus = parallel_gpus
 
+        if require_calibration and calibration.gpu_memory_utilization is not None:
+            gpu_memory_utilization = f"{calibration.gpu_memory_utilization:.2f}"
         return PlannedWorkload(
             spec=spec,
             serving_mode=serving_mode,
@@ -239,4 +241,6 @@ class WorkloadEvaluator:
             app_name=app_name,
             model_label=model_label,
             model_node_label=model_node_label,
+            max_num_batched_tokens=calibration.max_num_batched_tokens if require_calibration else 8192,
+            memory_bytes=calibration.memory_bytes if require_calibration else 0,
         )

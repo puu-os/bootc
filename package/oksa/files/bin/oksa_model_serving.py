@@ -3,7 +3,6 @@
 # Copyright (C) Opinsys Oy 2026
 
 from contextlib import contextmanager
-import copy
 import dataclasses
 import fcntl
 import hashlib
@@ -16,6 +15,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -30,17 +30,7 @@ if TYPE_CHECKING:
 STATE_DIR = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 MODELS_DIR = Path(os.environ.get("PUU_VLLM_MODELS_DIR", "/var/lib/vllm/models"))
 PRESEED_MANIFEST = ".puu-preseed.json"
-CALIBRATION_RESULT_PATH = Path(os.environ.get("PUU_CALIBRATION_FILE", "/var/lib/puu/calibration/bonsai-2-27b.json"))
 OKSA_NAMESPACE = "oksa"
-CALIBRATION_MODEL = "bonsai-2-27b"
-CALIBRATION_REPO = "fraserprice/Ternary-Bonsai-2-27B-vllm"
-CALIBRATED_MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai-2-27b.yaml")
-
-
-def is_calibration_model(name: str) -> bool:
-    return isinstance(name, str) and name.lower() in (
-        CALIBRATION_MODEL, CALIBRATION_REPO.lower(),
-    )
 
 
 def normalize_storage_id(repo_id: str, name: str | None = None) -> str:
@@ -50,11 +40,9 @@ def normalize_storage_id(repo_id: str, name: str | None = None) -> str:
 
 
 def public_model_name(name: str, state_dir: Path = STATE_DIR) -> str:
-    if is_calibration_model(name):
-        return CALIBRATION_REPO
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
         return name
-    return parse_env_file(state_dir / "models.d" / f"{name}.env").get("PUU_VLLM_REPO_ID") or name
+    return ModelSpec.read_metadata(state_dir / "models.d" / f"{name}.env").get("PUU_VLLM_REPO_ID") or name
 
 
 class InvalidModelSelection(ValueError):
@@ -66,8 +54,6 @@ def resolve_model_name(
 ) -> str:
     if not isinstance(name, str) or not name:
         raise InvalidModelSelection("Model name must be a non-empty string")
-    if is_calibration_model(name):
-        return CALIBRATION_MODEL
     if catalogue is None:
         catalogue = tuple((internal, public_model_name(internal, state_dir))
                           for internal, _, _ in read_models_list(state_dir / "models.list"))
@@ -75,40 +61,6 @@ def resolve_model_name(
     if len(matches) != 1:
         raise InvalidModelSelection(f"Unknown or ambiguous model: {name}")
     return matches[0]
-
-
-def calibration_model_info(capable: bool | None = None) -> dict:
-    from oksa_calibration_state import applied_result
-
-    if capable is None:
-        try:
-            capable = applied_result()["limits"]["max_num_seqs"] > 0
-        except (OSError, ValueError):
-            capable = False
-    proc = run_kubectl("get", "deployment", CALIBRATION_MODEL, "-n", OKSA_NAMESPACE,
-                       "--ignore-not-found", "--request-timeout=5s", "-o", "json", check=False)
-    deployment = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else {}
-    containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
-    repo_id = CALIBRATION_REPO
-    if containers:
-        command = containers[0].get("command", []) + containers[0].get("args", [])
-        if "serve" in command and command.index("serve") + 1 < len(command):
-            repo_id = command[command.index("serve") + 1]
-    cache = Path("/var/lib/huggingface/hub") / ("models--" + repo_id.replace("/", "--")) / "blobs"
-    storage = sum(path.stat().st_size for path in cache.glob("*")
-                  if path.is_file() and not path.name.endswith(".incomplete"))
-    status = deployment.get("status", {})
-    return {
-        "name": repo_id,
-        "id": CALIBRATION_MODEL,
-        "repo_id": repo_id,
-        "storage_mib": storage // (1024 * 1024),
-        "quantization": "ternary",
-        "capabilities": "ok" if capable else "insufficient",
-        "active": (status.get("readyReplicas", 0) > 0
-                   and status.get("observedGeneration") == deployment.get("metadata", {}).get("generation")),
-        "removable": False,
-    }
 
 
 def resolve_helper(name: str) -> Path:
@@ -139,7 +91,7 @@ def check_capabilities(planner_bin: Path, model_name: str) -> bool:
     try:
         state = WorkloadState.load()
         selected_model = state.resolve_model_name(model_name)
-        return WorkloadEvaluator(state.snapshot).evaluate(selected_model).capable
+        return WorkloadEvaluator(state.snapshot).evaluate(selected_model, require_calibration=False).capable
     except (OSError, ValueError):
         return False
 
@@ -177,18 +129,13 @@ def collect_models_list(
         except (OSError, ValueError):
             pass
 
-    builtin = calibration_model_info(state.calibration_positive)
-    builtin["selected"] = is_calibration_model(selected_model) or (not selected_model and serving_enabled)
-    models = [builtin]
-    if builtin["active"]:
-        active_model = CALIBRATION_MODEL
+    models = []
     for name, public_name in state.catalogue:
-        if is_calibration_model(name):
-            continue
         meta = meta_map.get(name, {})
         try:
             resolved_name = state.resolve_model_name(name)
-            capable = planner_available and evaluator is not None and evaluator.evaluate(resolved_name).capable
+            capable = (planner_available and evaluator is not None
+                       and evaluator.evaluate(resolved_name, require_calibration=False).capable)
         except (OSError, ValueError):
             capable = False
         models.append({
@@ -501,12 +448,15 @@ class ModelSpec:
     name: str = ""
     path: str = ""
     repo_id: str = ""
+    runtime_image: str = "vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+    revision: str = ""
+    runtime_command: tuple[str, ...] = ("vllm",)
+    kv_cache_dtype: str = ""
     estimated_memory_mib: int = 0
     storage_mib: int = 0
     max_context: int = 4096
     serving_mode: str = "shared-gpu"
-    max_concurrent_sequences: int = 8
-    max_queued_requests: int = 32
+    max_concurrent_sequences: int = 32
     gpu_memory_utilization: float = 0.70
     sharing_policy: str = "allow"
     gpu_memory_budget_mib: int = 0
@@ -527,7 +477,51 @@ class ModelSpec:
     extra_args: str = ""
     license: str = ""
     gated: bool = False
-    overload_status_code: int = 429
+    metadata_sources: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", self.runtime_image):
+            raise ValueError("Runtime image must be pinned by SHA-256 digest")
+        if self.revision and not re.fullmatch(r"[0-9a-f]{40}", self.revision):
+            raise ValueError("Model revision must be an immutable commit SHA")
+        for source in self.metadata_sources:
+            path = Path(source)
+            if not path.is_absolute() or not path.is_file():
+                raise ValueError(f"Model metadata source is unavailable: {source}")
+            self.read_metadata(path)
+
+    @classmethod
+    def hf_cache_dir(cls) -> Path:
+        return Path(os.environ.get("HF_HUB_CACHE") or (
+            Path(os.environ.get("HF_HOME") or "/var/lib/huggingface") / "hub"
+        )).expanduser().resolve()
+
+    @property
+    def cached_model_root(self) -> Path | None:
+        if (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)?", self.repo_id)
+                or not re.fullmatch(r"[0-9a-f]{40}", self.revision)):
+            return None
+        root = self.hf_cache_dir() / ("models--" + self.repo_id.replace("/", "--"))
+        snapshot = root / "snapshots" / self.revision
+        blobs = root / "blobs"
+        if (self.path != str(snapshot) or snapshot.resolve() != snapshot or blobs.resolve() != blobs
+                or not snapshot.is_dir() or not blobs.is_dir()):
+            return None
+        return root
+
+    @classmethod
+    def read_metadata(cls, path: Path) -> Dict[str, str]:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return {}
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise PermissionError(f"Unsafe model metadata: {path}")
+        for parent in path.absolute().parents:
+            info = parent.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise PermissionError(f"Unsafe model metadata directory: {parent}")
+        return parse_env_file(path)
 
     @classmethod
     def from_env(
@@ -562,19 +556,30 @@ class ModelSpec:
             tensor_parallel_size = 1
             pipeline_parallel_size = 1
 
+        runtime_command = json.loads(meta.get("PUU_VLLM_RUNTIME_COMMAND", json.dumps(d.runtime_command)))
+        if (not isinstance(runtime_command, list) or not runtime_command or not runtime_command[0]
+                or any(not isinstance(arg, str) or "\x00" in arg for arg in runtime_command)):
+            raise ValueError("PUU_VLLM_RUNTIME_COMMAND must be a nonempty JSON argv")
+        metadata_sources = json.loads(meta.get("PUU_VLLM_METADATA_SOURCES", "[]"))
+        if (not isinstance(metadata_sources, list)
+                or any(not isinstance(source, str) or not source or "\x00" in source for source in metadata_sources)):
+            raise ValueError("PUU_VLLM_METADATA_SOURCES must be a JSON array of paths")
+
         return cls(
             name=name or meta.get("PUU_VLLM_MODEL_NAME", d.name),
             path=path or meta.get("PUU_VLLM_MODEL_PATH", d.path),
             repo_id=meta.get("PUU_VLLM_REPO_ID", d.repo_id),
+            runtime_image=meta.get("PUU_VLLM_IMAGE", d.runtime_image),
+            revision=meta.get("PUU_VLLM_REVISION", d.revision),
+            runtime_command=tuple(runtime_command),
+            kv_cache_dtype=meta.get("PUU_VLLM_KV_CACHE_DTYPE", d.kv_cache_dtype),
+            metadata_sources=tuple(metadata_sources),
             estimated_memory_mib=estimated,
             storage_mib=parse_int(meta.get("PUU_VLLM_STORAGE_MIB"), estimated_default),
             max_context=parse_int(meta.get("PUU_VLLM_MAX_CONTEXT"), d.max_context),
             serving_mode=serving_mode,
             max_concurrent_sequences=parse_int(
                 meta.get("PUU_VLLM_MAX_CONCURRENT_SEQUENCES"), d.max_concurrent_sequences
-            ),
-            max_queued_requests=parse_int(
-                meta.get("PUU_VLLM_MAX_QUEUED_REQUESTS"), d.max_queued_requests
             ),
             gpu_memory_utilization=parse_float(
                 meta.get("PUU_VLLM_GPU_MEMORY_UTILIZATION"), d.gpu_memory_utilization
@@ -614,9 +619,6 @@ class ModelSpec:
             extra_args=meta.get("PUU_VLLM_EXTRA_ARGS", d.extra_args),
             license=meta.get("PUU_VLLM_LICENSE", d.license),
             gated=parse_bool(meta.get("PUU_VLLM_GATED"), d.gated),
-            overload_status_code=parse_int(
-                meta.get("PUU_VLLM_OVERLOAD_STATUS_CODE"), d.overload_status_code
-            ),
         )
 
     def to_env_text(self) -> str:
@@ -624,12 +626,16 @@ class ModelSpec:
             f"PUU_VLLM_MODEL_NAME={shlex.quote(self.name)}",
             f"PUU_VLLM_MODEL_PATH={shlex.quote(self.path)}",
             f"PUU_VLLM_REPO_ID={shlex.quote(self.repo_id)}",
+            f"PUU_VLLM_IMAGE={shlex.quote(self.runtime_image)}",
+            f"PUU_VLLM_REVISION={shlex.quote(self.revision)}",
+            f"PUU_VLLM_RUNTIME_COMMAND={shlex.quote(json.dumps(self.runtime_command))}",
+            f"PUU_VLLM_METADATA_SOURCES={shlex.quote(json.dumps(self.metadata_sources))}",
+            f"PUU_VLLM_KV_CACHE_DTYPE={shlex.quote(self.kv_cache_dtype)}",
             f"PUU_VLLM_ESTIMATED_MEMORY_MIB={self.estimated_memory_mib}",
             f"PUU_VLLM_STORAGE_MIB={self.storage_mib}",
             f"PUU_VLLM_MAX_CONTEXT={self.max_context}",
             f"PUU_VLLM_SERVING_MODE={self.serving_mode}",
             f"PUU_VLLM_MAX_CONCURRENT_SEQUENCES={self.max_concurrent_sequences}",
-            f"PUU_VLLM_MAX_QUEUED_REQUESTS={self.max_queued_requests}",
             f"PUU_VLLM_GPU_MEMORY_UTILIZATION={self.gpu_memory_utilization:.2f}",
             f"PUU_VLLM_SHARING_POLICY={self.sharing_policy}",
             f"PUU_VLLM_GPU_MEMORY_BUDGET_MIB={self.gpu_memory_budget_mib}",
@@ -650,7 +656,6 @@ class ModelSpec:
             f"PUU_VLLM_EXTRA_ARGS={shlex.quote(self.extra_args)}",
             f"PUU_VLLM_LICENSE={shlex.quote(self.license)}",
             f"PUU_VLLM_GATED={bool_str(self.gated)}",
-            f"PUU_VLLM_OVERLOAD_STATUS_CODE={self.overload_status_code}",
         ]
         return "\n".join(lines) + "\n"
 
@@ -663,15 +668,18 @@ class ModelSpec:
             "max_context": self.max_context,
             "serving_mode": self.serving_mode,
             "max_concurrent_sequences": self.max_concurrent_sequences,
-            "max_queued_requests": self.max_queued_requests,
             "gpu_memory_utilization": self.gpu_memory_utilization,
             "sharing_policy": self.sharing_policy,
             "gpu_memory_budget_mib": self.gpu_memory_budget_mib,
             "max_replicas": self.max_replicas,
             "tensor_parallel_size": self.tensor_parallel_size,
             "pipeline_parallel_size": self.pipeline_parallel_size,
-            "overload_status_code": self.overload_status_code,
             "repo_id": self.repo_id,
+            "runtime_image": self.runtime_image,
+            "revision": self.revision,
+            "runtime_command": list(self.runtime_command),
+            "metadata_sources": list(self.metadata_sources),
+            "kv_cache_dtype": self.kv_cache_dtype,
             "storage_mib": self.storage_mib,
             "autostart": self.autostart,
             "autostart_priority": self.autostart_priority,
@@ -727,40 +735,8 @@ class NodeCapacity:
 
 
 @dataclasses.dataclass(frozen=True)
-class CalibratedWorkload:
-    manifest: dict
-    deployment_index: int
-
-    @classmethod
-    def load(cls) -> "CalibratedWorkload":
-        manifest = json.loads(CALIBRATED_MANIFEST_PATH.read_text())
-        if not isinstance(manifest, dict) or manifest.get("kind") != "List" or not isinstance(manifest.get("items"), list):
-            raise ValueError("Expected calibrated Bonsai manifest List")
-        deployments = [
-            index for index, item in enumerate(manifest["items"])
-            if isinstance(item, dict) and item.get("kind") == "Deployment"
-            and isinstance(item.get("metadata"), dict)
-            and item["metadata"].get("name") == CALIBRATION_MODEL
-        ]
-        if len(deployments) != 1 or not isinstance(manifest["items"][deployments[0]].get("spec"), dict):
-            raise ValueError("Missing calibrated Bonsai Deployment")
-        return cls(manifest, deployments[0])
-
-    @property
-    def replicas(self) -> int:
-        return self.manifest["items"][self.deployment_index]["spec"].get("replicas", 1)
-
-    def manifest_with_replicas(self, replicas: int) -> dict:
-        manifest = copy.deepcopy(self.manifest)
-        manifest["items"][self.deployment_index]["spec"]["replicas"] = replicas
-        return manifest
-
-
-@dataclasses.dataclass(frozen=True)
 class WorkloadState:
     snapshot: "WorkloadSnapshot | None"
-    calibrated: CalibratedWorkload | None
-    calibration_positive: bool
     catalogue: tuple[tuple[str, str], ...]
     capability_error: OSError | ValueError | None = None
 
@@ -780,7 +756,7 @@ class WorkloadState:
 
         Validate selection before parsing specs; a returning error handler permits loading to continue.
         """
-        from oksa_calibration_state import applied_result
+        from oksa_calibration_state import CalibrationStore, result_path
         from oksa_workload_evaluation import CalibrationSnapshot, ModelSnapshot, WorkloadSnapshot
 
         state_dir = STATE_DIR if state_dir is None else state_dir
@@ -802,13 +778,17 @@ class WorkloadState:
         metadata_cache: dict[Path, dict[str, str]] = {}
         entries = read_models_list(state_dir / "models.list")
         for name, _, _ in entries:
-            if is_calibration_model(name):
-                public_name = CALIBRATION_REPO
-            elif resolve_public_names and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            if (resolve_public_names or selected_model) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
                 public_path = state_dir / "models.d" / f"{name}.env"
-                if public_path not in metadata_cache:
-                    metadata_cache[public_path] = parse_env_file(public_path)
-                public_name = metadata_cache[public_path].get("PUU_VLLM_REPO_ID") or name
+                try:
+                    if public_path not in metadata_cache:
+                        metadata_cache[public_path] = ModelSpec.read_metadata(public_path)
+                    public_name = metadata_cache[public_path].get("PUU_VLLM_REPO_ID") or name
+                except (OSError, ValueError) as err:
+                    if not capture_capability_errors:
+                        raise
+                    capability_error = err
+                    public_name = name
             else:
                 public_name = name
             catalogue.append((name, public_name))
@@ -821,63 +801,58 @@ class WorkloadState:
                     raise
                 on_invalid_selection(err)
 
+        hardware = None
+        hardware_error = None
+        public_names = dict(catalogue)
         for (name, path, env_path), (_, public_name) in zip(entries, catalogue):
-            spec = None
-            # The calibrated workload is not planned from a discovered model spec.
-            if name != CALIBRATION_MODEL:
+            try:
+                metadata_path = Path(env_path)
+                if metadata_path not in metadata_cache:
+                    metadata_cache[metadata_path] = ModelSpec.read_metadata(metadata_path)
+                metadata = metadata_cache[metadata_path]
+                spec = ModelSpec.from_env(metadata, name=name, path=path)
+                public_name = spec.repo_id or public_name
+                public_names[name] = public_name
+            except (OSError, ValueError) as err:
+                if not capture_capability_errors:
+                    raise
+                capability_error = err
+                continue
+            path_exists = False
+            path_error = None
+            if check_model_paths:
                 try:
-                    metadata_path = Path(env_path)
-                    if metadata_path not in metadata_cache:
-                        metadata_cache[metadata_path] = parse_env_file(metadata_path)
-                    spec = ModelSpec.from_env(metadata_cache[metadata_path], name=name, path=path)
+                    path_exists = Path(spec.path).is_dir()
                 except (OSError, ValueError) as err:
-                    if not capture_capability_errors:
-                        raise
-                    capability_error = err
-            if spec is not None:
-                path_exists = False
-                path_error = None
-                if check_model_paths:
+                    path_error = err
+            try:
+                if result_path(spec.name).exists() and hardware is None and hardware_error is None:
                     try:
-                        path_exists = Path(spec.path).is_dir()
-                    except (OSError, ValueError) as err:
-                        path_error = err
-                models.append(ModelSnapshot(spec, path_exists, model_id(name), public_name, path_error))
+                        hardware = CalibrationStore.hardware_identity()
+                    except (OSError, ValueError, subprocess.SubprocessError) as err:
+                        hardware_error = err
+                if hardware_error is not None:
+                    raise ValueError(str(hardware_error)) from hardware_error
+                result = CalibrationStore.load(spec, hardware=hardware)
+                limits = result["limits"]
+                calibration = CalibrationSnapshot(
+                    applied_max_sequences=limits["max_num_seqs"],
+                    gpu_memory_utilization=limits["gpu_memory_utilization"],
+                    max_context=limits["max_model_len"], max_sequences=limits["max_num_seqs"],
+                    max_num_batched_tokens=limits["max_num_batched_tokens"], memory_bytes=limits["memory_bytes"],
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as err:
+                calibration = CalibrationSnapshot(error=str(err))
+            models.append(ModelSnapshot(spec, path_exists, model_id(name), public_name, calibration, path_error))
 
-        calibrated = None
-        calibration_positive = False
-        applied_max_sequences = None
-        calibration_error = ""
-        try:
-            result = applied_result()
-            calibration_positive = result["limits"]["max_num_seqs"] > 0
-            calibrated = CalibratedWorkload.load()
-            applied_max_sequences = result["limits"]["max_num_seqs"]
-        except (OSError, ValueError) as err:
-            calibration_error = str(err)
-
-        limits, valid = read_calibration_limits()
-        utilization = limits.get("gpu_memory_utilization") if valid else None
-        max_context = limits.get("max_model_len") if valid else None
-        max_sequences = limits.get("max_num_seqs") if valid else None
-        calibration = CalibrationSnapshot(
-            applied_max_sequences=applied_max_sequences,
-            replicas=calibrated.replicas if calibrated is not None else 1,
-            error=calibration_error,
-            gpu_memory_utilization=(utilization if isinstance(utilization, (int, float)) and 0.05 <= utilization <= 0.98 else None),
-            max_context=max_context if isinstance(max_context, int) and max_context > 0 else None,
-            max_sequences=max_sequences if isinstance(max_sequences, int) and max_sequences > 0 else None,
-        )
-        snapshot = (WorkloadSnapshot(tuple(models), node, models_dir, CALIBRATION_MODEL, calibration)
-                    if capability_error is None else None)
-        return cls(snapshot, calibrated, calibration_positive, catalogue, capability_error)
+        catalogue = tuple((name, public_names[name]) for name, _ in catalogue)
+        snapshot = WorkloadSnapshot(tuple(models), node, models_dir) if capability_error is None else None
+        return cls(snapshot, catalogue, capability_error)
 
     def resolve_model_name(self, name: str) -> str:
         return resolve_model_name(name, catalogue=self.catalogue)
 
     def public_model_name(self, name: str, state_dir: Path = STATE_DIR) -> str:
-        if is_calibration_model(name):
-            return CALIBRATION_REPO
         for internal, public_name in self.catalogue:
             if internal == name:
                 return public_name
@@ -906,28 +881,7 @@ def read_first_line(path: Path | str) -> str:
         return ""
 
 
-def read_calibration_limits(path: Path | str | None = None) -> tuple[dict, bool]:
-    cal_path = Path(path) if path is not None else CALIBRATION_RESULT_PATH
-    if not cal_path.is_file():
-        return {}, False
-    try:
-        data = json.loads(cal_path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("schema") == 1 and data.get("state") == "complete":
-            limits = data.get("limits")
-            if isinstance(limits, dict):
-                return limits, True
-    except (OSError, ValueError, TypeError):
-        pass
-    return {}, False
-
-
-def host_memory_capacity_mib(calibration_path: Path | str | None = None) -> int:
-    limits, valid = read_calibration_limits(calibration_path)
-    if valid:
-        mem_bytes = limits.get("memory_bytes", 0)
-        if isinstance(mem_bytes, int) and mem_bytes > 0:
-            return mem_bytes // (1024 * 1024)
-        return 0
+def host_memory_capacity_mib() -> int:
     try:
         for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
             if line.startswith("MemTotal:"):
@@ -938,20 +892,8 @@ def host_memory_capacity_mib(calibration_path: Path | str | None = None) -> int:
     return 0
 
 
-def check_model_capacity(
-    estimated_memory_mib: int,
-    calibration_path: Path | str | None = None,
-) -> tuple[bool, str]:
-    limits, valid = read_calibration_limits(calibration_path)
-    if valid:
-        mem_bytes = limits.get("memory_bytes", 0)
-        if not isinstance(mem_bytes, int) or mem_bytes <= 0:
-            return False, "Host has zero calibrated capacity for standalone execution (requires multi-node QSFP clustering)"
-        host_mib = mem_bytes // (1024 * 1024)
-        if estimated_memory_mib > host_mib:
-            return False, f"Model requires ~{estimated_memory_mib} MiB, exceeding calibrated host limit of {host_mib} MiB"
-        return True, f"Model fits within calibrated host limit ({estimated_memory_mib} MiB <= {host_mib} MiB)"
-    host_mib = host_memory_capacity_mib(calibration_path)
+def check_model_capacity(estimated_memory_mib: int) -> tuple[bool, str]:
+    host_mib = host_memory_capacity_mib()
     if host_mib > 0 and estimated_memory_mib > host_mib:
         return False, f"Model requires ~{estimated_memory_mib} MiB, exceeding uncalibrated host memory of {host_mib} MiB"
     return True, f"Model fits within available memory (~{estimated_memory_mib} MiB)"
@@ -1441,10 +1383,10 @@ def sync_litellm_models(
         return False
     expected = None
     if active_model:
-        internal = CALIBRATION_MODEL if is_calibration_model(active_model) else active_model
+        internal = active_model
         public_name = public_model_name(internal, state_dir)
-        label = CALIBRATION_MODEL if internal == CALIBRATION_MODEL else model_id(internal)
-        service_name = CALIBRATION_MODEL if internal == CALIBRATION_MODEL else f"puu-vllm-{label}"
+        label = model_id(internal)
+        service_name = f"puu-vllm-{label}"
         expected = {
             "id": f"puu-runtime-{label}",
             "model_name": public_name,
@@ -1595,7 +1537,7 @@ def collect_k8s_workloads() -> list[dict] | None:
 def collect_vllm_metrics(active_model: str) -> tuple[str, dict]:
     if not active_model or active_model == "-":
         return "no-model", {}
-    service_name = CALIBRATION_MODEL if is_calibration_model(active_model) else f"puu-vllm-{model_id(active_model)}"
+    service_name = f"puu-vllm-{model_id(active_model)}"
     try:
         proc = run_kubectl("get", "service", service_name, "-n", OKSA_NAMESPACE, "--request-timeout=5s",
                            "-o", "jsonpath={.spec.clusterIP}", check=False, timeout=10)
@@ -1686,13 +1628,9 @@ def collect_serving_status() -> dict:
     gpus = collect_gpu_telemetry()
     host_mem = collect_host_memory()
     workloads = collect_k8s_workloads()
-    if active_model == "-" and any(
-        isinstance(w["name"], str) and w["name"].startswith(CALIBRATION_MODEL + "-") for w in (workloads or [])
-    ):
-        active_model = CALIBRATION_MODEL
     model_status, metrics = collect_vllm_metrics(active_model)
     if model_status == "unavailable" and active_model != "-" and workloads is not None:
-        prefix = (CALIBRATION_MODEL if is_calibration_model(active_model) else f"puu-vllm-{model_id(active_model)}") + "-"
+        prefix = f"puu-vllm-{model_id(active_model)}-"
         if any(isinstance(w.get("name"), str) and w["name"].startswith(prefix)
                and w.get("phase") in ("Pending", "Running") and w.get("ready") is False and (w.get("restarts") or 0) == 0
                for w in workloads):

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import subprocess
 import time
 
 import oksa_model_serving as ms
+from oksa_calibration_state import STATUS_PATH
 
 
 def wait_for_stopped_pods(selector: str, *, kubeconfig: str | None = None) -> None:
@@ -48,7 +50,6 @@ def wait_for_stopped_pods(selector: str, *, kubeconfig: str | None = None) -> No
 
 
 class RemovalOutcome(Enum):
-    PROTECTED = auto()
     INVALID = auto()
     BUSY = auto()
     NOT_STOPPED = auto()
@@ -82,11 +83,10 @@ class ModelRemovalService:
     def remove(self, model_name: str) -> RemovalResult:
         if not isinstance(model_name, str) or not model_name:
             return RemovalResult(RemovalOutcome.INVALID, "Model name must be a non-empty string")
-        if ms.is_calibration_model(model_name):
-            return RemovalResult(RemovalOutcome.PROTECTED, "The calibration model cannot be deleted")
         failure_outcome = RemovalOutcome.SHUTDOWN_FAILED
         deleted = False
         public_name = ""
+        cached_snapshot = False
         state_dir = self.state_dir
         try:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
@@ -94,8 +94,6 @@ class ModelRemovalService:
                     model_name = ms.resolve_model_name(model_name, state_dir)
                 except ValueError as exc:
                     return RemovalResult(RemovalOutcome.INVALID, str(exc))
-            if ms.is_calibration_model(model_name):
-                return RemovalResult(RemovalOutcome.PROTECTED, "The calibration model cannot be deleted")
             if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name)
                     or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
                 return RemovalResult(RemovalOutcome.INVALID, "Invalid model name")
@@ -118,39 +116,20 @@ class ModelRemovalService:
                     selected_model_file.unlink(missing_ok=True)
 
                 state_dir.mkdir(parents=True, exist_ok=True)
-                with (state_dir / "planner.lock").open("a") as lock:
+                STATUS_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                with (state_dir / "planner.lock").open("a") as lock, (STATUS_PATH.parent / "lock").open("a") as gpu_lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
+                    fcntl.flock(gpu_lock, fcntl.LOCK_EX)
                     with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=True):
                         if ms.read_first_line(active_model_file) == model_name:
                             raise ValueError("The model is still active or activation is pending; stop serving and retry deletion")
                         identity = ms.model_id(model_name)
-                        manifest = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", str(ms.CALIBRATED_MANIFEST_PATH.parent))) / "32-vllm-generated.yaml"
+                        manifest = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests")) / "32-vllm-generated.yaml"
                         if manifest.exists():
-                            manifest_text = manifest.read_text(encoding="utf-8")
-                            try:
-                                content = json.loads(manifest_text)
-                            except json.JSONDecodeError:
-                                if manifest_text.strip() == "apiVersion: v1\nkind: List\nitems: []":
-                                    content = {"kind": "List", "items": []}
-                                else:
-                                    result = ms.run_kubectl(
-                                        "create", "--dry-run=client", "--validate=false", "-f", str(manifest),
-                                        "-o", "json", "--request-timeout=5s", timeout=10,
-                                    )
-                                    text = result.stdout.strip()
-                                    if not text:
-                                        raise ValueError("Empty generated workload response")
-                                    decoder = json.JSONDecoder()
-                                    objects, pos = [], 0
-                                    while pos < len(text):
-                                        item, pos = decoder.raw_decode(text, pos)
-                                        objects.append(item)
-                                        while pos < len(text) and text[pos].isspace():
-                                            pos += 1
-                                    content = objects[0] if len(objects) == 1 else {"kind": "List", "items": objects}
-                            if not isinstance(content, dict):
+                            content = json.loads(manifest.read_text(encoding="utf-8"))
+                            if not isinstance(content, dict) or content.get("kind") != "List":
                                 raise ValueError("Invalid generated workload manifest")
-                            items = content.get("items") if content.get("kind") == "List" else [content]
+                            items = content.get("items")
                             if not isinstance(items, list):
                                 raise ValueError("Invalid generated workload manifest items")
                             for item in items:
@@ -199,9 +178,31 @@ class ModelRemovalService:
                                     public_name,
                                 )
                         failure_outcome = RemovalOutcome.REMOVAL_FAILED
+                        entries = [entry for entry in ms.read_models_list(state_dir / "models.list") if entry[0] == model_name]
+                        if len(entries) != 1:
+                            raise ValueError("Model registration is missing or ambiguous")
+                        _, model_path, metadata_path = entries[0]
+                        spec = ms.ModelSpec.from_env(ms.ModelSpec.read_metadata(Path(metadata_path)),
+                                                     name=model_name, path=model_path)
                         model_dir = ms.MODELS_DIR / model_name
-                        if model_dir.exists():
+                        if spec.cached_model_root is not None:
+                            exclusion = state_dir / "cache-exclusions" / hashlib.sha256(spec.path.encode()).hexdigest()
+                            ms.atomic_write_text(exclusion, spec.path + "\n")
+                            shutil.rmtree(Path(spec.path))
+                            cached_snapshot = True
+                        elif Path(spec.path).resolve() == model_dir.resolve() and model_dir.is_dir():
+                            if spec.repo_id:
+                                snapshots = ms.ModelSpec.hf_cache_dir() / ("models--" + spec.repo_id.replace("/", "--")) / "snapshots"
+                                for snapshot in snapshots.glob("*"):
+                                    if not re.fullmatch(r"[0-9a-f]{40}", snapshot.name):
+                                        continue
+                                    cached = replace(spec, path=str(snapshot), revision=snapshot.name)
+                                    if cached.cached_model_root is not None:
+                                        exclusion = state_dir / "cache-exclusions" / hashlib.sha256(cached.path.encode()).hexdigest()
+                                        ms.atomic_write_text(exclusion, cached.path + "\n")
                             shutil.rmtree(model_dir)
+                        else:
+                            raise ValueError("Model storage is outside the managed model directories")
                         (state_dir / "models.d" / f"{model_name}.env").unlink(missing_ok=True)
                         deleted = True
 
@@ -230,4 +231,5 @@ class ModelRemovalService:
                 else "Model removal failed and may be partial; check model storage before retrying"
             )
             return RemovalResult(failure_outcome, f"{message}: {detail}", public_name)
-        return RemovalResult(RemovalOutcome.REMOVED, f"Model {public_name} deleted", public_name)
+        detail = " (cached snapshot removed; shared Hugging Face blobs preserved)" if cached_snapshot else ""
+        return RemovalResult(RemovalOutcome.REMOVED, f"Model {public_name} deleted{detail}", public_name)

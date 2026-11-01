@@ -6,6 +6,7 @@ import http.client
 import json
 import math
 import os
+from pathlib import Path
 import queue
 import re
 import select
@@ -46,31 +47,6 @@ class ProbeTimeout(TimeoutError):
     pass
 
 
-def candidate_command(command, context, sequences, utilization):
-    replacements = {
-        "--max-model-len": str(context),
-        "--max-num-seqs": str(sequences),
-        "--gpu-memory-utilization": str(utilization),
-        "--max-num-batched-tokens": str(min(8192, context * sequences)),
-    }
-    result = []
-    index = 0
-    while index < len(command):
-        arg = command[index]
-        option = arg.split("=", 1)[0]
-        if option in replacements or option in (
-                "--enable-prefix-caching", "--no-enable-prefix-caching",
-                "--enable-chunked-prefill", "--no-enable-chunked-prefill"):
-            if option in replacements and "=" not in arg:
-                if index + 1 >= len(command) or command[index + 1].startswith("--"):
-                    raise ValueError(f"missing value for {option}")
-                index += 1
-        else:
-            result.append(arg)
-        index += 1
-    for option, value in replacements.items():
-        result.extend((option, value))
-    return result + ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
 
 
 def http_request(path, payload=None, *, timeout):
@@ -168,6 +144,10 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
         available = int(match[1]) * 1024
         previous = metrics["minimum_host_available_bytes"]
         metrics["minimum_host_available_bytes"] = available if previous is None else min(previous, available)
+        peak = int(Path("/sys/fs/cgroup/memory.peak").read_text().strip())
+        if peak <= 0:
+            raise RuntimeError("invalid container memory peak")
+        metrics["peak_host_memory_bytes"] = max(metrics["peak_host_memory_bytes"], peak)
         if available < reserve:
             raise CapacityError("host MemAvailable below reserve")
         try:
@@ -278,7 +258,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
                 monitor()
                 if time.monotonic() >= trial_deadline:
                     raise ProbeTimeout("Inference setup deadline exceeded")
-                payload = {"model": models[0]["id"], "prompt": [100 + index] * (context - 32),
+                payload = {"model": models[0]["id"], "prompt": [100 + index + round_number * sequences] * (context - 32),
                            "max_tokens": 32, "ignore_eos": True, "temperature": 0}
                 start_request(results, "/v1/completions", payload, barrier,
                               timeout=max(0.001, trial_deadline - time.monotonic()))
@@ -339,7 +319,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
 
 def run():
     record = {"status": "error", "reason": "", "context": None, "sequences": None, "utilization": None,
-              "metrics": {"tokens_per_second": 0, "peak_gpu_memory_bytes": 0,
+              "metrics": {"tokens_per_second": 0, "peak_gpu_memory_bytes": 0, "peak_host_memory_bytes": 0,
                           "minimum_host_available_bytes": None, "kv_cache_tokens": None}}
 
     def interrupted(signum, _frame):
@@ -359,7 +339,6 @@ def run():
             raise ValueError("PUU_PROBE_COMMAND must be a nonempty JSON command list")
         if context <= 32 or sequences <= 0 or not 0 < utilization <= 1 or reserve < 0 or not 1 <= seconds <= 2100:
             raise ValueError("invalid context, sequences, utilization, host reserve, or time budget")
-        command = candidate_command(command, context, sequences, utilization)
         with tempfile.TemporaryFile() as log:
             try:
                 probe(command, context, sequences, utilization, reserve, record["metrics"], log, seconds)

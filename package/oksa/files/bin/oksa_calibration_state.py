@@ -1,28 +1,37 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+from __future__ import annotations
+
+import dataclasses
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import tempfile
+from typing import TYPE_CHECKING
 
-RESULT_PATH = Path("/var/lib/puu/calibration/bonsai-2-27b.json")
+if TYPE_CHECKING:
+    from oksa_model_serving import ModelSpec
+
 STATUS_PATH = Path("/run/puu-calibration/status.json")
-MODEL = "bonsai-2-27b"
 ZERO_LIMITS = dict(max_model_len=0, max_num_seqs=0, max_num_batched_tokens=0,
                    gpu_memory_utilization=0, memory_bytes=0)
 
-def result_path(model=MODEL):
+
+def result_path(model: str) -> Path:
+    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model):
+        raise ValueError("Invalid calibration model identifier")
     return Path(f"/var/lib/puu/calibration/{model}.json")
 
 
-def status_path(model=MODEL):
-    if model == MODEL:
-        return STATUS_PATH
-    return Path(f"/run/puu-calibration/status-{model}.json")
+def status_path(model: str) -> Path:
+    result_path(model)
+    return STATUS_PATH.parent / f"status-{model}.json"
 
 
 def read_record(path):
@@ -74,13 +83,10 @@ def boot_id():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def valid_result(value, model=MODEL):
-    if not isinstance(value, dict) or value.get("schema") != 1 or value.get("state") != "complete":
-        return False
-    if model is not None:
-        if value.get("model") != model:
-            return False
-    elif not isinstance(value.get("model"), str) or not value.get("model"):
+def valid_result(value: dict, model: str) -> bool:
+    result_path(model)
+    if (not isinstance(value, dict) or type(value.get("schema")) is not int
+            or value["schema"] != 1 or value.get("state") != "complete" or value.get("model") != model):
         return False
     if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("fingerprint", ""))):
         return False
@@ -128,10 +134,109 @@ def valid_result(value, model=MODEL):
             and bool(identity["gpus"]) and value.get("reason") == "measured")
 
 
-def applied_result(model=MODEL):
+def applied_result(model: str) -> dict:
     result = read_record(result_path(model))
     status = read_record(status_path(model))
     if (not valid_result(result, model=model) or status.get("boot_id") != boot_id()
             or status.get("state") != "complete" or status.get("fingerprint") != result["fingerprint"]):
         raise ValueError("Calibration has not been applied during this boot")
     return result
+
+
+class CalibrationStore:
+    @classmethod
+    def hardware_identity(cls) -> dict:
+        from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
+        from oksa_model_serving import resolve_helper, resolve_k3s_node_name
+
+        gpus = []
+        vendor = AcceleratorDiscovery.primary_vendor()
+        if vendor == AcceleratorVendor.NVIDIA:
+            value = subprocess.run(
+                ["/usr/bin/nvidia-smi", "--query-gpu=name,uuid,memory.total,driver_version",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, check=True, timeout=15,
+            )
+            gpus = sorted(line.strip() for line in value.stdout.splitlines() if line.strip())
+            if not gpus:
+                raise ValueError("NVIDIA hardware present but no usable GPU reported")
+            models = {tuple(line.split(", ")[i] for i in (0, 2)) for line in gpus}
+            if len(models) > 1:
+                raise ValueError("Calibration requires matching local GPUs")
+        elif vendor != AcceleratorVendor.UNKNOWN:
+            devices = AcceleratorDiscovery.primary_devices()
+            gpus = sorted(f"{dev.name or dev.vendor.value}, {dev.pci_id}, {dev.memory_total_bytes}, {dev.driver}"
+                          for dev in devices)
+            if not gpus:
+                raise ValueError(f"{vendor.value} hardware present but no usable device reported")
+            if len({dev.driver for dev in devices}) > 1:
+                raise ValueError("Calibration requires matching local accelerator drivers")
+        memory_bytes = 0
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                memory_bytes = int(line.split()[1]) * 1024
+                break
+        if memory_bytes <= 0:
+            raise ValueError("Host memory capacity is unavailable")
+        return dict(
+            machine_id=Path("/etc/machine-id").read_text().strip(), kernel=os.uname().release,
+            architecture=os.uname().machine, memory_bytes=memory_bytes, gpus=gpus,
+            node=resolve_k3s_node_name(),
+            controller=hashlib.sha256(resolve_helper("oksa-calibrate").read_bytes()).hexdigest(),
+            probe=hashlib.sha256(resolve_helper("oksa-calibration-probe").read_bytes()).hexdigest(),
+            runtime=hashlib.sha256(resolve_helper("oksa_workload_manifest.py").read_bytes()).hexdigest(),
+        )
+
+    @classmethod
+    def identity(cls, spec: ModelSpec, hardware: dict | None = None) -> dict:
+        from oksa_model_serving import PRESEED_MANIFEST, is_serving_file, verified_preseed
+
+        result_path(spec.name)
+        model_dir = Path(spec.path)
+        config = model_dir / "config.json"
+        manifest = model_dir / PRESEED_MANIFEST
+        manifest_digest = ""
+        if manifest.is_file():
+            if not verified_preseed(model_dir, repo_id=spec.repo_id, revision=spec.revision):
+                raise ValueError(f"Preseed manifest does not match {spec.name}")
+            manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        sources = {}
+        for source in spec.metadata_sources:
+            path = Path(source)
+            spec.read_metadata(path)
+            sources[source] = hashlib.sha256(path.read_bytes()).hexdigest()
+        signatures = []
+        for path in sorted(model_dir.rglob("*")):
+            relative = path.relative_to(model_dir).as_posix()
+            if not is_serving_file(relative):
+                continue
+            info = path.stat()
+            if stat.S_ISREG(info.st_mode):
+                signatures.append([relative, str(path.resolve()), info.st_size, info.st_mtime_ns,
+                                   info.st_ctime_ns, info.st_ino])
+        identity = dict(cls.hardware_identity() if hardware is None else hardware)
+        metadata = {key: value for key, value in dataclasses.asdict(spec).items()
+                    if key not in ("estimated_memory_mib", "storage_mib")}
+        identity["model"] = json.loads(json.dumps(metadata))
+        identity["metadata_sources"] = sources
+        identity["config"] = hashlib.sha256(config.read_bytes()).hexdigest()
+        identity["runtime_files"] = {
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for argument in spec.runtime_command
+            if (path := Path(argument)).is_absolute() and path.is_file()
+        }
+        identity["manifest"] = manifest_digest
+        identity["files"] = hashlib.sha256(json.dumps(signatures).encode()).hexdigest()
+        return identity
+
+    @classmethod
+    def fingerprint(cls, identity: dict) -> str:
+        return hashlib.sha256(json.dumps(identity, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+    @classmethod
+    def load(cls, spec: ModelSpec, hardware: dict | None = None) -> dict:
+        result = applied_result(spec.name)
+        identity = cls.identity(spec, hardware=hardware)
+        if result["identity"] != identity or result["fingerprint"] != cls.fingerprint(identity):
+            raise ValueError(f"Calibration identity does not match {spec.name}")
+        return result

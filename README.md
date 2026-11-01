@@ -50,15 +50,16 @@ sudo systemctl restart puu-k3s-addons.service
 ## First boot
 
 After the first login, a new GNOME installation opens a setup session that
-shows service startup, the Bonsai model download and capacity calibration.
-Network settings are available, and TTY/SSH can be used for recovery. When
-setup completes, Continue returns to the login screen and the next login
-opens GNOME.
+shows service startup, configured model downloads and per-model capacity
+calibration. Installed models are discovered and deployed through one serving
+planner. Network settings and TTY/SSH are available for recovery. When setup
+completes, Continue returns to the login screen and the next login opens GNOME.
 
-To calibrate again:
+To recalibrate an installed model:
 
 ```sh
-sudo /usr/libexec/puu/oksa-calibrate --force
+sudo /usr/libexec/puu/oksa-calibrate --model MODEL --force
+sudo /usr/libexec/puu/oksa-plan-vllm-workloads --require-reconcile
 ```
 
 ## Development

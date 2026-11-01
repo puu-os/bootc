@@ -4,589 +4,158 @@
 
 import argparse
 import fcntl
-import json
 import os
 from pathlib import Path
+import subprocess
 import sys
-import textwrap
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oksa_model_serving as ms
-from oksa_calibration_state import STATUS_PATH
-from oksa_model_removal import wait_for_stopped_pods
-from oksa_workload_evaluation import PlannedWorkload, WorkloadEvaluator
+from oksa_calibration_state import CalibrationStore, STATUS_PATH, boot_id, read_record
+from oksa_workload_evaluation import WorkloadEvaluator
+from oksa_workload_manifest import WorkloadManifestBuilder
 
 
-def _match_expr(key: str, val: str, indent: str = "                  ") -> list[str]:
-    return [
-        f"{indent}- key: {key}",
-        f"{indent}  operator: In",
-        f"{indent}  values:",
-        f'{indent}    - "{val}"',
-    ]
-
-
-def warn(msg: str) -> None:
-    sys.stderr.write(f"oksa-plan-vllm-workloads: {msg}\n")
-
-
-def write_node_affinity(
-    mode: str,
-    model_node_label: str,
-    interconnect_selector: str,
-    allow_fast_nic_fallback: bool,
-    app_name: str,
-) -> str:
-    lines = [
-        "      affinity:",
-        "        nodeAffinity:",
-        "          requiredDuringSchedulingIgnoredDuringExecution:",
-        "            nodeSelectorTerms:",
-        "              - matchExpressions:",
-    ]
-    req_keys = [
-        f"{ms.label_namespace()}/model-serving-ready",
-        f"{ms.label_namespace()}/cuda-ready",
-        f"{ms.label_namespace()}/cdi-ready",
-        model_node_label,
-    ]
-    if interconnect_selector == "topology":
-        req_keys.append(f"{ms.label_namespace()}/topology-parallel-capable")
-    elif interconnect_selector == "fast-nic":
-        req_keys.append(f"{ms.label_namespace()}/fast-nic-present")
-    for k in req_keys:
-        lines.extend(_match_expr(k, "true"))
-
-    lines.append("          preferredDuringSchedulingIgnoredDuringExecution:")
-    prefs = [(100, f"{ms.label_namespace()}/nvlink-present"), (75, f"{ms.label_namespace()}/fast-gpu-interconnect")]
-    if allow_fast_nic_fallback:
-        prefs.append((25, f"{ms.label_namespace()}/fast-nic-present"))
-    for weight, key in prefs:
-        lines.extend([
-            f"            - weight: {weight}",
-            "              preference:",
-            "                matchExpressions:",
-            *_match_expr(key, "true"),
-        ])
-
-    if mode == "replicated":
-        lines.extend([
-            "        podAntiAffinity:",
-            "          requiredDuringSchedulingIgnoredDuringExecution:",
-            "            - labelSelector:",
-            "                matchExpressions:",
-            "                  - key: app.kubernetes.io/name",
-            "                    operator: In",
-            "                    values:",
-            f"                      - {app_name}",
-            "              topologyKey: kubernetes.io/hostname",
-        ])
-    return "\n".join(lines) + "\n"
-
-
-ADMISSION_PROXY_CODE = textwrap.dedent("""\
-import http.client
-import os
-import socketserver
-import threading
-from http.server import BaseHTTPRequestHandler
-
-backend_host = "127.0.0.1"
-backend_port = int(os.environ.get("PUU_VLLM_BACKEND_PORT", "8001"))
-listen_port = int(os.environ.get("PUU_VLLM_PROXY_PORT", "8000"))
-active_limit = max(1, int(os.environ.get("PUU_VLLM_MAX_CONCURRENT_SEQUENCES", "8")))
-queue_limit = max(0, int(os.environ.get("PUU_VLLM_MAX_QUEUED_REQUESTS", "32")))
-overload_status = int(os.environ.get("PUU_VLLM_OVERLOAD_STATUS_CODE", "429"))
-active = threading.BoundedSemaphore(active_limit)
-capacity = threading.BoundedSemaphore(active_limit + queue_limit)
-hop_by_hop = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
-
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def do_GET(self):
-        self._handle()
-
-    def do_POST(self):
-        self._handle()
-
-    def do_OPTIONS(self):
-        self._handle()
-
-    def do_HEAD(self):
-        self._handle()
-
-    def _handle(self):
-        if self.path == "/health":
-            self._proxy()
-            return
-        if not capacity.acquire(blocking=False):
-            self.send_response(overload_status)
-            self.send_header("content-type", "application/json")
-            self.send_header("connection", "close")
-            body = b'{"error":"local vLLM queue full"}\\n'
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
-            return
-        try:
-            active.acquire()
-            try:
-                self._proxy()
-            finally:
-                active.release()
-        finally:
-            capacity.release()
-
-    def _read_request_body(self):
-        if (self.headers.get("transfer-encoding", "").lower() == "chunked"):
-            chunks = []
-            while True:
-                size_line = self.rfile.readline(1024).strip()
-                chunk_size = int(size_line.split(b";", 1)[0], 16)
-                if chunk_size == 0:
-                    while True:
-                        trailer = self.rfile.readline(65536)
-                        if trailer in (b"\\r\\n", b"\\n", b""):
-                            break
-                    break
-                chunks.append(self.rfile.read(chunk_size))
-                self.rfile.read(2)
-            return b"".join(chunks)
-        body_length = int(self.headers.get("content-length", "0") or "0")
-        return self.rfile.read(body_length) if body_length else None
-
-    def _proxy(self):
-        body = self._read_request_body()
-        headers = {key: value for key, value in self.headers.items() if key.lower() not in hop_by_hop}
-        headers["host"] = f"{backend_host}:{backend_port}"
-        conn = http.client.HTTPConnection(backend_host, backend_port, timeout=3600)
-        headers_sent = False
-        try:
-            conn.request(self.command, self.path, body=body, headers=headers)
-            response = conn.getresponse()
-            self.send_response(response.status, response.reason)
-            for key, value in response.getheaders():
-                if key.lower() not in hop_by_hop:
-                    self.send_header(key, value)
-            self.send_header("connection", "close")
-            self.end_headers()
-            headers_sent = True
-            if self.command != "HEAD":
-                while True:
-                    chunk = response.read1(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-        except Exception as exc:
-            if headers_sent:
-                return
-            message = ("backend unavailable: %s\\n" % exc).encode()
-            self.send_response(503)
-            self.send_header("content-type", "text/plain")
-            self.send_header("content-length", str(len(message)))
-            self.send_header("connection", "close")
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(message)
-        finally:
-            conn.close()
-            self.close_connection = True
-
-    def log_message(self, fmt, *args):
-        return
-
-class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-with Server(("0.0.0.0", listen_port), Handler) as server:
-    server.serve_forever()
-""").strip()
-
-
-def render_manifest(plan: PlannedWorkload, image: str, models_dir: Path) -> str:
-    spec = plan.spec
-    affinity_yaml = write_node_affinity(
-        plan.serving_mode,
-        plan.model_node_label,
-        plan.interconnect_selector,
-        spec.allow_fast_nic_fallback,
-        plan.app_name,
-    )
-
-    assigned_gpu_yaml = ""
-    if plan.serving_mode == "shared-gpu":
-        assigned_gpu_yaml = f"""            - name: NVIDIA_VISIBLE_DEVICES
-              value: {json.dumps(plan.assigned_gpu_devices)}
-            - name: CUDA_VISIBLE_DEVICES
-              value: {json.dumps(plan.assigned_gpu_devices)}\n"""
-
-    gpu_limits_yaml = ""
-    if plan.resource_gpus > 0:
-        gpu_limits_yaml = f"""              nvidia.com/gpu: "{plan.resource_gpus}"
-            limits:
-              nvidia.com/gpu: "{plan.resource_gpus}"\n"""
-
-    manifest_text = f"""---
-apiVersion: v1
-kind: Service
-metadata:
-  name: {plan.app_name}
-  namespace: oksa
-  labels:
-    app.kubernetes.io/name: {plan.app_name}
-    {ms.label_namespace()}/model-name: {plan.model_label}
-    {ms.label_namespace()}/serving-mode: {plan.serving_mode}
-spec:
-  selector:
-    app.kubernetes.io/name: {plan.app_name}
-    {ms.label_namespace()}/inference: "enabled"
-    {ms.label_namespace()}/model-server: vllm
-    {ms.label_namespace()}/model-name: {plan.model_label}
-  ports:
-    - name: http
-      port: 8000
-      targetPort: http
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {plan.app_name}
-  namespace: oksa
-  labels:
-    app.kubernetes.io/name: {plan.app_name}
-    {ms.label_namespace()}/model-name: {plan.model_label}
-    {ms.label_namespace()}/serving-mode: {plan.serving_mode}
-spec:
-  replicas: {plan.replicas}
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: {plan.app_name}
-      {ms.label_namespace()}/model-name: {plan.model_label}
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: {plan.app_name}
-        {ms.label_namespace()}/inference: "enabled"
-        {ms.label_namespace()}/model-server: vllm
-        {ms.label_namespace()}/model-capacity: gpu
-        {ms.label_namespace()}/model-source: local-discovery
-        {ms.label_namespace()}/cluster-routing: "enabled"
-        {ms.label_namespace()}/model-name: {plan.model_label}
-        {ms.label_namespace()}/serving-mode: {plan.serving_mode}
-        {ms.label_namespace()}/sharing-policy: {spec.sharing_policy}
-      annotations:
-        {ms.label_namespace()}/model-path: {json.dumps(spec.path)}
-        {ms.label_namespace()}/gpu-memory-budget-mib: "{spec.gpu_memory_budget_mib}"
-        {ms.label_namespace()}/max-queued-requests: "{spec.max_queued_requests}"
-        {ms.label_namespace()}/max-concurrent-sequences: "{spec.max_concurrent_sequences}"
-        {ms.label_namespace()}/max-model-length: "{spec.max_context}"
-        {ms.label_namespace()}/gpu-memory-utilization: "{plan.gpu_memory_utilization}"
-        {ms.label_namespace()}/tensor-parallel-size: "{spec.tensor_parallel_size}"
-        {ms.label_namespace()}/pipeline-parallel-size: "{spec.pipeline_parallel_size}"
-        {ms.label_namespace()}/assigned-gpu-devices: {json.dumps(plan.assigned_gpu_devices)}
-    spec:
-{affinity_yaml}      runtimeClassName: nvidia-cdi
-      initContainers:
-        - name: wait-for-nvidia-cdi
-          image: busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              until [ -s /var/run/cdi/nvidia.yaml ]; do
-                echo "waiting for /var/run/cdi/nvidia.yaml"
-                sleep 10
-              done
-          volumeMounts:
-            - name: nvidia-cdi
-              mountPath: /var/run/cdi
-              readOnly: true
-      containers:
-        - name: vllm
-          image: {json.dumps(image)}
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              extra_args=
-              if [ -n "$PUU_VLLM_QUANTIZATION" ]; then
-                extra_args="$extra_args --quantization $PUU_VLLM_QUANTIZATION"
-              fi
-              if [ "$PUU_VLLM_TRUST_REMOTE_CODE" = true ]; then
-                extra_args="$extra_args --trust-remote-code"
-              fi
-              if [ -n "$PUU_VLLM_EXTRA_ARGS" ]; then
-                extra_args="$extra_args $PUU_VLLM_EXTRA_ARGS"
-              fi
-              # shellcheck disable=SC2086
-              exec python3 -m vllm.entrypoints.openai.api_server \
-                --host 127.0.0.1 \
-                --port "$PUU_VLLM_BACKEND_PORT" \
-                --model "$PUU_VLLM_MODEL_PATH" \
-                --served-model-name "$PUU_VLLM_MODEL_NAME" \
-                --max-model-len "$PUU_VLLM_MAX_CONTEXT" \
-                --max-num-seqs "$PUU_VLLM_MAX_CONCURRENT_SEQUENCES" \
-                --gpu-memory-utilization "$PUU_VLLM_GPU_MEMORY_UTILIZATION" \
-                --tensor-parallel-size "$PUU_VLLM_TENSOR_PARALLEL_SIZE" \
-                --pipeline-parallel-size "$PUU_VLLM_PIPELINE_PARALLEL_SIZE" \
-                $extra_args
-          env:
-            - name: PUU_VLLM_MODEL_NAME
-              value: {json.dumps(spec.repo_id or spec.name)}
-            - name: PUU_VLLM_MODEL_PATH
-              value: {json.dumps(spec.path)}
-            - name: PUU_VLLM_BACKEND_PORT
-              value: "8001"
-            - name: PUU_VLLM_MAX_CONTEXT
-              value: "{spec.max_context}"
-            - name: PUU_VLLM_MAX_CONCURRENT_SEQUENCES
-              value: "{spec.max_concurrent_sequences}"
-            - name: PUU_VLLM_GPU_MEMORY_UTILIZATION
-              value: "{plan.gpu_memory_utilization}"
-            - name: PUU_VLLM_TENSOR_PARALLEL_SIZE
-              value: "{spec.tensor_parallel_size}"
-            - name: PUU_VLLM_PIPELINE_PARALLEL_SIZE
-              value: "{spec.pipeline_parallel_size}"
-            - name: PUU_VLLM_QUANTIZATION
-              value: {json.dumps(spec.quantization)}
-            - name: PUU_VLLM_TRUST_REMOTE_CODE
-              value: \"{ms.bool_str(spec.trust_remote_code)}\"
-            - name: PUU_VLLM_EXTRA_ARGS
-              value: {json.dumps(spec.extra_args)}
-            - name: NVIDIA_DRIVER_CAPABILITIES
-              value: compute,utility
-            - name: HF_HOME
-              value: /var/lib/huggingface
-            - name: VLLM_CACHE_ROOT
-              value: /var/lib/vllm/cache
-            - name: TORCH_EXTENSIONS_DIR
-              value: /var/lib/vllm/cache/torch_extensions
-{assigned_gpu_yaml}          ports:
-            - name: backend
-              containerPort: 8001
-          resources:
-            requests:
-              cpu: "1"
-              memory: 4Gi
-{gpu_limits_yaml}          volumeMounts:
-            - name: models
-              mountPath: {json.dumps(str(models_dir))}
-              readOnly: true
-            - name: huggingface
-              mountPath: /var/lib/huggingface
-            - name: vllm-cache
-              mountPath: /var/lib/vllm/cache
-            - name: nvidia-cdi
-              mountPath: /var/run/cdi
-              readOnly: true
-        - name: admission-proxy
-          image: {json.dumps(image)}
-          imagePullPolicy: IfNotPresent
-          command:
-            - python3
-            - -c
-            - |
-{textwrap.indent(ADMISSION_PROXY_CODE, "              ")}
-          env:
-            - name: PUU_VLLM_BACKEND_PORT
-              value: "8001"
-            - name: PUU_VLLM_PROXY_PORT
-              value: "8000"
-            - name: PUU_VLLM_MAX_CONCURRENT_SEQUENCES
-              value: "{spec.max_concurrent_sequences}"
-            - name: PUU_VLLM_MAX_QUEUED_REQUESTS
-              value: "{spec.max_queued_requests}"
-            - name: PUU_VLLM_OVERLOAD_STATUS_CODE
-              value: "{spec.overload_status_code}"
-          ports:
-            - name: http
-              containerPort: 8000
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              memory: 256Mi
-      volumes:
-        - name: models
-          hostPath:
-            path: {json.dumps(str(models_dir))}
-            type: Directory
-        - name: huggingface
-          hostPath:
-            path: /var/lib/huggingface
-            type: DirectoryOrCreate
-        - name: vllm-cache
-          hostPath:
-            path: /var/lib/vllm/cache
-            type: DirectoryOrCreate
-        - name: nvidia-cdi
-          hostPath:
-            path: /var/run/cdi
-            type: DirectoryOrCreate
-"""
-    return manifest_text
-
-
-def stop_generic_workloads(keep_app: str = "") -> None:
-    selector = f"{ms.label_namespace()}/model-name"
-    if keep_app:
-        selector += f",app.kubernetes.io/name!={keep_app}"
-    result = ms.run_kubectl(
-        "get", "deployment", "-n", ms.OKSA_NAMESPACE, "-l", selector,
-        "-o", "json", "--request-timeout=5s", timeout=10,
-    )
-    deployments = json.loads(result.stdout)
-    if not isinstance(deployments, dict) or not isinstance(deployments.get("items"), list):
-        raise ValueError("Invalid Kubernetes deployment response during shutdown")
-    names, pod_selectors = [], []
-    for deployment in deployments["items"]:
-        metadata = deployment["metadata"]
-        pod_selector = deployment["spec"]["selector"]
-        labels = pod_selector.get("matchLabels", {})
-        if (not isinstance(labels, dict) or not labels.get("app.kubernetes.io/name")
-                or not labels.get(f"{ms.label_namespace()}/model-name") or pod_selector.get("matchExpressions")
-                or any(not isinstance(value, str) for value in labels.values())):
-            raise ValueError("Cannot safely identify generated deployment pods for shutdown")
-        names.append(f"deployment/{metadata['name']}")
-        pod_selectors.append(selector + "," + ",".join(f"{key}={value}" for key, value in labels.items()))
-    if names:
-        ms.run_kubectl(
-            "scale", "-n", ms.OKSA_NAMESPACE, *names, "--replicas=0",
-            "--request-timeout=20s", timeout=30,
+class WorkloadPlanner:
+    def __init__(self, require_reconcile: bool = False):
+        self.require_selected = require_reconcile or ms.parse_bool(
+            os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False
         )
-        for pod_selector in pod_selectors:
-            wait_for_stopped_pods(pod_selector)
+        self.selected = ""
+        self.disabled = False
+        self.active_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(ms.STATE_DIR / "active-model")))
+        self.manifest = WorkloadManifestBuilder.manifest_path()
+        self.empty_manifest = '{"apiVersion":"v1","kind":"List","items":[]}\n'
 
+    @staticmethod
+    def warn(message: str) -> None:
+        sys.stderr.write(f"oksa-plan-vllm-workloads: {message}\n")
 
-def reconcile(dry_run: bool, require_reconcile: bool = False) -> None:
-    state_dir = ms.STATE_DIR
-    models_dir = ms.MODELS_DIR
-    manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
-    manifest = manifest_dir / "32-vllm-generated.yaml"
-    image = os.environ.get(
-        "PUU_VLLM_IMAGE",
-        "vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967",
-    )
-    active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
-    selected_model_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(state_dir / "selected-model")))
-    serving_disabled_file = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(state_dir / "serving.disabled")))
-    selected_model = os.environ.get("PUU_VLLM_SELECTED_MODEL", "")
-    require_selected_model = require_reconcile or ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False)
-    ignore_serving_disabled = ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
-
-    disabled = not ignore_serving_disabled and serving_disabled_file.is_file()
-    if not selected_model:
-        selected_model = ms.read_first_line(selected_model_file)
-
-    def invalid_selection(err: ms.InvalidModelSelection) -> None:
-        warn(str(err))
-        if require_selected_model:
-            sys.exit(1)
-        if not disabled:
-            raise err
-
-    try:
+    def load(self) -> ms.WorkloadState:
+        self.disabled = not ms.parse_bool(
+            os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False
+        ) and Path(os.environ.get(
+            "PUU_VLLM_SERVING_DISABLED_FILE", str(ms.STATE_DIR / "serving.disabled")
+        )).is_file()
+        self.selected = os.environ.get("PUU_VLLM_SELECTED_MODEL", "") or ms.read_first_line(
+            Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(ms.STATE_DIR / "selected-model")))
+        )
         state = ms.WorkloadState.load(
-            state_dir, models_dir, check_model_paths=not disabled,
-            resolve_public_names=bool(selected_model) and not ms.is_calibration_model(selected_model),
-            selected_model=selected_model, on_invalid_selection=invalid_selection,
+            ms.STATE_DIR, ms.MODELS_DIR, check_model_paths=not self.disabled,
+            resolve_public_names=bool(self.selected), selected_model=self.selected,
         )
-    except ms.InvalidModelSelection:
-        return
-    if selected_model:
-        try:
-            selected_model = state.resolve_model_name(selected_model)
-        except ms.InvalidModelSelection:
-            pass
+        if self.selected:
+            self.selected = state.resolve_model_name(self.selected)
+        if state.snapshot is None:
+            raise ValueError(f"Cannot evaluate workloads: {state.capability_error}")
+        return state
 
-    empty_manifest = "apiVersion: v1\nkind: List\nitems: []\n"
-    evaluation = WorkloadEvaluator(state.snapshot).evaluate(selected_model, disabled)
-    for reason in evaluation.reasons:
-        warn(reason)
-    planned = evaluation.plan
-    bonsai_active = evaluation.calibrated_active
-
-    if selected_model and not (planned or bonsai_active):
-        if require_selected_model:
-            sys.exit(1)
-        if not disabled:
+    def calibrate(self) -> None:
+        state = self.load()
+        if self.disabled:
             return
-
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    manifest_content = render_manifest(planned, image, models_dir) if planned else empty_manifest
-    manifest_changed = not manifest.is_file() or manifest.read_text() != manifest_content
-
-    active_name = (ms.CALIBRATION_MODEL if bonsai_active else planned.spec.name) if (bonsai_active or planned) else ""
-    prev_active = ms.read_first_line(active_model_file)
-
-    if not dry_run:
-        if not active_name and not ms.sync_litellm_models(None, state_dir):
-            warn("failed to unpublish stopped model from LiteLLM")
-            if disabled or require_selected_model:
-                sys.exit(1)
-        if disabled or bonsai_active or planned:
-            if manifest_changed:
-                ms.atomic_write_text(manifest, empty_manifest)
-            stop_generic_workloads(planned.app_name if planned else "")
-        if state.calibrated is not None and (disabled or selected_model):
-            calibrated_manifest = state.calibrated.manifest_with_replicas(int(bonsai_active))
-            ms.atomic_write_text(ms.CALIBRATED_MANIFEST_PATH, json.dumps(calibrated_manifest) + "\n")
-            ms.run_kubectl("apply", "-f", str(ms.CALIBRATED_MANIFEST_PATH), "--request-timeout=20s", timeout=30)
-            if not bonsai_active:
-                wait_for_stopped_pods(f"app.kubernetes.io/name={ms.CALIBRATION_MODEL}")
-
-    if manifest_changed:
-        ms.atomic_write_text(manifest, manifest_content)
-    if active_name:
-        if not dry_run and not ms.sync_litellm_models(active_name, state_dir):
-            warn(f"failed to publish {active_name} to LiteLLM")
-            sys.exit(1)
-        ms.atomic_write_text(active_model_file, f"{active_name}\n")
-    else:
-        active_model_file.unlink(missing_ok=True)
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Reconcile model serving workloads")
-    parser.add_argument("--require-reconcile", action="store_true", help="Fail instead of skipping live reconciliation")
-    args = parser.parse_args()
-    manifest_dir = Path(os.environ.get("PUU_K3S_MANIFEST_DIR", "/var/lib/rancher/k3s/server/manifests"))
-    dry_run = (ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
-               or manifest_dir != ms.CALIBRATED_MANIFEST_PATH.parent)
-    if dry_run:
-        if args.require_reconcile:
-            sys.exit("Live reconciliation is required; dry-run configuration is active")
-        reconcile(dry_run=True)
-        return
-    ms.STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with (ms.STATE_DIR / "planner.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            calibration_lock = (STATUS_PATH.parent / "lock").open("a")
-        except FileNotFoundError:
-            if args.require_reconcile:
-                sys.exit("Calibration has not initialized; reconciliation was not performed")
-            return
-        with calibration_lock:
+        selected = self.selected
+        candidates = sorted(
+            (model for model in state.snapshot.models
+             if model.spec.name == selected or (not selected and model.spec.autostart)),
+            key=lambda model: -model.spec.autostart_priority,
+        )
+        if not candidates and state.snapshot.models:
+            raise RuntimeError("No selected model or autostart model is configured")
+        rejected = []
+        measured = False
+        for model in candidates:
+            evaluation = WorkloadEvaluator(state.snapshot).evaluate(
+                model.spec.name, require_calibration=False
+            )
+            if evaluation.plan is None and state.snapshot.node.gpu_count > 0:
+                rejected.extend(evaluation.reasons)
+                for reason in evaluation.reasons:
+                    self.warn(reason)
+                continue
+            needs_calibration = True
             try:
-                fcntl.flock(calibration_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            except BlockingIOError:
-                if args.require_reconcile or ms.parse_bool(os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False):
-                    sys.exit("Calibration is in progress")
+                result = CalibrationStore.load(model.spec)
+                aggregate = read_record(STATUS_PATH)
+                needs_calibration = not (
+                    aggregate.get("model") == model.spec.name and aggregate.get("boot_id") == boot_id()
+                    and aggregate.get("state") == "complete"
+                    and aggregate.get("fingerprint") == result["fingerprint"]
+                )
+            except (FileNotFoundError, ValueError):
+                pass
+            if needs_calibration:
+                subprocess.run(
+                    [str(Path(__file__).with_name("oksa-calibrate")), "--model", model.spec.name],
+                    check=True,
+                )
+                state = self.load()
+                if self.disabled or self.selected != selected:
+                    return
+                result = CalibrationStore.load(model.spec)
+            measured = True
+            if result["limits"]["max_num_seqs"] > 0:
                 return
-            reconcile(dry_run=False, require_reconcile=args.require_reconcile)
+        if candidates and not measured:
+            raise RuntimeError("No configured model can be calibrated: " + "; ".join(rejected))
+
+    def reconcile(self, dry_run: bool) -> None:
+        try:
+            state = self.load()
+        except ms.InvalidModelSelection as error:
+            self.warn(str(error))
+            if self.require_selected or not self.disabled:
+                raise
+            state = ms.WorkloadState.load(ms.STATE_DIR, ms.MODELS_DIR, check_model_paths=False)
+        evaluation = WorkloadEvaluator(state.snapshot).evaluate(self.selected, self.disabled)
+        for reason in evaluation.reasons:
+            self.warn(reason)
+        planned = evaluation.plan
+        content = WorkloadManifestBuilder(planned, ms.MODELS_DIR).render() if planned else self.empty_manifest
+        changed = not self.manifest.is_file() or self.manifest.read_text() != content
+        active = planned.spec.name if planned else ""
+        previous = ms.read_first_line(self.active_file)
+        if not dry_run:
+            if changed or previous != active or not active:
+                if not ms.sync_litellm_models(None, ms.STATE_DIR):
+                    raise RuntimeError("Failed to unpublish model routing before reconciliation")
+                self.active_file.unlink(missing_ok=True)
+            if changed:
+                ms.atomic_write_text(self.manifest, self.empty_manifest)
+            WorkloadManifestBuilder.stop_workloads(planned.app_name if planned and not changed else "")
+        if changed:
+            ms.atomic_write_text(self.manifest, content)
+        if active:
+            if not dry_run and not ms.sync_litellm_models(active, ms.STATE_DIR):
+                raise RuntimeError(f"Failed to publish {active} to LiteLLM")
+            ms.atomic_write_text(self.active_file, f"{active}\n")
+        else:
+            self.active_file.unlink(missing_ok=True)
+        if self.selected and not planned and self.require_selected and not self.disabled:
+            raise RuntimeError(f"Selected model {self.selected} has no deployable calibrated profile")
+
+    @classmethod
+    def main(cls) -> None:
+        parser = argparse.ArgumentParser(description="Reconcile model serving workloads")
+        parser.add_argument("--require-reconcile", action="store_true", help="Fail instead of skipping live reconciliation")
+        args = parser.parse_args()
+        planner = cls(args.require_reconcile)
+        dry_run = (ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
+                   or planner.manifest.parent != Path("/var/lib/rancher/k3s/server/manifests"))
+        if dry_run:
+            if args.require_reconcile:
+                sys.exit("Live reconciliation is required; dry-run configuration is active")
+            planner.reconcile(dry_run=True)
+            return
+        ms.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with (ms.STATE_DIR / "planner.lock").open("a") as planner_lock:
+            fcntl.flock(planner_lock, fcntl.LOCK_EX)
+            planner.calibrate()
+            with (STATUS_PATH.parent / "lock").open("a") as gpu_lock:
+                fcntl.flock(gpu_lock, fcntl.LOCK_EX)
+                planner.reconcile(dry_run=False)
 
 
 if __name__ == "__main__":
-    main()
+    WorkloadPlanner.main()

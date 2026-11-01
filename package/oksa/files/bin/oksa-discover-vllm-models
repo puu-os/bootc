@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+from contextlib import nullcontext
+import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shlex
+import stat as statmod
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,29 +27,205 @@ def estimate_model_memory_mib(model_dir: Path) -> int:
         return 0
 
 
-def discover(models_dir: Path) -> list[Path]:
-    if not models_dir.is_dir():
-        return []
+def discover(models_dir: Path) -> list[ms.ModelSpec]:
     catalog_dir = Path(os.environ.get("PUU_VLLM_MODEL_CATALOG_DIR", "/usr/share/puu/vllm/catalog.d"))
+    architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
     catalog = {}
-    for catalog_file in catalog_dir.glob("*.env"):
-        meta = ms.parse_env_file(catalog_file)
-        catalog[meta.get("PUU_VLLM_MODEL_NAME") or catalog_file.stem] = meta
-    result = []
-    for entry in sorted(models_dir.iterdir()):
-        if not entry.is_dir() or not NAME_RE.match(entry.name) or not (entry / "config.json").is_file():
+    for catalog_file in sorted(catalog_dir.glob("*.env")):
+        try:
+            chain = [parent.lstat() for parent in catalog_file.absolute().parents]
+            if any(info.st_uid != 0 or info.st_mode & 0o022 or not statmod.S_ISDIR(info.st_mode) for info in chain):
+                print(f"Ignoring untrusted runtime catalog ancestry: {catalog_file}", file=sys.stderr)
+                continue
+            with os.fdopen(os.open(catalog_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), encoding="utf-8") as stream:
+                info = os.fstat(stream.fileno())
+                if info.st_uid != 0 or info.st_mode & 0o022 or not statmod.S_ISREG(info.st_mode):
+                    continue
+                meta = {}
+                for raw_line in stream:
+                    line = raw_line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, _, value = line.partition("=")
+                        meta[key.strip()] = " ".join(shlex.split(value))
+        except (OSError, ValueError) as exc:
+            print(f"Ignoring unreadable runtime catalog {catalog_file}: {exc}", file=sys.stderr)
             continue
-        if entry.name in catalog:
-            meta = catalog[entry.name]
-            repo_id = meta.get("PUU_VLLM_REPO_ID")
-            if not repo_id or not ms.verified_preseed(
-                entry, repo_id, meta.get("PUU_VLLM_REVISION", "main") or "main"
-            ):
+        identity = (meta.get("PUU_VLLM_REPO_ID"), meta.get("PUU_VLLM_REVISION"))
+        if identity[0] and re.fullmatch(r"[0-9a-f]{40}", identity[1] or ""):
+            if identity in catalog:
+                raise ValueError(f"duplicate runtime catalog identity: {identity}")
+            profiles = json.loads(meta.pop("PUU_VLLM_RUNTIME_PROFILES", "{}"))
+            meta.update(profiles.get(architecture, {}))
+            meta.pop("PUU_VLLM_AUTOSTART", None)
+            meta["PUU_VLLM_METADATA_SOURCES"] = json.dumps([str(catalog_file.absolute())])
+            catalog[identity] = meta
+    candidates = []
+    if models_dir.is_dir():
+        for entry in sorted(models_dir.iterdir()):
+            if (entry.is_dir() and not entry.is_symlink() and not entry.name.startswith(".")
+                    and NAME_RE.fullmatch(entry.name)):
+                candidates.append((entry, entry.name, "", "", False))
+    for repo_dir in sorted(ms.ModelSpec.hf_cache_dir().glob("models--*")):
+        if repo_dir.is_symlink() or not repo_dir.is_dir():
+            continue
+        repo_id = repo_dir.name.removeprefix("models--").replace("--", "/")
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)?", repo_id):
+            continue
+        for snapshot in sorted((repo_dir / "snapshots").glob("*")):
+            if snapshot.is_symlink() or not snapshot.is_dir() or not re.fullmatch(r"[0-9a-f]{40}", snapshot.name):
                 continue
-        elif (entry / ms.PRESEED_MANIFEST).exists():
-            if not ms.verified_preseed(entry):
+            name = ms.normalize_storage_id(repo_id, f"{repo_id.replace('/', '--')}--{snapshot.name}")
+            candidates.append((snapshot, name, repo_id, snapshot.name, True))
+    verification_file = ms.STATE_DIR / "cache-verification.json"
+    verification = {}
+    try:
+        chain = [parent.lstat() for parent in verification_file.absolute().parents]
+        if all(info.st_uid == 0 and not info.st_mode & 0o022 and statmod.S_ISDIR(info.st_mode) for info in chain):
+            with os.fdopen(os.open(verification_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), encoding="utf-8") as stream:
+                info = os.fstat(stream.fileno())
+                if info.st_uid == 0 and not info.st_mode & 0o022 and statmod.S_ISREG(info.st_mode):
+                    verification = json.load(stream)
+                    if not isinstance(verification, dict):
+                        verification = {}
+    except (OSError, ValueError):
+        verification = {}
+    discovered = []
+    for entry, name, repo_id, revision, cached in candidates:
+        try:
+            config = json.loads((entry / "config.json").read_text())
+            if not isinstance(config, dict):
                 continue
-        result.append(entry)
+            metadata_file = entry / "puu-serving.env"
+            meta = {}
+            if not cached and metadata_file.is_file():
+                chain = [parent.lstat() for parent in metadata_file.absolute().parents]
+                if all(info.st_uid == 0 and not info.st_mode & 0o022 and statmod.S_ISDIR(info.st_mode) for info in chain):
+                    with os.fdopen(os.open(metadata_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), encoding="utf-8") as stream:
+                        info = os.fstat(stream.fileno())
+                        if info.st_uid == 0 and not info.st_mode & 0o022 and statmod.S_ISREG(info.st_mode):
+                            for raw_line in stream:
+                                line = raw_line.strip()
+                                if line and not line.startswith("#") and "=" in line:
+                                    key, _, value = line.partition("=")
+                                    meta[key.strip()] = " ".join(shlex.split(value))
+                            meta["PUU_VLLM_METADATA_SOURCES"] = json.dumps([str(metadata_file.absolute())])
+            if not cached and (entry / ms.PRESEED_MANIFEST).exists():
+                if not ms.verified_preseed(entry):
+                    continue
+                manifest = json.loads((entry / ms.PRESEED_MANIFEST).read_text())
+                repo_id, revision = manifest["repo_id"], manifest["revision"]
+            elif not cached:
+                repo_id = meta.get("PUU_VLLM_REPO_ID", "")
+                revision = meta.get("PUU_VLLM_REVISION", "")
+            weights = {
+                path.name for suffix in ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.gguf")
+                for path in entry.glob(suffix)
+                if path.name not in ("tokenizer.bin", "training_args.bin", "optimizer.bin", "scheduler.bin", "rng_state.bin")
+            }
+            indexes = set()
+            for index in entry.glob("*.index.json"):
+                indexes.add(index.name)
+                index_meta = json.loads(index.read_text())
+                if not isinstance(index_meta, dict):
+                    raise ValueError(f"invalid weight index: {index}")
+                weight_map = index_meta.get("weight_map", {})
+                if not isinstance(weight_map, dict):
+                    raise ValueError(f"invalid weight index: {index}")
+                weights.update(weight_map.values())
+            if not weights:
+                continue
+            for weight in tuple(weights):
+                shard = re.fullmatch(r"(.+)-(\d{5})-of-(\d{5})(\..+)", weight)
+                if shard:
+                    total = int(shard[3])
+                    if total < 1 or total > 100000:
+                        raise ValueError(f"invalid shard count: {weight}")
+                    weights.update(f"{shard[1]}-{number:05d}-of-{total:05d}{shard[4]}" for number in range(1, total + 1))
+            for filename in weights | indexes | {"config.json"}:
+                if not isinstance(filename, str) or not ms.valid_model_file(filename):
+                    raise ValueError(f"invalid weight path: {filename!r}")
+                path = entry / filename
+                stat = path.stat()
+                if not path.is_file() or stat.st_size <= 0:
+                    raise ValueError(f"missing or empty model file: {path}")
+                if cached:
+                    blob = path.resolve()
+                    if (blob.parent != (entry.parent.parent / "blobs").resolve()
+                            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob.name)):
+                        raise ValueError(f"unverified cache blob: {path}")
+                    signature = [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino]
+                    if verification.get(str(blob)) != signature:
+                        digest = hashlib.sha256() if len(blob.name) == 64 else hashlib.sha1(f"blob {stat.st_size}\0".encode())
+                        with blob.open("rb") as stream:
+                            for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                                digest.update(block)
+                        if digest.hexdigest() != blob.name:
+                            raise ValueError(f"cache checksum mismatch: {path}")
+                        verification[str(blob)] = signature
+            runtime_meta = catalog.get((repo_id, revision), {})
+            if meta.get("PUU_VLLM_EXTRA_ARGS") and runtime_meta.get("PUU_VLLM_EXTRA_ARGS"):
+                runtime_meta = {**runtime_meta, "PUU_VLLM_EXTRA_ARGS": " ".join(dict.fromkeys([
+                    runtime_meta["PUU_VLLM_EXTRA_ARGS"], meta["PUU_VLLM_EXTRA_ARGS"],
+                ]))}
+            sources = list(dict.fromkeys(
+                json.loads(meta.get("PUU_VLLM_METADATA_SOURCES", "[]"))
+                + json.loads(runtime_meta.get("PUU_VLLM_METADATA_SOURCES", "[]"))
+            ))
+            meta = {**meta, **runtime_meta, "PUU_VLLM_REPO_ID": repo_id, "PUU_VLLM_REVISION": revision}
+            meta["PUU_VLLM_METADATA_SOURCES"] = json.dumps(sources)
+            if not meta.get("PUU_VLLM_MAX_CONTEXT"):
+                ceilings = [
+                    section[key] for section in (config, config.get("text_config", {}))
+                    if isinstance(section, dict)
+                    for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length")
+                    if type(section.get(key)) is int and section[key] > 0
+                ]
+                if ceilings:
+                    meta["PUU_VLLM_MAX_CONTEXT"] = str(min(262144, *ceilings))
+            spec = ms.ModelSpec.from_env(
+                meta, name=name, path=str(entry.resolve()), estimated_default=estimate_model_memory_mib(entry),
+            )
+            if cached and spec.cached_model_root is None:
+                raise ValueError("invalid cached snapshot root")
+            discovered.append((spec, cached))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"Skipping model directory {entry}: {exc}", file=sys.stderr)
+    if ms.STATE_DIR.is_dir():
+        ms.atomic_write_text(verification_file, json.dumps(verification) + "\n")
+    result = []
+    seen_repos = set()
+    seen_paths = set()
+    seen_names = set()
+    for spec, cached in discovered:
+        if cached:
+            if any(not other_cached and other.repo_id == spec.repo_id for other, other_cached in discovered):
+                continue
+            revisions = [other for other, other_cached in discovered if other_cached and other.repo_id == spec.repo_id]
+            main_file = Path(spec.path).parent.parent / "refs/main"
+            try:
+                main_revision = main_file.read_text().strip() if main_file.is_file() else ""
+            except OSError as exc:
+                print(f"Skipping unreadable cache reference {main_file}: {exc}", file=sys.stderr)
+                continue
+            if main_revision:
+                if Path(spec.path).name != main_revision:
+                    continue
+            elif len(revisions) != 1:
+                print(f"Skipping ambiguous cached revisions for {spec.repo_id}", file=sys.stderr)
+                continue
+            exclusion = ms.STATE_DIR / "cache-exclusions" / hashlib.sha256(spec.path.encode()).hexdigest()
+            if exclusion.exists():
+                continue
+        if spec.path in seen_paths or spec.name in seen_names:
+            continue
+        if spec.repo_id and spec.repo_id in seen_repos:
+            print(f"Skipping duplicate model repository {spec.repo_id} at {spec.path}", file=sys.stderr)
+            continue
+        seen_paths.add(spec.path)
+        seen_names.add(spec.name)
+        if spec.repo_id:
+            seen_repos.add(spec.repo_id)
+        result.append(spec)
     return result
 
 
@@ -54,61 +234,44 @@ def main() -> None:
     state_dir = ms.STATE_DIR
     model_state_dir = state_dir / "models.d"
 
-    try:
-        model_state_dir.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        return
+    model_state_dir.mkdir(parents=True, exist_ok=True)
 
-    if models_dir.parent.is_dir():
-        with ms.preseed_publish_lock(models_dir):
-            publish_state(models_dir, state_dir, model_state_dir)
-    else:
-        publish_state(models_dir, state_dir, model_state_dir)
+    with ms.preseed_publish_lock(models_dir) if models_dir.parent.is_dir() else nullcontext():
+        models_list_lines = []
+        models_json_items = []
+        created_envs: set[Path] = set()
+        default_env_text = ""
 
+        for spec in discover(models_dir):
+            model_env = model_state_dir / f"{spec.name}.env"
+            created_envs.add(model_env)
+            ms.atomic_write_text(model_env, spec.to_env_text())
 
-def publish_state(models_dir: Path, state_dir: Path, model_state_dir: Path) -> None:
-    models_list_lines = []
-    models_json_items = []
-    created_envs: set[Path] = set()
-    default_env_text = ""
+            if not default_env_text:
+                default_env_text = "\n".join([
+                    f"PUU_VLLM_MODEL_NAME={shlex.quote(spec.name)}",
+                    f"PUU_VLLM_MODEL_PATH={shlex.quote(spec.path)}",
+                    f"PUU_VLLM_MODEL_ENV={shlex.quote(str(model_env))}",
+                ]) + "\n"
 
-    for model_dir in discover(models_dir):
-        spec = ms.ModelSpec.from_env(
-            ms.parse_env_file(model_dir / "puu-serving.env"),
-            name=model_dir.name,
-            path=str(model_dir),
-            estimated_default=estimate_model_memory_mib(model_dir),
+            models_list_lines.append(f"{spec.name}\t{spec.path}\t{model_env}")
+            models_json_items.append(spec.to_json_dict(model_env))
+
+        for existing in model_state_dir.glob("*.env"):
+            if existing not in created_envs:
+                existing.unlink(missing_ok=True)
+
+        ms.atomic_write_text(
+            state_dir / "models.list",
+            "\n".join(models_list_lines) + ("\n" if models_list_lines else ""),
         )
+        ms.atomic_write_text(state_dir / "models.json", json.dumps(models_json_items, indent=2) + "\n")
 
-        model_env = model_state_dir / f"{spec.name}.env"
-        created_envs.add(model_env)
-        ms.atomic_write_text(model_env, spec.to_env_text())
-
-        if not default_env_text:
-            default_env_text = "\n".join([
-                f"PUU_VLLM_MODEL_NAME={shlex.quote(spec.name)}",
-                f"PUU_VLLM_MODEL_PATH={shlex.quote(spec.path)}",
-                f"PUU_VLLM_MODEL_ENV={shlex.quote(str(model_env))}",
-            ]) + "\n"
-
-        models_list_lines.append(f"{spec.name}\t{spec.path}\t{model_env}")
-        models_json_items.append(spec.to_json_dict(model_env))
-
-    for existing in model_state_dir.glob("*.env"):
-        if existing not in created_envs:
-            existing.unlink(missing_ok=True)
-
-    ms.atomic_write_text(
-        state_dir / "models.list",
-        "\n".join(models_list_lines) + ("\n" if models_list_lines else ""),
-    )
-    ms.atomic_write_text(state_dir / "models.json", json.dumps(models_json_items, indent=2) + "\n")
-
-    default_model_file = state_dir / "default-model.env"
-    if default_env_text:
-        ms.atomic_write_text(default_model_file, default_env_text)
-    else:
-        default_model_file.unlink(missing_ok=True)
+        default_model_file = state_dir / "default-model.env"
+        if default_env_text:
+            ms.atomic_write_text(default_model_file, default_env_text)
+        else:
+            default_model_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

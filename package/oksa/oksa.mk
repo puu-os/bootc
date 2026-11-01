@@ -23,11 +23,6 @@ define OKSA_USERS
 endef
 
 OKSA_FILES = $(OKSA_PKGDIR)/files
-ifeq ($(BR2_aarch64),y)
-OKSA_BONSAI_MANIFEST_DIR = arm64/
-else
-OKSA_BONSAI_MANIFEST_DIR =
-endif
 
 define OKSA_EXTRACT_CMDS
 	$(INSTALL) -D -m 0644 $(OKSA_FILES)/LICENSE $(@D)/LICENSE
@@ -63,12 +58,13 @@ define OKSA_INSTALL_ASSETS
 		40-litellm.yaml 45-open-webui.yaml 46-oksa.yaml,\
 		$(INSTALL) -D -m 0644 $(OKSA_FILES)/manifests/$(manifest) \
 			$(TARGET_DIR)/usr/share/puu/k3s/manifests/$(manifest)$(sep))
-	$(INSTALL) -D -m 0644 $(OKSA_FILES)/manifests/$(OKSA_BONSAI_MANIFEST_DIR)33-bonsai-2-27b.yaml \
-		$(TARGET_DIR)/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/share/puu/vllm/catalog.d
 	$(foreach catalog,$(notdir $(wildcard $(OKSA_FILES)/vllm/catalog.d/*.env)),\
 		$(INSTALL) -D -m 0644 $(OKSA_FILES)/vllm/catalog.d/$(catalog) \
 			$(TARGET_DIR)/usr/share/puu/vllm/catalog.d/$(catalog)$(sep))
+	$(foreach runtime,$(notdir $(wildcard $(OKSA_FILES)/vllm/runtime/*)),\
+		$(INSTALL) -D -m 0644 $(OKSA_FILES)/vllm/runtime/$(runtime) \
+			$(TARGET_DIR)/usr/share/puu/vllm/runtime/$(runtime)$(sep))
 endef
 OKSA_POST_INSTALL_TARGET_HOOKS += OKSA_INSTALL_ASSETS
 
@@ -76,7 +72,7 @@ define OKSA_INSTALL_INIT_SYSTEMD
 	for unit in puu-k3s-addons.service puu-model-serving-labeler.service \
 		puu-model-serving-labeler.timer puu-vllm-planner.service \
 		puu-vllm-planner.timer puu-vllm-preseed.service \
-		puu-postgresql.service puu-bonsai-calibration.service \
+		puu-postgresql.service \
 		puu-oksa.service puu-oksa-proxy.service; do \
 		$(INSTALL) -D -m 0644 $(OKSA_FILES)/systemd/$$unit \
 			$(TARGET_DIR)/usr/lib/systemd/system/$$unit || exit $$?; \

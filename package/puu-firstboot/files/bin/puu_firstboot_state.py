@@ -17,6 +17,7 @@ for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3]
         sys.path.insert(0, str(_candidate))
 
 import oksa_calibration_state as cs
+import oksa_model_serving as ms
 
 STATUS_PATH = Path("/run/puu-firstboot/status.json")
 COMPLETION_PATH = Path("/var/lib/puu/firstboot/completed.json")
@@ -25,8 +26,6 @@ IDENTITY_PATH = Path("/var/lib/puu/identity.json")
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 MACHINE_ID_PATH = Path("/etc/machine-id")
 CMDLINE_PATH = Path("/proc/cmdline")
-MODEL = os.environ.get("PUU_MODEL", "bonsai-2-27b")
-SERVED_MODEL = os.environ.get("PUU_SERVED_MODEL", "fraserprice/Ternary-Bonsai-2-27B-vllm")
 MAX_BYTES = 1024 * 1024
 STATUS_TTL = 180
 CORE_UNITS = (
@@ -36,7 +35,7 @@ CORE_UNITS = (
     "puu-postgresql.service",
     "puu-k3s-addons.service",
     "puu-vllm-preseed.service",
-    "puu-bonsai-calibration.service",
+    "puu-vllm-planner.service",
     "puu-model-serving-labeler.service",
     "avahi-daemon.service",
 
@@ -143,15 +142,42 @@ def setup_required() -> bool:
 
 
 def verification_valid(value):
-    if value.get("verification") == "public-chat-completion":
-        return True
-    if value.get("verification") != "zero-capacity-calibration":
+    model = value.get("model")
+    public_name = value.get("served_model")
+    entries = ms.read_models_list(ms.STATE_DIR / "models.list")
+    selected_file, disabled_file = ms.control_files()
+    active_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(ms.STATE_DIR / "active-model")))
+    selected = os.environ.get("PUU_VLLM_SELECTED_MODEL", "") or (selected_file.read_text().strip() if selected_file.exists() else "")
+    active = active_file.read_text().strip() if active_file.exists() else ""
+    if value.get("verification") == "inference-not-configured":
+        return (
+            model is None and public_name is None and not entries
+            and (ms.STATE_DIR / "models.list").is_file() and not selected and not active
+        )
+    if (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model)
+            or not isinstance(public_name, str) or not public_name):
         return False
-    calibration = cs.read_record(cs.RESULT_PATH)
+    matches = [entry for entry in entries if entry[0] == model]
+    if len(matches) != 1:
+        return False
+    metadata = ms.ModelSpec.read_metadata(Path(matches[0][2]))
+    if public_name != (metadata.get("PUU_VLLM_REPO_ID") or model) or (selected and selected not in (model, public_name)):
+        return False
+    if value.get("verification") == "public-chat-completion":
+        if active not in (model, public_name) or disabled_file.exists():
+            return False
+    elif value.get("verification") != "zero-capacity-calibration" or active:
+        return False
+    calibration = cs.read_record(cs.result_path(model))
+    if not cs.valid_result(calibration, model):
+        return False
+    spec = ms.ModelSpec.from_env(metadata, name=model, path=matches[0][1])
+    identity = cs.CalibrationStore.identity(spec)
     return (
-        cs.valid_result(calibration)
-        and calibration["limits"] == cs.ZERO_LIMITS
-        and calibration.get("identity", {}).get("machine_id") == machine_id()
+        (calibration["limits"] == cs.ZERO_LIMITS) == (value["verification"] == "zero-capacity-calibration")
+        and identity.get("machine_id") == machine_id()
+        and calibration["identity"] == identity
+        and calibration["fingerprint"] == cs.CalibrationStore.fingerprint(identity)
         and value.get("calibration_fingerprint") == calibration["fingerprint"]
     )
 
@@ -164,14 +190,12 @@ def completion_valid() -> bool:
         value = read_record(COMPLETION_PATH)
         return (
             value.get("machine_id") == machine_id()
-            and bool(value.get("model"))
-            and bool(value.get("served_model"))
             and verification_valid(value)
             and valid_timestamp(value.get("completed_at"))
             and type(value.get("enrolled_at")) in (int, float)
             and value["enrolled_at"] == enrollment["enrolled_at"]
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
 
