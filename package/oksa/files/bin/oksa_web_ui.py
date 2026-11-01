@@ -28,7 +28,7 @@ class _OksaPage:
     def __init__(self, service: OksaClient) -> None:
         self.service = service
         self.client = ui.context.client
-        self.locks = {name: asyncio.Lock() for name in ("status", "pull", "models", "users")}
+        self.locks = {name: asyncio.Lock() for name in ("status", "pull", "models", "users", "search", "inspect")}
         self.generations = dict.fromkeys(self.locks, 0)
         self.busy: set[str] = set()
         self.warnings: dict[str, str] = {}
@@ -47,6 +47,7 @@ class _OksaPage:
         self.inspection_generation = 0
         self.secret = ""
         self.active_pull_job: str | None = None
+        self.search_generation = 0
 
     def build(self) -> None:
         ui.dark_mode(False)
@@ -446,17 +447,17 @@ class _OksaPage:
         self.inference.set_text(inference)
 
     def _build_models(self) -> None:
-        with ui.row():
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.button("Find a model", icon="search", on_click=self._open_download)
             ui.button("Refresh models", color="accent", on_click=self._load_models).props("outline")
-            self.start_button = ui.button("Start selected", on_click=lambda: self._model_action("start"))
-            self.stop_button = ui.button("Stop serving", color="negative", on_click=lambda: self._model_action("stop")).props("outline")
-            self.remove_button = ui.button("Remove selected", color="negative", on_click=lambda: self._model_action("remove")).props("outline")
-            ui.button("Download model", on_click=self._open_download)
+            self.start_button = ui.button("Start selected", on_click=lambda: self._model_action("start")).props("outline")
+            self.stop_button = ui.button("Stop serving", color="accent", on_click=lambda: self._model_action("stop")).props("outline")
+            self.remove_button = ui.button("Remove selected", color="negative", on_click=lambda: self._model_action("remove")).props("flat")
         self.model_controls = [self.start_button, self.stop_button, self.remove_button]
         self.models_summary = ui.label("Catalog not loaded")
         self.models_error = ui.label("").classes("text-negative")
         self.models_table = self._table("Installed models", {
-            "name": "Name", "repo_id": "Repository", "storage": "Storage", "quantization": "Quantization", "state": "State",
+            "name": "Model", "storage": "On disk", "quantization": "Format", "state": "State",
         }, selection="single")
         self.models_table.on_select(self._model_selection)
         with ui.row().classes("w-full items-center justify-between gap-2"):
@@ -595,26 +596,105 @@ class _OksaPage:
                 self._model_selection()
 
     def _build_download_dialog(self) -> None:
-        with ui.dialog() as self.download_dialog, ui.card().classes("w-full"):
-            ui.label("Download model").classes("text-lg font-semibold uppercase").props("role=heading aria-level=2")
-            self.repo = ui.input("Hugging Face repository", on_change=self._invalidate_inspection).classes("w-full")
-            self.download_name = ui.input("Storage ID (optional)", on_change=self._invalidate_inspection).classes("w-full")
-            self.revision = ui.input("Revision", value="main", on_change=self._invalidate_inspection).classes("w-full")
-            self.inspection_text = ui.label("Inspect before downloading.")
+        with ui.dialog() as self.download_dialog, ui.card().classes("w-full max-w-3xl"):
+            ui.label("Find a model").classes("text-lg font-semibold").props("role=heading aria-level=2")
+            ui.label("Browse downloadable AI models from Hugging Face.").classes("text-sm")
+            with ui.row().classes("w-full items-start gap-2"):
+                self.model_search = ui.input("Search models", placeholder="Model name",
+                                             on_change=self._search_models).props("outlined clearable debounce=500").classes("grow")
+                self.model_search.on("keydown.enter", self._search_models)
+                self.search_button = ui.button("Search", icon="search", on_click=self._search_models)
+            self.search_message = ui.label("Search by model name.").classes("text-sm")
+            self.search_table = self._table("Search results", {
+                "name": "Model", "author": "Publisher", "downloads": "Downloads", "access": "Access",
+            }, selection="single", row_key="repo_id").props("flat dense wrap-cells")
+            self.search_table.set_visibility(False)
+            self.search_table.on_select(self._select_search_result)
+            self.search_table.on("rowClick", self._search_row_clicked,
+                                 js_handler="(evt, row) => { if (!evt?.target?.closest?.('.q-table--col-auto-width, .q-checkbox')) emit(row.repo_id); }")
+            self.inspection_text = ui.label("Choose a model to review its download size.").classes("whitespace-pre-line break-words")
             self.download_error = ui.label("").classes("text-negative")
-            with ui.row():
-                self.download_cancel = ui.button("Close", color="accent", on_click=self.download_dialog.close).props("outline")
-                self.inspect_button = ui.button("Inspect", color="accent", on_click=self._inspect).props("outline")
-                self.download_button = ui.button("Download inspected revision", on_click=self._download)
+            with ui.expansion("Advanced", icon="tune").classes("w-full"):
+                self.repo = ui.input("Model ID", placeholder="publisher/model", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
+                self.download_name = ui.input("Local name (optional)", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
+                self.revision = ui.input("Version or commit", value="main", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
+                self.inspection_revision = ui.label("").classes("text-sm font-mono break-all")
+                self.inspect_button = ui.button("Review model", color="accent", on_click=self._inspect).props("outline")
+            with ui.row().classes("w-full justify-end gap-2"):
+                self.download_cancel = ui.button("Close", color="accent", on_click=self.download_dialog.close).props("flat")
+                self.download_button = ui.button("Download", icon="download", on_click=self._download)
         self.download_button.disable()
-        self.download_dialog.on_value_change(lambda event: self._invalidate_inspection() if not event.value else None)
+        self.download_dialog.on_value_change(self._download_dialog_changed)
 
-    def _open_download(self) -> None:
+    def _download_dialog_changed(self) -> None:
+        if not self.download_dialog.value:
+            self.search_generation += 1
+            self._invalidate_inspection()
+
+    async def _open_download(self) -> None:
         if "download" in self.busy:
             return
         self._invalidate_inspection()
         self.download_error.set_text("")
         self.download_dialog.open()
+        await self._search_models()
+
+    async def _search_models(self) -> None:
+        if not self.download_dialog.value or "download" in self.busy:
+            return
+        self.search_generation += 1
+        generation = self.search_generation
+        query = str(self.model_search.value or "").strip()
+        self._invalidate_inspection()
+        self.repo.set_value("")
+        self.search_table.selected = []
+        self.search_table.rows = []
+        self.search_table.set_visibility(False)
+        self.search_message.set_text("Searching…")
+        self.download_error.set_text("")
+        async with self.locks["search"]:
+            if self.client.is_deleted or not self.download_dialog.value or generation != self.search_generation:
+                return
+            self.search_button.disable()
+            try:
+                reply = await self._call("SearchModels", query)
+                if (self.client.is_deleted or not self.download_dialog.value or generation != self.search_generation
+                        or query != str(self.model_search.value or "").strip()):
+                    return
+                models = reply[1].get("models")
+                if (not self._success(reply) or not isinstance(models, list)
+                        or not all(isinstance(model, dict) and isinstance(model.get("repo_id"), str)
+                                   and isinstance(model.get("name"), str) and isinstance(model.get("author"), str)
+                                   and self._number(model.get("downloads"), integer=True)
+                                   and type(model.get("gated")) is bool for model in models)):
+                    self.search_message.set_text("Search unavailable. " + self._error(reply))
+                    return
+                self.search_table.rows = [dict(model, access="Approval required" if model["gated"] else "Public") for model in models]
+                self.search_table.update()
+                self.search_table.set_visibility(bool(models))
+                self.search_message.set_text("Select a model to review its download size." if models else "No models found. Try another model name.")
+            finally:
+                if not self.client.is_deleted:
+                    self.search_button.enable()
+
+    async def _search_row_clicked(self, event) -> None:
+        if "download" in self.busy:
+            return
+        self.search_table.selected = [row for row in self.search_table.rows if row["repo_id"] == event.args]
+        self.search_table.update()
+        await self._select_search_result()
+
+    async def _select_search_result(self) -> None:
+        if "download" in self.busy:
+            return
+        selected = self.search_table.selected
+        self._invalidate_inspection()
+        if not selected:
+            self.repo.set_value("")
+            return
+        self.repo.set_value(selected[0]["repo_id"])
+        self.revision.set_value("main")
+        await self._inspect()
 
     def _download_inputs(self) -> tuple[str, str | None, str]:
         return (str(self.repo.value or "").strip(), str(self.download_name.value or "").strip() or None,
@@ -625,43 +705,51 @@ class _OksaPage:
         self.inspection = None
         if hasattr(self, "download_button") and not self.client.is_deleted:
             self.download_button.disable()
-            self.inspection_text.set_text("Inspect before downloading.")
+            self.inspection_text.set_text("Choose a model to review its download size.")
+            self.inspection_revision.set_text("")
 
     async def _inspect(self) -> None:
-        if not self.download_dialog.value or "download" in self.busy or not self._begin("inspect", [self.inspect_button]):
+        if not self.download_dialog.value or "download" in self.busy:
             return
         self._invalidate_inspection()
         generation = self.inspection_generation
         inputs = self._download_inputs()
+        self.inspection_text.set_text("Reviewing model…")
         self.download_error.set_text("")
-        try:
-            if not inputs[0]:
-                self.download_error.set_text("Repository ID is required.")
+        async with self.locks["inspect"]:
+            if self.client.is_deleted or not self.download_dialog.value or generation != self.inspection_generation:
                 return
-            reply = await self._call("InspectModel", inputs[0], inputs[2])
-            if (self.client.is_deleted or not self.download_dialog.value or generation != self.inspection_generation
-                    or inputs != self._download_inputs()):
-                return
-            data = reply[1]
-            metadata = data.get("metadata")
-            if (not self._success(reply) or type(data.get("fits")) is not bool or not isinstance(metadata, dict)
-                    or not isinstance(metadata.get("repo_id"), str) or not metadata["repo_id"].strip()
-                    or not isinstance(metadata.get("resolved_revision"), str)
-                    or re.fullmatch(r"[0-9a-fA-F]{40}", metadata["resolved_revision"]) is None):
-                self.download_error.set_text("Inspection failed; no download was started. " + self._error(reply))
-                return
-            self.inspection = {"inputs": inputs, "generation": generation, "fits": data["fits"],
-                               "repo_id": metadata["repo_id"], "revision": metadata["resolved_revision"], "name": inputs[1]}
-            architectures = metadata.get("architectures")
-            self.inspection_text.set_text(
-                f"{metadata['repo_id']} @ {metadata['resolved_revision']}\n"
-                + "Architecture: " + (", ".join(str(value) for value in architectures) if isinstance(architectures, list) and architectures else "unknown")
-                + "\nStorage: " + self._storage(metadata.get("storage_mib"))
-                + "; estimated RAM/VRAM: " + self._storage(metadata.get("estimated_memory_mib"))
-                + "\n" + str(data.get("reason") or ("Compatible" if data["fits"] else "Incompatible with available capacity")))
-            self.download_button.enable()
-        finally:
-            self._end("inspect", [self.inspect_button])
+            self._begin("inspect", [self.inspect_button])
+            try:
+                if not inputs[0]:
+                    self.download_error.set_text("Choose a model from the search results or enter a model ID under Advanced.")
+                    return
+                reply = await self._call("InspectModel", inputs[0], inputs[2])
+                if (self.client.is_deleted or not self.download_dialog.value or generation != self.inspection_generation
+                        or inputs != self._download_inputs()):
+                    return
+                data = reply[1]
+                metadata = data.get("metadata")
+                if (not self._success(reply) or type(data.get("fits")) is not bool or not isinstance(metadata, dict)
+                        or not isinstance(metadata.get("repo_id"), str) or not metadata["repo_id"].strip()
+                        or not isinstance(metadata.get("resolved_revision"), str)
+                        or re.fullmatch(r"[0-9a-fA-F]{40}", metadata["resolved_revision"]) is None):
+                    self.inspection_text.set_text("Model review unavailable.")
+                    self.download_error.set_text("Could not review the model; no download was started. " + self._error(reply))
+                    return
+                self.inspection = {"inputs": inputs, "generation": generation, "fits": data["fits"],
+                                   "repo_id": metadata["repo_id"], "revision": metadata["resolved_revision"], "name": inputs[1]}
+                author, _, name = metadata["repo_id"].rpartition("/")
+                self.inspection_text.set_text(
+                    f"{name or metadata['repo_id']}\nPublisher: {author or 'not specified'}"
+                    + "\nDownload: " + self._storage(metadata.get("storage_mib"))
+                    + "; estimated RAM/VRAM: " + self._storage(metadata.get("estimated_memory_mib"))
+                    + "\n" + str(data.get("reason") or ("Within estimated host capacity" if data["fits"] else "Exceeds estimated host capacity"))
+                    + "\nServing limits are measured after installation.")
+                self.inspection_revision.set_text("Pinned commit: " + metadata["resolved_revision"])
+                self.download_button.enable()
+            finally:
+                self._end("inspect", [self.inspect_button])
 
     async def _download(self) -> None:
         inspection = self.inspection
@@ -669,7 +757,8 @@ class _OksaPage:
                 or inspection["inputs"] != self._download_inputs()
                 or inspection["generation"] != self.inspection_generation):
             return
-        controls = [self.download_button, self.inspect_button, self.download_cancel, self.repo, self.download_name, self.revision]
+        controls = [self.download_button, self.inspect_button, self.download_cancel, self.repo, self.download_name,
+                    self.revision, self.model_search, self.search_button]
         if not self._begin("download", controls):
             return
         self.download_dialog.props("persistent")
@@ -1109,6 +1198,7 @@ class _OksaPage:
 
     def _disconnect(self) -> None:
         self._clear_secret()
+        self.search_generation += 1
         self._invalidate_inspection()
         self._close_key_form()
         for name in self.generations:
