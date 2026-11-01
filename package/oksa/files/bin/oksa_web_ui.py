@@ -70,8 +70,6 @@ class _OksaPage:
             }
             .q-field__native,
             .q-field__input { color: #242933; }
-            .q-field__native::placeholder,
-            .q-field__input::placeholder { color: #4C566A; opacity: 1; }
             /* Important Quasar utilities are layered, so overrides must be layered too. */
             @layer overrides {
                 .q-btn--standard,
