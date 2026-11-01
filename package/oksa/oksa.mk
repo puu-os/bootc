@@ -1,6 +1,5 @@
 OKSA_VERSION = 1.0
 OKSA_GATEWAY_API_VERSION = 1.6.1
-OKSA_GATEWAY_API_INFERENCE_EXTENSION_VERSION = 1.6.0
 OKSA_AGENTGATEWAY_VERSION = 1.2.0
 OKSA_SOURCE = experimental-install.yaml
 OKSA_SITE = https://github.com/kubernetes-sigs/gateway-api/releases/download/v$(OKSA_GATEWAY_API_VERSION)
@@ -9,9 +8,7 @@ OKSA_AGENTGATEWAY_CRDS = \
 	agentgateway.dev_agentgatewaybackends.yaml \
 	agentgateway.dev_agentgatewayparameters.yaml \
 	agentgateway.dev_agentgatewaypolicies.yaml
-OKSA_EXTRA_DOWNLOADS = \
-	https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v$(OKSA_GATEWAY_API_INFERENCE_EXTENSION_VERSION)/manifests.yaml \
-	$(addprefix $(OKSA_AGENTGATEWAY_SITE)/,$(OKSA_AGENTGATEWAY_CRDS))
+OKSA_EXTRA_DOWNLOADS = $(addprefix $(OKSA_AGENTGATEWAY_SITE)/,$(OKSA_AGENTGATEWAY_CRDS))
 OKSA_LICENSE = GPL-2.0+ (native files), Apache-2.0 (CRDs)
 OKSA_LICENSE_FILES = LICENSE LICENSE.Apache-2.0
 OKSA_SETUP_TYPE = hatch
@@ -39,8 +36,6 @@ OKSA_PRE_CONFIGURE_HOOKS += OKSA_STAGE_NATIVE_SOURCES
 define OKSA_INSTALL_ASSETS
 	$(INSTALL) -D -m 0644 $(OKSA_DL_DIR)/experimental-install.yaml \
 		$(TARGET_DIR)/usr/share/puu/k3s/crds/10-gateway-api-experimental-install.yaml
-	$(INSTALL) -D -m 0644 $(OKSA_DL_DIR)/manifests.yaml \
-		$(TARGET_DIR)/usr/share/puu/k3s/crds/11-gateway-api-inference-extension-manifests.yaml
 	set -e; for crd in $(OKSA_AGENTGATEWAY_CRDS); do \
 		$(INSTALL) -D -m 0644 $(OKSA_DL_DIR)/$$crd \
 			$(TARGET_DIR)/usr/share/puu/k3s/crds/12-$$crd; \
@@ -53,8 +48,8 @@ define OKSA_INSTALL_ASSETS
 		$(TARGET_DIR)/usr/share/dbus-1/system-services/io.github.puu_os.Oksa.service
 	$(INSTALL) -D -m 0644 $(OKSA_FILES)/oksa.conf \
 		$(TARGET_DIR)/usr/lib/tmpfiles.d/oksa-services.conf
-	$(foreach manifest,20-agentgateway.yaml 21-llm-d-gateway.yaml \
-		30-llm-d.yaml 30-nvidia-cdi-runtime.yaml 32-nvidia-device-plugin.yaml \
+	$(foreach manifest,20-agentgateway.yaml 21-puu-gateway.yaml \
+		30-nvidia-cdi-runtime.yaml 32-nvidia-device-plugin.yaml \
 		40-litellm.yaml 45-open-webui.yaml 46-oksa.yaml,\
 		$(INSTALL) -D -m 0644 $(OKSA_FILES)/manifests/$(manifest) \
 			$(TARGET_DIR)/usr/share/puu/k3s/manifests/$(manifest)$(sep))
