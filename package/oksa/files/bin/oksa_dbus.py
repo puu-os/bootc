@@ -91,7 +91,7 @@ class JobStore:
             job = Job(**{key: data[key] for key in ("path", "operation", "started_at", "state", "progress",
                                                    "ended_at", "result", "error", "repo_id", "model_name")})
             Contract.validate("GetJob", (job.path,))
-            if job.path.rsplit("/", 1)[1] != path.stem or job.state not in ("running", "succeeded", "failed"):
+            if job.path.rsplit("/", 1)[1] != path.stem or job.state not in ("running", "succeeded", "failed", "canceled"):
                 raise ValueError(f"Invalid job record: {path}")
             if job.state == "running":
                 job.state = "failed"
