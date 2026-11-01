@@ -164,7 +164,7 @@ class OksaControl:
         return ms.collect_models_list(self.state_dir, self.discover_bin, self.planner_bin)
 
     def inspect_model(self, repo: str, revision: str) -> dict:
-        meta = ms.inspect_hf_model(repo, revision)
+        meta = ms.inspect_hf_model(repo, revision or "main")
         if not meta:
             raise OksaError("NotFound", f"Failed to fetch metadata for {repo}")
         fits, reason = ms.check_model_capacity(meta.get("estimated_memory_mib", 0))
