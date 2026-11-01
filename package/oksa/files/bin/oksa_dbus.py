@@ -4,6 +4,9 @@
 import ctypes
 from dataclasses import dataclass, field
 import fcntl
+from fnmatch import fnmatchcase
+import hashlib
+import json
 import logging
 import multiprocessing
 import os
@@ -216,6 +219,7 @@ class OksaDBusService:
             <property name="Status" type="a{{sv}}" access="read"/>
             <property name="ActiveModel" type="s" access="read"/>
             <property name="ServingState" type="s" access="read"/>
+            <property name="ModelsRevision" type="s" access="read"/>
             <property name="Jobs" type="ao" access="read"/>
           </interface>
           <interface name="org.freedesktop.DBus.ObjectManager">
@@ -283,22 +287,118 @@ class OksaDBusService:
             job.path, self.job_info, self.handle_job_call, self.handle_job_property, None
         )
 
-    def root_properties(self) -> dict[str, GLib.Variant]:
+    def models_revision(self, status: dict) -> str:
+        """Fingerprint model metadata and stable, already-sampled serving capacity."""
+        state_dir = ms.STATE_DIR
+        paths = {
+            state_dir / "models.list", state_dir / "models.json",
+            *ms.control_files(state_dir),
+            Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model"))),
+        }
+        signatures = []
+
+        def directory_entries(directory):
+            try:
+                info = directory.lstat()
+                if stat.S_ISDIR(info.st_mode):
+                    with os.scandir(directory) as entries:
+                        result = sorted(entries, key=lambda entry: entry.name)
+                else:
+                    result = []
+            except FileNotFoundError:
+                signatures.append((str(directory), None))
+                return []
+            signatures.append((str(directory), (info.st_mode, info.st_uid, info.st_gid)))
+            return result
+
+        def model_files(root):
+            paths.update(root / name for name in ("config.json", "puu-serving.env", ms.PRESEED_MANIFEST))
+            pending = [root]
+            while pending:
+                directory = pending.pop()
+                for entry in directory_entries(directory):
+                    if entry.name.startswith("."):
+                        continue
+                    path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
+                    elif ms.is_serving_file(entry.name) and not entry.name.endswith((".incomplete", ".lock")):
+                        if not entry.is_symlink() or not entry.is_dir():
+                            paths.add(path)
+
+        for directory, pattern in (
+            (state_dir / "models.d", "*.env"),
+            (Path("/var/lib/puu/calibration"), "*.json"),
+            (Path("/run/puu-calibration"), "status*.json"),
+            (Path(os.environ.get("PUU_VLLM_MODEL_CATALOG_DIR", "/usr/share/puu/vllm/catalog.d")), "*.env"),
+            (state_dir / "cache-exclusions", "*"),
+        ):
+            paths.update(Path(entry.path) for entry in directory_entries(directory)
+                         if fnmatchcase(entry.name, pattern))
+        for entry in directory_entries(ms.MODELS_DIR):
+            if (not entry.name.startswith(".") and re.fullmatch(r"[A-Za-z0-9._-]+", entry.name)
+                    and entry.is_dir(follow_symlinks=False)):
+                model_files(Path(entry.path))
+        for repo in directory_entries(ms.ModelSpec.hf_cache_dir()):
+            if (not repo.name.startswith("models--") or not repo.is_dir(follow_symlinks=False)
+                    or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)?",
+                                        repo.name.removeprefix("models--").replace("--", "/"))):
+                continue
+            repo_dir = Path(repo.path)
+            for entry in directory_entries(repo_dir / "refs"):
+                if entry.name == "main" and not entry.is_dir():
+                    paths.add(Path(entry.path))
+            for snapshot in directory_entries(repo_dir / "snapshots"):
+                if re.fullmatch(r"[0-9a-f]{40}", snapshot.name) and snapshot.is_dir(follow_symlinks=False):
+                    model_files(Path(snapshot.path))
+        for path in sorted(paths):
+            try:
+                if path in (state_dir / "models.list", state_dir / "models.json") or (
+                    path.parent == state_dir / "models.d" and path.suffix == ".env"
+                ):
+                    with path.open("rb") as stream:
+                        content = stream.read(Contract.MAX_JSON + 1)
+                    if len(content) > Contract.MAX_JSON:
+                        raise ValueError(f"Model metadata exceeds size limit: {path}")
+                    signature = hashlib.sha256(content).hexdigest()
+                else:
+                    info = path.stat()
+                    signature = (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                                 info.st_mtime_ns, info.st_ctime_ns)
+            except FileNotFoundError:
+                signature = None
+            signatures.append((str(path), signature))
+        stable_status = {key: status.get(key) for key in (
+            "active_model", "model_status", "selected_model", "serving_enabled",
+        )}
+        stable_status["host_memory_total_mib"] = (status.get("host_memory") or {}).get("total_mib")
+        stable_status["gpus"] = sorted(
+            ({key: gpu.get(key) for key in ("index", "name", "vendor", "memory_total_mib")}
+             for gpu in status.get("gpus") or []),
+            key=lambda gpu: json.dumps(gpu, sort_keys=True),
+        )
+        encoded = json.dumps((signatures, stable_status), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def root_properties(self, prop_name: str | None = None) -> dict[str, GLib.Variant]:
         snapshot = self.monitoring.snapshot()
         status = snapshot.status if isinstance(snapshot.status, dict) else {}
         active = status.get("active_model") or ""
         serving = status.get("model_status") or ("ready" if active else "stopped")
-        return {
+        properties = {
             "Status": GLib.Variant("a{sv}", Contract.to_variant_dict(snapshot.to_json())),
             "ActiveModel": GLib.Variant("s", active),
             "ServingState": GLib.Variant("s", serving),
             "Jobs": GLib.Variant("ao", list(self.store.jobs.keys())),
         }
+        if prop_name is None or prop_name == "ModelsRevision":
+            properties["ModelsRevision"] = GLib.Variant("s", self.models_revision(status))
+        return properties
 
     def handle_root_property(self, connection, sender, path: str, interface: str, prop_name: str):
         if interface != Contract.BUS:
             return None
-        return self.root_properties().get(prop_name)
+        return self.root_properties(prop_name).get(prop_name)
 
     def handle_job_property(self, connection, sender, path: str, interface: str, prop_name: str):
         if interface != Contract.JOB:

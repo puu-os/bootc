@@ -47,6 +47,7 @@ class _OksaPage:
         self.inspection_generation = 0
         self.secret = ""
         self.active_pull_job: str | None = None
+        self.models_revision: str | None = None
         self.search_generation = 0
 
     def build(self) -> None:
@@ -205,7 +206,7 @@ class _OksaPage:
         if self.tabs.value == "Monitoring":
             await self._load_monitoring()
         elif self.tabs.value == "Models":
-            await self._load_models()
+            await self._refresh_models()
             await self._load_pull()
         elif self.tabs.value == "Users":
             await self._load_users()
@@ -215,8 +216,10 @@ class _OksaPage:
             return
         if self.tabs.value == "Monitoring" and not self.locks["status"].locked():
             await self._load_monitoring()
-        if self.tabs.value == "Models" and not self.locks["pull"].locked():
-            await self._load_pull()
+        if self.tabs.value == "Models":
+            if not self.locks["pull"].locked():
+                await self._load_pull()
+            await self._refresh_models()
 
     def _build_monitoring(self) -> None:
         with ui.row().classes("w-full items-center justify-between gap-2"):
@@ -449,16 +452,17 @@ class _OksaPage:
     def _build_models(self) -> None:
         with ui.row().classes("w-full items-center gap-2"):
             ui.button("Find a model", icon="search", on_click=self._open_download)
-            ui.button("Refresh models", color="accent", on_click=self._load_models).props("outline")
             self.start_button = ui.button("Start selected", on_click=lambda: self._model_action("start")).props("outline")
             self.stop_button = ui.button("Stop serving", color="accent", on_click=lambda: self._model_action("stop")).props("outline")
             self.remove_button = ui.button("Remove selected", color="negative", on_click=lambda: self._model_action("remove")).props("flat")
         self.model_controls = [self.start_button, self.stop_button, self.remove_button]
-        self.models_summary = ui.label("Catalog not loaded")
+        self.models_summary = ui.label("Loading model state…")
         self.models_error = ui.label("").classes("text-negative")
+        self.models_empty = ui.label("Loading installed models…")
         self.models_table = self._table("Installed models", {
             "name": "Model", "storage": "On disk", "quantization": "Format", "state": "State",
         }, selection="single")
+        self.models_table.set_visibility(False)
         self.models_table.on_select(self._model_selection)
         with ui.row().classes("w-full items-center justify-between gap-2"):
             self.pull_summary = ui.label("Download activity not loaded")
@@ -490,27 +494,57 @@ class _OksaPage:
         self.stop_button.set_enabled(available)
         self.remove_button.set_enabled(available and model is not None and model.get("removable") is not False)
 
-    async def _load_models(self) -> None:
+    async def _refresh_models(self) -> None:
+        if self.locks["models"].locked() or "model" in self.busy or not self._begin("model-refresh", []):
+            return
+        try:
+            try:
+                properties = await run.io_bound(self.service.get_properties)
+            except OksaClientError as error:
+                self.models_revision = None
+                self.models_error.set_text("Automatic model updates unavailable. " + str(error))
+                return
+            if self.client.is_deleted:
+                return
+            revision = properties.get("ModelsRevision")
+            if not isinstance(revision, str) or not revision:
+                self.models_revision = None
+                self.models_error.set_text("Automatic model updates unavailable: missing model revision.")
+                return
+            if revision != self.models_revision and await self._load_models():
+                self.models_revision = revision
+        finally:
+            self._end("model-refresh", [])
+
+    async def _load_models(self) -> bool:
         reply = await self._load("models", "ListModels")
         if reply is None:
-            return
+            return False
         models = reply[1].get("models")
         if not self._success(reply) or not isinstance(models, list) or not all(isinstance(model, dict) and isinstance(model.get("id"), str) for model in models):
-            self.models_error.set_text("Unable to refresh models; previous catalog may be stale. " + self._error(reply))
-            return
+            self.models_error.set_text("Unable to update models; previous list may be stale. " + self._error(reply))
+            return False
         self.models_error.set_text("")
+        selected = {row["id"] for row in self.models_table.selected}
         self.models = models
-        self.models_table.selected = []
-        self.models_table.rows = [{
+        rows = [{
             "id": model["id"], "name": model.get("name"), "repo_id": model.get("repo_id"),
             "storage": self._storage(model.get("storage_mib")), "quantization": model.get("quantization") or "none",
             "state": "Serving" if model.get("active") is True else "Ready" if model.get("capabilities") == "ok" else "Insufficient host capabilities",
         } for model in models]
-        self.models_table.update()
+        selection = [row for row in rows if row["id"] in selected]
+        if self.models_table.rows != rows or self.models_table.selected != selection:
+            self.models_table.rows = rows
+            self.models_table.selected = selection
+            self.models_table.update()
+        self.models_table.set_visibility(bool(rows))
+        self.models_empty.set_text("No installed models. Find a model to get started.")
+        self.models_empty.set_visibility(not rows)
         active = next((model for model in models if model.get("active") is True), None)
         self.models_summary.set_text("Serving " + str(active.get("name")) if active else
                                      "Serving is stopped. No model is loaded." if reply[1].get("serving_enabled") is False else "No model is serving.")
         self._model_selection()
+        return True
 
     async def _load_pull(self) -> None:
         reply = await self._load("pull", "ListJobs")
