@@ -234,8 +234,6 @@ spec:
                 secretKeyRef:
                   name: open-webui-secret
                   key: secretkey
-            - name: DEFAULT_MODELS
-              value: "fraserprice/Ternary-Bonsai-2-27B-vllm"
             - name: ENABLE_EVALUATION_ARENA_MODELS
               value: "False"
             - name: ENABLE_WEB_SEARCH

@@ -10,6 +10,7 @@ ConditionKernelCommandLine=!puu.live
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/puu/oksa-preseed-vllm-models
+TimeoutStartSec=infinity
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=1min

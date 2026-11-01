@@ -3,9 +3,8 @@
 # Copyright (C) Opinsys Oy 2026
 
 import argparse
-import copy
+import dataclasses
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,25 +13,18 @@ from statistics import median
 import subprocess
 import time
 
+import oksa_model_serving as ms
 from oksa_calibration_state import (
-    MODEL, RESULT_PATH, STATUS_PATH, ZERO_LIMITS,
-    atomic_record, boot_id, read_record, valid_result,
-    result_path, status_path
+    CalibrationStore, STATUS_PATH, ZERO_LIMITS, atomic_record, boot_id,
+    read_record, result_path, status_path, valid_result,
 )
-from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
-from oksa_model_serving import STATE_DIR, read_first_line
-from oksa_model_removal import wait_for_stopped_pods
-SOURCE_PATH = Path("/usr/share/puu/k3s/manifests/33-bonsai-2-27b.yaml")
-MANIFEST_PATH = Path("/var/lib/rancher/k3s/server/manifests/33-bonsai-2-27b.yaml")
+from oksa_workload_evaluation import PlannedWorkload, WorkloadEvaluator
+from oksa_workload_manifest import WorkloadManifestBuilder
+
 PROBE_PATH = Path(__file__).with_name("oksa-calibration-probe")
-POD = "bonsai-calibration"
-NAMESPACE = "oksa"
+POD = "vllm-calibration"
 MAX_TRIALS = 40
-MAX_CONTEXT = 262144
 MAX_SECONDS = 4 * 60 * 60
-
-
-from oksa_model_serving import label_namespace, render_manifest
 
 
 class CalibrationTimeout(TimeoutError):
@@ -41,502 +33,384 @@ class CalibrationTimeout(TimeoutError):
         self.reason = reason
 
 
-def publish(state, message, fingerprint="", status_file=STATUS_PATH):
-    atomic_record(status_file, dict(schema=1, boot_id=boot_id(), state=state,
-                                  message=message[:512], fingerprint=fingerprint, updated_at=time.time()))
+class CalibrationController:
+    def __init__(self, model: str = "", force: bool = False):
+        self.requested_model = model
+        self.model = ""
+        self.force = force
+        self.fingerprint = ""
 
+    def publish(self, state: str, message: str) -> None:
+        value = dict(schema=1, model=self.model, boot_id=boot_id(), state=state,
+                     message=message[:512], fingerprint=self.fingerprint, updated_at=time.time())
+        if self.model:
+            atomic_record(status_path(self.model), value)
+        atomic_record(STATUS_PATH, value)
 
-def memory_info():
-    values = {}
-    for line in Path("/proc/meminfo").read_text().splitlines():
-        key, value = line.split(":", 1)
-        if key in ("MemTotal", "MemAvailable"):
-            values[key] = int(value.split()[0]) * 1024
-    return values
+    @staticmethod
+    def memory_info() -> dict[str, int]:
+        values = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            if key in ("MemTotal", "MemAvailable"):
+                values[key] = int(value.split()[0]) * 1024
+        return values
 
+    @staticmethod
+    def kubectl(*args, payload=None, request_timeout=20):
+        command = ["/usr/bin/kubectl", f"--kubeconfig={ms.get_kubeconfig()}",
+                   f"--request-timeout={request_timeout}s", *args]
+        result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
+                                capture_output=True, text=True, timeout=request_timeout + 20)
+        if result.returncode:
+            raise RuntimeError(f"kubectl {' '.join(args[:3])}: {result.stderr[-2048:]}")
+        return json.loads(result.stdout) if "json" in args and result.stdout.strip() else result.stdout
 
-def kubectl(*args, payload=None, request_timeout=20):
-    command = ["/usr/bin/kubectl", "--kubeconfig=/var/lib/rancher/k3s/k3s.yaml", f"--request-timeout={request_timeout}s", *args]
-    result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                            capture_output=True, text=True, timeout=150)
-    if result.returncode:
-        raise RuntimeError(f"kubectl {' '.join(args[:3])}: {result.stderr[-2048:]}")
-    if "json" not in args or not result.stdout.strip():
-        return result.stdout
-    decoder = json.JSONDecoder()
-    pos = 0
-    items = []
-    text = result.stdout.strip()
-    while pos < len(text):
-        obj, end = decoder.raw_decode(text, idx=pos)
-        items.append(obj)
-        while end < len(text) and text[end].isspace():
-            end += 1
-        pos = end
-    return items[0] if len(items) == 1 else dict(apiVersion="v1", kind="List", items=items)
+    @classmethod
+    def delete_probe(cls) -> None:
+        cls.kubectl("delete", "pod", POD, "-n", ms.OKSA_NAMESPACE, "--ignore-not-found",
+                    "--wait=true", "--timeout=120s", "-o", "name", request_timeout=130)
 
-
-def set_limits(command, limits):
-    replacements = {
-        "--max-model-len": str(limits["max_model_len"]),
-        "--max-num-seqs": str(limits["max_num_seqs"]),
-        "--max-num-batched-tokens": str(limits["max_num_batched_tokens"]),
-        "--gpu-memory-utilization": str(limits["gpu_memory_utilization"]),
-    }
-    if limits.get("kv_cache_dtype"):
-        replacements["--kv-cache-dtype"] = str(limits["kv_cache_dtype"])
-    result = []
-    index = 0
-    while index < len(command):
-        arg = command[index]
-        option = arg.split("=", 1)[0]
-        if option in replacements or option in (
-                "--enable-prefix-caching", "--no-enable-prefix-caching",
-                "--enable-chunked-prefill", "--no-enable-chunked-prefill"):
-            if option in replacements and "=" not in arg:
-                if index + 1 < len(command) and not command[index + 1].startswith("--"):
-                    index += 1
-        else:
-            result.append(arg)
-        index += 1
-    for option, value in replacements.items():
-        result.extend((option, value))
-    return result + ["--no-enable-prefix-caching", "--enable-chunked-prefill"]
-
-
-def deployment_of(manifest, model_name=None):
-    target = model_name or MODEL
-    for item in manifest.get("items", []):
-        if item.get("kind") == "Deployment":
-            name = item.get("metadata", {}).get("name", "")
-            app_label = item.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name", "")
-            if name == target or app_label == target:
-                return item
-    return next(item for item in manifest["items"] if item["kind"] == "Deployment")
-
-
-def resolve_target(model=None, manifest=None):
-    if manifest:
-        src = Path(manifest)
-        if not src.is_file():
-            raise FileNotFoundError(f"Manifest not found: {src}")
-        name = model or src.stem.split("-", 1)[-1]
-        dest = Path("/var/lib/rancher/k3s/server/manifests") / src.name
-        return name, src, dest
-    if model:
-        for directory in (Path("/usr/share/puu/k3s/manifests"), Path("/var/lib/rancher/k3s/server/manifests")):
-            if not directory.exists():
+    @staticmethod
+    def context_ceiling(plan: PlannedWorkload) -> int:
+        config = json.loads((Path(plan.spec.path) / "config.json").read_text())
+        if not isinstance(config, dict):
+            raise ValueError("Model config must be a JSON object")
+        ceilings = [plan.spec.max_context]
+        for section in (config, config.get("text_config", {})):
+            if not isinstance(section, dict):
                 continue
-            for p in directory.glob(f"*{model}*.yaml"):
-                dest = Path("/var/lib/rancher/k3s/server/manifests") / p.name
-                return model, p, dest
-        raise FileNotFoundError(f"No manifest found for model: {model}")
-    selected_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(STATE_DIR / "selected-model")))
-    active = read_first_line(selected_file) if selected_file.exists() else ""
-    if active:
-        for directory in (Path("/usr/share/puu/k3s/manifests"), Path("/var/lib/rancher/k3s/server/manifests")):
-            if not directory.exists():
-                continue
-            for p in directory.glob(f"*{active}*.yaml"):
-                dest = Path("/var/lib/rancher/k3s/server/manifests") / p.name
-                return active, p, dest
-    return MODEL, SOURCE_PATH, MANIFEST_PATH
+            for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length"):
+                value = section.get(key)
+                if type(value) is int and value > 0:
+                    ceilings.append(value)
+        return min(ceilings)
 
-
-def apply_profile(manifest, result, node, model_name=MODEL, manifest_dest=MANIFEST_PATH):
-    manifest = copy.deepcopy(manifest)
-    deployment = deployment_of(manifest, model_name)
-    limits = result["limits"]
-    selected = read_first_line(Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(STATE_DIR / "selected-model"))))
-    disabled = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(STATE_DIR / "serving.disabled")))
-    deployment["spec"]["replicas"] = int(limits["max_num_seqs"] > 0 and not disabled.exists() and selected in ("", model_name))
-    if limits["max_num_seqs"] and node is not None:
-        spec = deployment["spec"]["template"]["spec"]
-        spec["nodeSelector"]["kubernetes.io/hostname"] = node["metadata"]["labels"]["kubernetes.io/hostname"]
+    @staticmethod
+    def probe_pod(plan: PlannedWorkload, node: str, context: int, sequences: int,
+                  utilization: float, memory_bytes: int, reserve: int, seconds: int,
+                  *, prefix_caching: bool = False) -> dict:
+        candidate = dataclasses.replace(
+            plan, spec=dataclasses.replace(plan.spec, max_context=context,
+                                           max_concurrent_sequences=sequences),
+            gpu_memory_utilization=f"{utilization:.2f}", memory_bytes=memory_bytes,
+            max_num_batched_tokens=min(8192, context * sequences),
+        )
+        manifest = WorkloadManifestBuilder(candidate, ms.MODELS_DIR).build(prefix_caching=prefix_caching)
+        spec = manifest["items"][1]["spec"]["template"]["spec"]
+        spec.update(restartPolicy="Never", activeDeadlineSeconds=seconds + 60,
+                    terminationGracePeriodSeconds=15, automountServiceAccountToken=False)
+        spec.setdefault("nodeSelector", {})["kubernetes.io/hostname"] = node
         container = spec["containers"][0]
-        key = "args" if "args" in container else "command"
-        container[key] = set_limits(container[key], limits)
-        container["resources"]["limits"]["memory"] = str(limits["memory_bytes"])
-        container["resources"]["requests"]["memory"] = str(min(4 * 1024**3, limits["memory_bytes"]))
-        container.setdefault("env", []).extend([dict(name="HF_HUB_OFFLINE", value="1"),
-                                                dict(name="TRANSFORMERS_OFFLINE", value="1")])
-    atomic_record(manifest_dest, manifest)
-    kubectl("apply", "-f", "-", payload=manifest)
+        command = container["command"]
+        container["command"] = ["python3", "/calibration/oksa-calibration-probe"]
+        container.pop("readinessProbe", None)
+        container.pop("ports", None)
+        container["env"].extend([
+            dict(name="PUU_PROBE_COMMAND", value=json.dumps(command)),
+            dict(name="PUU_PROBE_CONTEXT", value=str(context)),
+            dict(name="PUU_PROBE_SEQUENCES", value=str(sequences)),
+            dict(name="PUU_PROBE_UTILIZATION", value=str(utilization)),
+            dict(name="PUU_PROBE_HOST_RESERVE", value=str(reserve)),
+            dict(name="PUU_PROBE_SECONDS", value=str(seconds)),
+        ])
+        container["volumeMounts"].extend([
+            dict(name="calibration", mountPath="/calibration", readOnly=True),
+            dict(name="host-meminfo", mountPath="/calibration-host-meminfo", readOnly=True),
+        ])
+        spec["volumes"].extend([
+            dict(name="calibration", hostPath=dict(path=str(PROBE_PATH.resolve().parent), type="Directory")),
+            dict(name="host-meminfo", hostPath=dict(path="/proc/meminfo", type="File")),
+        ])
+        return dict(apiVersion="v1", kind="Pod", metadata=dict(name=POD, namespace=ms.OKSA_NAMESPACE), spec=spec)
 
-
-def delete_probe():
-    kubectl("delete", "pod", POD, "-n", NAMESPACE, "--ignore-not-found", "--wait=true", "--timeout=120s", "-o", "name",
-            request_timeout=130)
-
-
-def probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds):
-    spec = copy.deepcopy(deployment["spec"]["template"]["spec"])
-    spec["restartPolicy"] = "Never"
-    spec["activeDeadlineSeconds"] = seconds + 60
-    spec["terminationGracePeriodSeconds"] = 15
-    spec["automountServiceAccountToken"] = False
-    spec["nodeSelector"]["kubernetes.io/hostname"] = node["metadata"]["labels"]["kubernetes.io/hostname"]
-    container = spec["containers"][0]
-    command = container["command"] + container.pop("args", [])
-    container["command"] = ["python3", "/calibration/oksa-calibration-probe"]
-    container.pop("readinessProbe", None)
-    container.pop("ports", None)
-    container["resources"]["limits"]["memory"] = str(memory_bytes)
-    container["resources"]["requests"]["memory"] = str(min(4 * 1024**3, memory_bytes))
-    container.setdefault("env", []).extend([
-        dict(name="PUU_PROBE_COMMAND", value=json.dumps(command)),
-        dict(name="PUU_PROBE_CONTEXT", value=str(context)),
-        dict(name="PUU_PROBE_SEQUENCES", value=str(sequences)),
-        dict(name="PUU_PROBE_UTILIZATION", value=str(utilization)),
-        dict(name="PUU_PROBE_HOST_RESERVE", value=str(reserve)),
-        dict(name="PUU_PROBE_SECONDS", value=str(seconds)),
-    ])
-    container.setdefault("volumeMounts", []).extend([
-        dict(name="calibration", mountPath="/calibration", readOnly=True),
-        dict(name="host-meminfo", mountPath="/calibration-host-meminfo", readOnly=True),
-    ])
-    spec.setdefault("volumes", []).extend([
-        dict(name="calibration", hostPath=dict(path=str(PROBE_PATH.parent), type="Directory")),
-        dict(name="host-meminfo", hostPath=dict(path="/proc/meminfo", type="File")),
-    ])
-    return dict(apiVersion="v1", kind="Pod", metadata=dict(name=POD, namespace=NAMESPACE), spec=spec)
-
-
-def run_trial(deployment, node, context, sequences, utilization, memory_bytes, reserve, deadline, trial_number, status_file=STATUS_PATH):
-    started = time.monotonic()
-    seconds = min(2100, int(deadline - started))
-    if seconds < 1:
-        raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
-    trial_deadline = started + seconds
-    message = (f"Trial {trial_number}/{MAX_TRIALS}: testing {context} context tokens, "
-               f"{sequences} simultaneous requests; GPU-memory budget {utilization:.0%}.")
-    publish("running", message, status_file=status_file)
-    pod = probe_pod(deployment, node, context, sequences, utilization, memory_bytes, reserve, seconds)
-
-    def timed_out(message):
-        if time.monotonic() >= deadline:
+    def run_trial(self, plan: PlannedWorkload, node: str, context: int, sequences: int,
+                  utilization: float, memory_bytes: int, reserve: int, deadline: float,
+                  trial_number: int, *, prefix_caching: bool = False) -> dict:
+        started = time.monotonic()
+        seconds = min(2100, int(deadline - started))
+        if seconds < 1:
             raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
-        return dict(status="timeout", reason=message, context=context,
-                    sequences=sequences, utilization=utilization)
+        trial_deadline = started + seconds
+        message = (f"Trial {trial_number}/{MAX_TRIALS}: testing {context} context tokens, "
+                   f"{sequences} simultaneous requests; GPU-memory budget {utilization:.0%}; "
+                   f"prefix caching {'enabled' if prefix_caching else 'disabled'}.")
+        self.publish("running", message)
+        pod = self.probe_pod(plan, node, context, sequences, utilization, memory_bytes,
+                             reserve, seconds, prefix_caching=prefix_caching)
 
-    try:
-        kubectl("create", "-f", "-", "-o", "json", payload=pod)
-        next_update = started + 10
-        while time.monotonic() < trial_deadline:
-            if time.monotonic() >= next_update:
-                publish("running", f"{message} Elapsed {int(time.monotonic() - started)}s.", status_file=status_file)
-                next_update = time.monotonic() + 10
-            current = kubectl("get", "pod", POD, "-n", NAMESPACE, "-o", "json")
-            deadline_exceeded = current.get("status", {}).get("reason") == "DeadlineExceeded"
-            statuses = current.get("status", {}).get("containerStatuses", [])
-            for status in statuses:
-                waiting = status.get("state", {}).get("waiting", {})
-                if waiting.get("reason") in ("ErrImagePull", "ImagePullBackOff", "CreateContainerConfigError", "CreateContainerError", "InvalidImageName"):
-                    raise RuntimeError(f"Calibration runtime: {waiting}")
-                terminated = status.get("state", {}).get("terminated")
-                if not terminated:
-                    continue
-                if terminated.get("reason") == "OOMKilled":
-                    return dict(status="capacity", reason="Pod memory limit reached", context=context,
-                                sequences=sequences, utilization=utilization)
-                value = json.loads(terminated.get("message") or "{}")
-                if deadline_exceeded and (not value or value.get("reason") == "InterruptedError: probe interrupted by signal 15"):
+        def timed_out(message):
+            if time.monotonic() >= deadline:
+                raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
+            return dict(status="timeout", reason=message, context=context,
+                        sequences=sequences, utilization=utilization)
+
+        try:
+            self.kubectl("create", "-f", "-", "-o", "json", payload=pod)
+            next_update = started + 10
+            while time.monotonic() < trial_deadline:
+                if time.monotonic() >= next_update:
+                    self.publish("running", f"{message} Elapsed {int(time.monotonic() - started)}s.")
+                    next_update = time.monotonic() + 10
+                current = self.kubectl("get", "pod", POD, "-n", ms.OKSA_NAMESPACE, "-o", "json")
+                deadline_exceeded = current.get("status", {}).get("reason") == "DeadlineExceeded"
+                statuses = current.get("status", {}).get("containerStatuses", [])
+                for status in statuses:
+                    waiting = status.get("state", {}).get("waiting", {})
+                    if waiting.get("reason") in ("ErrImagePull", "ImagePullBackOff", "CreateContainerConfigError",
+                                                 "CreateContainerError", "InvalidImageName"):
+                        raise RuntimeError(f"Calibration runtime: {waiting}")
+                    terminated = status.get("state", {}).get("terminated")
+                    if not terminated:
+                        continue
+                    if terminated.get("reason") == "OOMKilled":
+                        return dict(status="capacity", reason="Pod memory limit reached", context=context,
+                                    sequences=sequences, utilization=utilization)
+                    value = json.loads(terminated.get("message") or "{}")
+                    if deadline_exceeded and (not value or value.get("reason") == "InterruptedError: probe interrupted by signal 15"):
+                        return timed_out("Calibration pod time budget exhausted")
+                    if value.get("status") not in ("passed", "capacity", "timeout"):
+                        raise RuntimeError(f"Calibration probe failed: {value or terminated}")
+                    if terminated.get("exitCode") != 0:
+                        raise RuntimeError(f"Calibration probe exited unsuccessfully: {terminated}")
+                    if (value.get("context") != context or value.get("sequences") != sequences
+                            or value.get("utilization") != utilization):
+                        raise ValueError("Calibration probe returned mismatched parameters")
+                    metrics = value.get("metrics") or {}
+                    estimated = metrics.get("estimated_max_model_len")
+                    if estimated is not None and (type(estimated) is not int or not 0 < estimated < 1e18):
+                        raise ValueError("Invalid probe estimated_max_model_len")
+                    if value["status"] == "passed":
+                        for key in ("tokens_per_second", "peak_gpu_memory_bytes", "peak_host_memory_bytes",
+                                    "minimum_host_available_bytes", "kv_cache_tokens"):
+                            number = metrics.get(key)
+                            if type(number) not in (int, float) or not 0 < number < 1e18:
+                                raise ValueError(f"Invalid probe metric: {key}")
+                        if (metrics["kv_cache_tokens"] < context * sequences
+                                or metrics["minimum_host_available_bytes"] < reserve
+                                or metrics["peak_host_memory_bytes"] > memory_bytes):
+                            raise ValueError("Calibration probe exceeded its memory bounds")
+                        samples = metrics.get("tokens_per_second_samples")
+                        if (not isinstance(samples, list) or len(samples) != 3
+                                or any(type(sample) not in (int, float) or not 0 < sample < 1e18 for sample in samples)
+                                or metrics["tokens_per_second"] != median(samples)):
+                            raise ValueError("Invalid probe throughput samples")
+                    if time.monotonic() >= trial_deadline:
+                        return timed_out("Calibration candidate time budget exhausted")
+                    value["prefix_caching"] = prefix_caching
+                    return value
+                if deadline_exceeded:
                     return timed_out("Calibration pod time budget exhausted")
-                if value.get("status") not in ("passed", "capacity", "timeout"):
-                    raise RuntimeError(f"Calibration probe failed: {value or terminated}")
-                if terminated.get("exitCode") != 0:
-                    raise RuntimeError(f"Calibration probe exited unsuccessfully: {terminated}")
-                if (value.get("context") != context or value.get("sequences") != sequences
-                        or value.get("utilization") != utilization):
-                    raise ValueError("Calibration probe returned mismatched parameters")
-                metrics = value.get("metrics") or {}
-                estimated = metrics.get("estimated_max_model_len")
-                if estimated is not None and (type(estimated) is not int or not 0 < estimated < 1e18):
-                    raise ValueError("Invalid probe estimated_max_model_len")
-                if value["status"] == "passed":
-                    for key in ("tokens_per_second", "peak_gpu_memory_bytes", "minimum_host_available_bytes", "kv_cache_tokens"):
-                        number = metrics.get(key)
-                        if type(number) not in (int, float) or not 0 < number < 1e18:
-                            raise ValueError(f"Invalid probe metric: {key}")
-                    if metrics["kv_cache_tokens"] < context * sequences or metrics["minimum_host_available_bytes"] < reserve:
-                        raise ValueError("Calibration probe exceeded its memory bounds")
-                    samples = metrics.get("tokens_per_second_samples")
-                    if (not isinstance(samples, list) or len(samples) != 3
-                            or any(type(sample) not in (int, float) or not 0 < sample < 1e18 for sample in samples)
-                            or metrics["tokens_per_second"] != median(samples)):
-                        raise ValueError("Invalid probe throughput samples")
-                if time.monotonic() >= trial_deadline:
-                    return timed_out("Calibration candidate time budget exhausted")
-                return value
-            if deadline_exceeded:
-                return timed_out("Calibration pod time budget exhausted")
-            if current.get("status", {}).get("phase") in ("Failed", "Succeeded"):
-                raise RuntimeError(f"Calibration pod ended without a probe result: {current.get('status')}")
-            time.sleep(2)
-        return timed_out("Calibration candidate time budget exhausted")
-    finally:
-        delete_probe()
+                if current.get("status", {}).get("phase") in ("Failed", "Succeeded"):
+                    raise RuntimeError(f"Calibration pod ended without a probe result: {current.get('status')}")
+                time.sleep(2)
+            return timed_out("Calibration candidate time budget exhausted")
+        finally:
+            self.delete_probe()
 
+    @staticmethod
+    def search_context(test, trials: list[dict], upper: int) -> int:
+        passed, failed = 512, upper // 512 * 512 + 512
+        while failed - passed > 512:
+            candidate = failed - 512 if failed > upper else (passed + failed) // 1024 * 512
+            outcome = test(candidate)
+            if outcome == "passed":
+                passed = candidate
+            elif outcome in ("capacity", "timeout"):
+                failed = candidate
+                estimated = (trials[-1].get("metrics") or {}).get("estimated_max_model_len", 0)
+                if outcome == "capacity" and type(estimated) is int and estimated > passed:
+                    failed = min(failed, estimated // 512 * 512 + 512)
+            else:
+                raise ValueError(f"Invalid context trial outcome: {outcome}")
+        return passed
 
-def kv_cache_tokens(trial):
-    tokens = (trial.get("metrics") or {}).get("kv_cache_tokens")
-    return tokens if type(tokens) is int else 0
-
-
-def estimated_max_model_len(trial):
-    tokens = (trial.get("metrics") or {}).get("estimated_max_model_len")
-    return tokens if type(tokens) is int and tokens > 0 else 0
-
-
-def search_context(test, trials):
-    passed, failed = 512, MAX_CONTEXT + 512
-    probe_bound = False
-    while failed - passed > 512:
-        if failed > MAX_CONTEXT:
-            candidate = MAX_CONTEXT
-        elif probe_bound:
-            candidate = failed - 512
-        else:
-            candidate = (passed + failed) // 1024 * 512
-        probe_bound = False
-        outcome = test(candidate)
-        if outcome == "passed":
-            passed = candidate
-        elif outcome in ("capacity", "timeout"):
-            failed = candidate
-            estimated = estimated_max_model_len(trials[-1]) if outcome == "capacity" and candidate >= 8192 else 0
-            if estimated:
-                if estimated < 8192:
-                    if passed < 8192 < failed:
-                        failed = 8192
-                else:
-                    bound = min(MAX_CONTEXT, estimated // 512 * 512) + 512
-                    if passed < bound <= failed:
-                        failed = bound
-                        probe_bound = True
-        else:
-            raise ValueError(f"Invalid context trial outcome: {outcome}")
-    return passed
-
-
-def calibrate(manifest, node, identity, fingerprint, model_name=MODEL, status_file=STATUS_PATH):
-    memory = memory_info()
-    reserve = max(2 * 1024**3, memory["MemTotal"] // 5)
-    budget = max(0, memory["MemAvailable"] - reserve)
-    result = dict(schema=1, model=model_name, state="complete", fingerprint=fingerprint, identity=identity,
-                  completed_at=time.time(), reason="insufficient-memory", limits=dict(ZERO_LIMITS), trials=[],
-                  search_complete=True, incomplete_reasons=[])
-    if not budget:
-        return result
-    deployment = deployment_of(manifest, model_name)
-    deadline = time.monotonic() + MAX_SECONDS
-    trials = result["trials"]
-    best = None
-
-    def mark_incomplete(reason):
-        result["search_complete"] = False
-        if reason not in result["incomplete_reasons"]:
-            result["incomplete_reasons"].append(reason)
-
-    def measure(context, sequences, utilization):
-        if time.monotonic() >= deadline:
-            raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
-        if len(trials) >= MAX_TRIALS:
-            raise CalibrationTimeout("trial-budget", "Calibration trial budget exhausted")
-        value = run_trial(deployment, node, context, sequences, utilization, budget, reserve, deadline, len(trials) + 1, status_file=status_file)
-        trials.append(value)
-        if value["status"] == "timeout":
-            mark_incomplete("candidate-timeout")
-            publish("running", "Candidate timed out; capacity is inconclusive. Continuing calibration within the remaining budget.", status_file=status_file)
-        return value
-
-    def test(context, sequences, utilization):
-        nonlocal best
-        value = measure(context, sequences, utilization)
-        if value["status"] == "passed":
-            best = value
-        return value["status"]
-
-    try:
-        for utilization in (0.9, 0.85, 0.7, 0.5):
-            if test(512, 1, utilization) == "passed":
-                break
-        else:
-            if not result["search_complete"]:
-                raise CalibrationTimeout("candidate-timeout", "No profile passed before candidate timeouts")
+    def calibrate(self, plan: PlannedWorkload, node: str, identity: dict) -> dict:
+        memory = self.memory_info()
+        reserve = max(2 * 1024**3, memory["MemTotal"] // 5)
+        budget = max(0, memory["MemAvailable"] - reserve)
+        result = dict(schema=1, model=self.model, state="complete", fingerprint=self.fingerprint,
+                      identity=identity, completed_at=time.time(), reason="insufficient-memory",
+                      limits=dict(ZERO_LIMITS), trials=[], search_complete=True, incomplete_reasons=[])
+        if not budget:
             return result
-        context = search_context(lambda tokens: test(tokens, 1, utilization), trials)
-        baseline = best["metrics"]["tokens_per_second"]
-        cache_tokens = kv_cache_tokens(best)
-        for sequences in (2, 4, 8):
-            if context * sequences > cache_tokens:
-                break
+        ceiling = self.context_ceiling(plan)
+        if ceiling < 512:
+            raise ValueError("Model context ceiling is below the minimum calibration context of 512")
+        deadline = time.monotonic() + MAX_SECONDS
+        trials = result["trials"]
+        best = None
+
+        def mark_incomplete(reason):
+            result["search_complete"] = False
+            if reason not in result["incomplete_reasons"]:
+                result["incomplete_reasons"].append(reason)
+
+        def measure(context, sequences, utilization, *, prefix_caching=False, memory_bytes=budget):
+            if time.monotonic() >= deadline:
+                raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
+            if len(trials) >= MAX_TRIALS - (0 if prefix_caching else 2):
+                raise CalibrationTimeout("trial-budget", "Calibration trial budget exhausted")
+            value = self.run_trial(plan, node, context, sequences, utilization, memory_bytes,
+                                   reserve, deadline, len(trials) + 1, prefix_caching=prefix_caching)
+            trials.append(value)
+            if value["status"] == "timeout":
+                mark_incomplete("candidate-timeout")
+            return value
+
+        def test(context, sequences, utilization):
+            nonlocal best
             value = measure(context, sequences, utilization)
             if value["status"] == "passed":
-                throughput = value["metrics"]["tokens_per_second"]
-                if throughput / baseline >= 1.1 and throughput > best["metrics"]["tokens_per_second"]:
-                    best = value
-    except CalibrationTimeout as error:
-        if best is None:
-            raise CalibrationTimeout(error.reason, f"{error}; no profile passed. Restart calibration manually to retry.") from error
-        mark_incomplete(error.reason)
-        publish("running", f"{error}; applying the best verified profile. Maximum capacity was not established.", status_file=status_file)
-    context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
-    batched_tokens = min(8192, context * sequences)
-    result.update(reason="measured", completed_at=time.time(), metrics=best["metrics"], limits=dict(
-        max_model_len=context, max_num_seqs=sequences, max_num_batched_tokens=batched_tokens,
-        gpu_memory_utilization=utilization, memory_bytes=budget))
-    return result
+                best = value
+            return value["status"]
 
-
-def hardware_identity(source_path=SOURCE_PATH):
-    from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
-    from oksa_model_serving import resolve_k3s_node_name
-
-    gpus = []
-    vendor = AcceleratorDiscovery.primary_vendor()
-    if vendor == AcceleratorVendor.NVIDIA and Path("/usr/bin/nvidia-smi").exists():
-        value = subprocess.run(["nvidia-smi", "--query-gpu=name,uuid,memory.total,driver_version", "--format=csv,noheader,nounits"],
-                               capture_output=True, text=True, check=True, timeout=15)
-        gpus = sorted(line.strip() for line in value.stdout.splitlines() if line.strip())
-        if not gpus:
-            raise RuntimeError("NVIDIA hardware present but no usable GPU reported")
-        models = {tuple(line.split(", ")[i] for i in (0, 2)) for line in gpus}
-        if len(models) > 1:
-            raise RuntimeError("Calibration requires matching local GPUs; mixed-GPU placement is not yet supported")
-    elif vendor != AcceleratorVendor.UNKNOWN:
-        devices = AcceleratorDiscovery.primary_devices()
-        for dev in devices:
-            gpus.append(f"{dev.name or dev.vendor.value}, {dev.pci_id}, {dev.memory_total_bytes}, {dev.driver}")
-        if not gpus:
-            raise RuntimeError(f"{vendor.value} accelerator hardware present but no usable device reported")
-        drivers = {dev.driver for dev in devices}
-        if len(drivers) > 1:
-            raise RuntimeError("Calibration requires matching local accelerators; mixed-driver placement is not yet supported")
-    manifest_content = source_path.read_text() if source_path.exists() else ""
-    return dict(machine_id=Path("/etc/machine-id").read_text().strip(), kernel=os.uname().release,
-                architecture=os.uname().machine, memory_bytes=memory_info()["MemTotal"], gpus=gpus,
-                node=resolve_k3s_node_name(), manifest=manifest_content,
-                controller=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                probe=hashlib.sha256(PROBE_PATH.read_bytes()).hexdigest())
-
-
-def ensure_namespace(namespace=NAMESPACE):
-    deadline = time.monotonic() + 120
-    while True:
         try:
-            kubectl("create", "namespace", namespace)
-            return
-        except RuntimeError as exc:
-            if "AlreadyExists" in str(exc):
-                return
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(1)
-
-
-def run(force=False, model_name=MODEL, source_path=SOURCE_PATH, manifest_path=MANIFEST_PATH):
-    res_path = result_path(model_name)
-    st_path = status_path(model_name)
-    publish("running", f"Preparing measured {model_name} calibration.", status_file=st_path)
-    identity = hardware_identity(source_path)
-    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    manifest = kubectl("create", "--dry-run=client", "--validate=false", "-f", str(source_path), "-o", "json")
-    manifest = json.loads(render_manifest(json.dumps(manifest)))
-    if manifest.get("kind") != "List":
-        raise ValueError(f"Expected manifest list for {model_name}")
-    deployment = deployment_of(manifest, model_name)
-    deployment["spec"]["replicas"] = 0
-    ensure_namespace()
-    apply_profile(manifest, dict(limits=ZERO_LIMITS), None, model_name, manifest_path)
-    wait_for_stopped_pods(f"app.kubernetes.io/name={model_name}", kubeconfig="/var/lib/rancher/k3s/k3s.yaml")
-    delete_probe()
-    node = kubectl("get", "node", identity["node"], "-o", "json")
-    if identity["gpus"]:
-        vendor = AcceleratorDiscovery.primary_vendor()
-        ready_deadline = time.monotonic() + 300
-        while True:
-            labels = node["metadata"].get("labels", {})
-            allocatable = node.get("status", {}).get("allocatable", {})
-            if vendor == AcceleratorVendor.NVIDIA:
-                ready = (labels.get(f"{label_namespace()}/cuda-ready") == "true" and
-                         labels.get(f"{label_namespace()}/cdi-ready") == "true" and
-                         int(allocatable.get("nvidia.com/gpu", "0")) > 0)
-            elif vendor == AcceleratorVendor.AMD:
-                ready = int(allocatable.get("amd.com/gpu", "0")) > 0 or labels.get(f"{label_namespace()}/accelerator") == "amd"
-            elif vendor == AcceleratorVendor.INTEL:
-                ready = int(allocatable.get("intel.com/gpu", "0")) > 0 or labels.get(f"{label_namespace()}/accelerator") == "intel"
+            for utilization in (0.9, 0.85, 0.7, 0.5):
+                if test(512, 1, utilization) == "passed":
+                    break
             else:
-                ready = True
-            if ready:
-                break
-            if time.monotonic() >= ready_deadline:
-                raise RuntimeError("GPU driver, CDI or device plugin is not ready")
-            time.sleep(2)
-            node = kubectl("get", "node", identity["node"], "-o", "json")
-    cached = None
-    if not force:
-        try:
-            cached = read_record(res_path)
-        except (FileNotFoundError, ValueError):
-            pass
-    if (cached is not None and valid_result(cached, model=model_name) and cached["fingerprint"] == fingerprint
-            and cached["search_complete"] and cached["reason"] != "insufficient-memory"):
-        result = cached
-    elif not identity["gpus"]:
-        result = dict(schema=1, model=model_name, state="complete", fingerprint=fingerprint, identity=identity,
-                      completed_at=time.time(), reason="no-gpu", limits=dict(ZERO_LIMITS), trials=[],
-                      search_complete=True, incomplete_reasons=[])
-    else:
-        result = calibrate(manifest, node, identity, fingerprint, model_name=model_name, status_file=st_path)
-    if not valid_result(result, model=model_name):
-        raise ValueError("Invalid calibration result")
-    atomic_record(res_path, result)
-    apply_profile(manifest, result, node, model_name, manifest_path)
-    limits = result["limits"]
-    if not result["search_complete"]:
-        reasons = ", ".join(reason.replace("-", " ") for reason in result["incomplete_reasons"])
-        message = (f"Calibration incomplete: {reasons}. Using verified profile: "
-                   f"{limits['max_model_len']} context tokens, {limits['max_num_seqs']} simultaneous requests; "
-                   "maximum not established. Run oksa-calibrate --force to retry.")
-    elif limits["max_num_seqs"]:
-        message = f"Measured {limits['max_model_len']} context tokens and {limits['max_num_seqs']} simultaneous requests."
-    else:
-        message = f"Calibration complete with zero limits: {result['reason']}."
-    publish("complete", message, fingerprint, status_file=st_path)
-    print(message, flush=True)
-
-
-def interrupted(signum, frame):
-    raise InterruptedError(f"Calibration interrupted by signal {signum}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Measure and apply local model inference limits")
-    parser.add_argument("--force", action="store_true", help="Measure again even if a matching result is cached")
-    parser.add_argument("--model", type=str, default=None, help="Model identifier to calibrate (defaults to active model or bonsai-2-27b)")
-    parser.add_argument("--manifest", type=str, default=None, help="Path to manifest for calibration")
-    arguments = parser.parse_args()
-    if os.geteuid() != 0:
-        raise PermissionError("Calibration requires root")
-    model_name, src_path, dest_path = resolve_target(arguments.model, arguments.manifest)
-    st_path = status_path(model_name)
-    st_path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-    signal.signal(signal.SIGTERM, interrupted)
-    signal.signal(signal.SIGINT, interrupted)
-    lock_file = st_path.parent / f"lock-{model_name}" if model_name != MODEL else st_path.parent / "lock"
-    with open(lock_file, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            run(force=arguments.force, model_name=model_name, source_path=src_path, manifest_path=dest_path)
+                if not result["search_complete"]:
+                    raise CalibrationTimeout("candidate-timeout", "No profile passed before candidate timeouts")
+                return result
+            upper = min(ceiling, best["metrics"]["kv_cache_tokens"])
+            context = self.search_context(lambda tokens: test(tokens, 1, utilization), trials, upper)
+            baseline = best["metrics"]["tokens_per_second"]
+            cache_tokens = best["metrics"]["kv_cache_tokens"]
+            for sequences in (2, 4, 8, 16, 32):
+                if sequences > plan.spec.max_concurrent_sequences or context * sequences > cache_tokens:
+                    break
+                value = measure(context, sequences, utilization)
+                if value["status"] == "passed":
+                    throughput = value["metrics"]["tokens_per_second"]
+                    if throughput / baseline >= 1.1 and throughput > best["metrics"]["tokens_per_second"]:
+                        best = value
         except CalibrationTimeout as error:
-            publish("error", str(error), status_file=st_path)
-            return 75
-        except Exception as error:
-            publish("error", str(error), status_file=st_path)
-            raise
-    subprocess.run([str(Path(__file__).with_name("oksa-plan-vllm-workloads"))], check=True)
+            if best is None:
+                raise
+            mark_incomplete(error.reason)
+            self.publish("running", f"{error}; validating the best profile with prefix caching enabled.")
+        context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
+        enabled = measure(context, sequences, utilization, prefix_caching=True)
+        if enabled["status"] != "passed":
+            raise RuntimeError(f"Serving profile failed prefix-cache validation: {enabled['reason']}")
+        peak = enabled["metrics"]["peak_host_memory_bytes"]
+        memory_bytes = min(budget, (int(peak * 1.2) + 512 * 1024**2 + 1024**2 - 1) // 1024**2 * 1024**2)
+        final = measure(context, sequences, utilization, prefix_caching=True, memory_bytes=memory_bytes)
+        if final["status"] != "passed":
+            raise RuntimeError(f"Serving profile failed measured-memory validation: {final['reason']}")
+        result.update(reason="measured", completed_at=time.time(), metrics=final["metrics"], limits=dict(
+            max_model_len=context, max_num_seqs=sequences,
+            max_num_batched_tokens=min(8192, context * sequences),
+            gpu_memory_utilization=utilization, memory_bytes=memory_bytes))
+        return result
+
+    def run(self) -> None:
+        selected = self.requested_model or os.environ.get("PUU_VLLM_SELECTED_MODEL", "") or ms.read_first_line(
+            Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(ms.STATE_DIR / "selected-model")))
+        )
+        state = ms.WorkloadState.load(ms.STATE_DIR, ms.MODELS_DIR,
+                                     selected_model=selected, resolve_public_names=bool(selected))
+        if state.snapshot is None:
+            raise ValueError(f"Cannot evaluate workloads: {state.capability_error}")
+        if selected:
+            self.model = state.resolve_model_name(selected)
+        else:
+            candidates = sorted((model for model in state.snapshot.models if model.spec.autostart),
+                                key=lambda model: -model.spec.autostart_priority)
+            if not candidates:
+                if state.snapshot.models:
+                    raise ValueError("No selected model or autostart model is configured")
+                self.publish("complete", "No models available for calibration.")
+                print("No models available for calibration.", flush=True)
+                return
+            self.model = candidates[0].spec.name
+        spec = next(model.spec for model in state.snapshot.models if model.spec.name == self.model)
+        store = CalibrationStore()
+        identity = store.identity(spec)
+        self.fingerprint = store.fingerprint(identity)
+        cached = None
+        if not self.force:
+            try:
+                cached = read_record(result_path(self.model))
+            except (FileNotFoundError, ValueError):
+                pass
+        if (cached is not None and valid_result(cached, self.model)
+                and cached["fingerprint"] == self.fingerprint
+                and cached["identity"] == identity
+                and cached["search_complete"] and cached["reason"] != "insufficient-memory"):
+            message = (f"Calibration complete with zero limits: {cached['reason']}."
+                       if not cached["limits"]["max_num_seqs"]
+                       else "Matching measured profile applied for this boot.")
+            self.publish("complete", message)
+            print(f"Applied cached profile for {self.model}.", flush=True)
+            return
+        self.publish("running", f"Preparing measured {self.model} calibration.")
+        evaluation = WorkloadEvaluator(state.snapshot).evaluate(self.model, require_calibration=False)
+        if not identity["gpus"]:
+            result = dict(schema=1, model=self.model, state="complete", fingerprint=self.fingerprint,
+                          identity=identity, completed_at=time.time(), reason="no-gpu", limits=dict(ZERO_LIMITS),
+                          trials=[], search_complete=True, incomplete_reasons=[])
+        else:
+            if evaluation.plan is None:
+                raise ValueError("Cannot probe model: " + "; ".join(evaluation.reasons))
+            WorkloadManifestBuilder(evaluation.plan, ms.MODELS_DIR).build()
+            self.context_ceiling(evaluation.plan)
+            self.kubectl("get", "namespace", ms.OKSA_NAMESPACE, "-o", "json")
+            node = self.kubectl("get", "node", identity["node"], "-o", "json")
+            hostname = node["metadata"]["labels"]["kubernetes.io/hostname"]
+            if not ms.sync_litellm_models(None, ms.STATE_DIR):
+                raise RuntimeError("Failed to unpublish model routing before calibration")
+            active_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(ms.STATE_DIR / "active-model")))
+            active_file.unlink(missing_ok=True)
+            ms.atomic_write_text(WorkloadManifestBuilder.manifest_path(),
+                                 '{"apiVersion":"v1","kind":"List","items":[]}\n')
+            WorkloadManifestBuilder.stop_workloads()
+            self.delete_probe()
+            result = self.calibrate(evaluation.plan, hostname, identity)
+        if not valid_result(result, self.model):
+            raise ValueError("Invalid calibration result")
+        current_identity = store.identity(spec)
+        if current_identity != identity or store.fingerprint(current_identity) != self.fingerprint:
+            raise RuntimeError("Model, runtime or hardware identity changed during calibration; result was not applied")
+        atomic_record(result_path(self.model), result)
+        limits = result["limits"]
+        message = (f"Measured {limits['max_model_len']} context tokens and {limits['max_num_seqs']} "
+                   "simultaneous requests; serving profile validated with prefix caching enabled.") if limits["max_num_seqs"] else (
+                       f"Calibration complete with zero limits: {result['reason']}.")
+        if not result["search_complete"]:
+            message += " Maximum capacity was not established; use --force to retry."
+        self.publish("complete", message)
+        print(message, flush=True)
+
+    @staticmethod
+    def interrupted(signum, frame):
+        raise InterruptedError(f"Calibration interrupted by signal {signum}")
+
+    @classmethod
+    def main(cls) -> int:
+        parser = argparse.ArgumentParser(description="Measure local model inference limits")
+        parser.add_argument("--force", action="store_true", help="Measure again even if a matching result is cached")
+        parser.add_argument("--model", default="", help="Discovered model name (defaults to selected or highest-priority autostart model)")
+        arguments = parser.parse_args()
+        if os.geteuid() != 0:
+            raise PermissionError("Calibration requires root")
+        controller = cls(arguments.model, arguments.force)
+        STATUS_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        signal.signal(signal.SIGTERM, cls.interrupted)
+        signal.signal(signal.SIGINT, cls.interrupted)
+        with (STATUS_PATH.parent / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                controller.run()
+            except CalibrationTimeout as error:
+                controller.publish("error", str(error))
+                return 75
+            except Exception as error:
+                controller.publish("error", str(error))
+                raise
+        return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(CalibrationController.main())
