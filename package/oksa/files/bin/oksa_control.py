@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+import http.client
 import json
 import math
 import os
 from pathlib import Path
 import re
 import subprocess
+import time
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from gi.repository import GLib
 
 import oksa_calibration_state as calibration
@@ -31,6 +36,7 @@ class Contract:
     METHODS = {
         "GetStatus": ((), "a{sv}", False),
         "ListModels": ((), "a{sv}", False),
+        "SearchModels": ((('query', 's'),), "a{sv}", False),
         "InspectModel": ((('repo', 's'), ('revision', 's')), "a{sv}", False),
         "DownloadModel": ((('repo', 's'), ('name', 's'), ('commit', 's'), ('force', 'b')), "o", True),
         "StartModel": ((('name', 's'),), "o", True),
@@ -48,7 +54,7 @@ class Contract:
         "GetJob": ((('path', 'o'),), "a{sv}", False),
         "ListJobs": ((), "a{sv}", False),
     }
-    OPTIONAL_STRINGS = {"email", "duration", "user", "commit", "revision"}
+    OPTIONAL_STRINGS = {"email", "duration", "user", "commit", "revision", "query"}
     MUTATIONS = frozenset({"DownloadModel", "StartModel", "StopServing", "RemoveModel", "CreateUser",
                            "DeleteUser", "CreateKey", "RevokeKey", "Calibrate"})
 
@@ -149,6 +155,7 @@ class OksaControl:
         Contract.validate(method, args)
         operations = {
             "ListModels": self.list_models,
+            "SearchModels": self.search_models,
             "InspectModel": self.inspect_model, "DownloadModel": self.download_model,
             "StartModel": self.start_model, "StopServing": self.stop_serving,
             "RemoveModel": self.remove_model, "ListUsers": self.list_users,
@@ -162,6 +169,108 @@ class OksaControl:
 
     def list_models(self) -> dict:
         return ms.collect_models_list(self.state_dir, self.discover_bin, self.planner_bin)
+
+    def search_models(self, query: str) -> dict:
+        deadline = time.monotonic() + 12
+        models = self._search_hf_models(query.strip(), deadline)
+        catalog_dir = Path(os.environ.get("PUU_VLLM_MODEL_CATALOG_DIR", "/usr/share/puu/vllm/catalog.d"))
+        terms = re.findall(r"[^\W_]+", query.casefold())
+        preferred = []
+        lookups = 0
+        seen = set()
+        for path in sorted(catalog_dir.glob("*.env")):
+            if time.monotonic() >= deadline:
+                break
+            try:
+                meta = ms.ModelSpec.read_metadata(path)
+            except (OSError, ValueError):
+                continue
+            repo = meta.get("PUU_VLLM_REPO_ID", "")
+            searchable = " ".join((path.stem, meta.get("PUU_VLLM_MODEL_NAME", ""), repo)).casefold()
+            if query.strip() and (not terms or not all(term in searchable for term in terms)):
+                continue
+            try:
+                Contract.validate("InspectModel", (repo, ""))
+            except OksaError:
+                continue
+            if repo in seen:
+                continue
+            seen.add(repo)
+            match = next((model for model in models if model["repo_id"] == repo), None)
+            if match is None and lookups < 3:
+                lookups += 1
+                try:
+                    matches = self._search_hf_models(repo, deadline)
+                except OksaError as error:
+                    if error.code != "SearchFailed":
+                        raise
+                    continue
+                match = next((model for model in matches if model["repo_id"] == repo), None)
+            if match is not None:
+                preferred.append(match)
+                if len(preferred) == 3:
+                    break
+        combined = []
+        seen = set()
+        for model in preferred + models:
+            if model["repo_id"] not in seen:
+                combined.append(model)
+                seen.add(model["repo_id"])
+        return {"ok": True, "models": combined[:20]}
+
+    def _search_hf_models(self, query: str, deadline: float) -> list[dict]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise OksaError("SearchFailed", "Hugging Face model search timed out")
+        params = urllib.parse.urlencode({
+            "search": query, "filter": "text-generation", "pipeline_tag": "text-generation",
+            "sort": "downloads", "direction": "-1", "limit": "20",
+            "expand": ["downloads", "gated", "pipeline_tag"],
+        }, doseq=True)
+        request = urllib.request.Request("https://huggingface.co/api/models?" + params,
+                                         headers={"User-Agent": "puu-oksa/1.0", "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=min(3.0, remaining)) as response:
+                raw = bytearray()
+                while len(raw) <= Contract.MAX_JSON:
+                    if time.monotonic() >= deadline:
+                        raise OksaError("SearchFailed", "Hugging Face model search timed out")
+                    chunk = response.read1(min(65536, Contract.MAX_JSON + 1 - len(raw)))
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+        except urllib.error.HTTPError as error:
+            raise OksaError("SearchFailed", f"Hugging Face search failed (HTTP {error.code})") from error
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+            raise OksaError("SearchFailed", "Could not reach Hugging Face model search; try again") from error
+        if len(raw) > Contract.MAX_JSON:
+            raise OksaError("InvalidResult", "Hugging Face search response exceeds 1 MiB")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, ValueError, RecursionError) as error:
+            raise OksaError("InvalidResult", "Invalid Hugging Face search response") from error
+        if not isinstance(data, list) or len(data) > 20:
+            raise OksaError("InvalidResult", "Expected at most 20 Hugging Face search results")
+        models = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise OksaError("InvalidResult", "Invalid Hugging Face search result")
+            repo = item.get("id")
+            if (not isinstance(repo, str)
+                    or not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,95}/)?[A-Za-z0-9][A-Za-z0-9._-]{0,95}", repo)
+                    or ".." in repo or "--" in repo
+                    or any(part.endswith((".git", ".")) for part in repo.split("/"))):
+                raise OksaError("InvalidResult", "Invalid repository ID in Hugging Face search result")
+            downloads = item.get("downloads")
+            gated = item.get("gated")
+            if (type(downloads) is not int or not 0 <= downloads <= 2**63 - 1
+                    or not (type(gated) is bool or (isinstance(gated, str) and gated in ("auto", "manual")))
+                    or item.get("pipeline_tag") != "text-generation"):
+                raise OksaError("InvalidResult", "Invalid metadata in Hugging Face search result")
+            models.append({"repo_id": repo, "name": repo.rsplit("/", 1)[-1],
+                           "author": repo.split("/", 1)[0] if "/" in repo else "",
+                           "downloads": downloads, "gated": gated is not False})
+        return models
 
     def inspect_model(self, repo: str, revision: str) -> dict:
         meta = ms.inspect_hf_model(repo, revision or "main")
