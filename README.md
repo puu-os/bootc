@@ -17,7 +17,6 @@ Puu OS builds on top of the following open source projects:
 - [K3s](https://k3s.io/)
 - [Linux](https://kernel.org)
 - [LiteLLM](https://www.litellm.ai)
-- [llm-d](https://llm-d.ai/)
 - [OSTree](https://github.com/ostreedev)
 - [PipeWire](https://pipewire.org)
 - [Skopeo](https://skopeo.org)

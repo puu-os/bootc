@@ -19,4 +19,4 @@ spec:
       image:
         tag: v1.2.0@sha256:77097173123fb72f568f7efeea109962837465c956a54a25d538611399de1d4f
     inferenceExtension:
-      enabled: true
+      enabled: false
