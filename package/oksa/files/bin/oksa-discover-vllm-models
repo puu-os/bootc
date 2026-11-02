@@ -174,14 +174,7 @@ def discover(models_dir: Path) -> list[ms.ModelSpec]:
             meta = {**meta, **runtime_meta, "PUU_VLLM_REPO_ID": repo_id, "PUU_VLLM_REVISION": revision}
             meta["PUU_VLLM_METADATA_SOURCES"] = json.dumps(sources)
             if not meta.get("PUU_VLLM_MAX_CONTEXT"):
-                ceilings = [
-                    section[key] for section in (config, config.get("text_config", {}))
-                    if isinstance(section, dict)
-                    for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length")
-                    if type(section.get(key)) is int and section[key] > 0
-                ]
-                if ceilings:
-                    meta["PUU_VLLM_MAX_CONTEXT"] = str(min(262144, *ceilings))
+                meta["PUU_VLLM_MAX_CONTEXT"] = str(min(262144, ms.model_context_length(config)))
             spec = ms.ModelSpec.from_env(
                 meta, name=name, path=str(entry.resolve()), estimated_default=estimate_model_memory_mib(entry),
             )
