@@ -52,41 +52,6 @@ class _OksaPage:
 
     def build(self) -> None:
         ui.dark_mode(False)
-        ui.colors(
-            primary="#2B5B84", secondary="#2F6B6E", accent="#3E4C5E",
-            dark="#242933", dark_page="#E3E7EE", positive="#276749",
-            negative="#9E2A38", info="#2B5B84", warning="#8A4B08",
-        )
-        ui.add_css('''
-            :root { color-scheme: light; }
-            body, .q-tab-panels { background: #E3E7EE; color: #242933; }
-            .q-card, .q-table__card, .q-markup-table, .q-menu, .q-select__dialog, .q-expansion-item {
-                background: #ECEFF4; color: #242933;
-            }
-            .q-menu .q-item { color: #242933; }
-            .q-field__label,
-            .q-field__marginal,
-            .q-table__bottom,
-            .q-checkbox__inner:not(.q-checkbox__inner--truthy):not(.q-checkbox__inner--indet) {
-                color: #4C566A;
-            }
-            .q-field__native,
-            .q-field__input { color: #242933; }
-            /* Important Quasar utilities are layered, so overrides must be layered too. */
-            @layer overrides {
-                .q-btn--standard,
-                .q-notification,
-                .q-notification .q-btn,
-                .q-checkbox__inner--truthy .q-checkbox__svg,
-                .q-checkbox__inner--indet .q-checkbox__svg {
-                    color: #F4F6F9 !important;
-                }
-                :focus-visible:not(.q-field__native) {
-                    outline: 2px solid #2B5B84 !important; outline-offset: 3px;
-                }
-            }
-            .q-field:has(:focus-visible) { outline: 2px solid #2B5B84; outline-offset: 3px; }
-        ''')
         ui.label("OKSA").classes("text-xl font-semibold")
         self.warning_label = ui.label("").classes("text-warning")
         with ui.tabs().classes("max-w-full") as self.tabs:
@@ -192,7 +157,7 @@ class _OksaPage:
 
     async def _confirm(self, message: str, action: str, *, dangerous: bool = False) -> bool:
         with ui.dialog() as dialog, ui.card():
-            ui.label(message).classes("whitespace-pre-line break-words max-h-[60vh] overflow-y-auto")
+            ui.label(message).classes("whitespace-pre-line break-words max-h-96 overflow-y-auto")
             with ui.row():
                 ui.button("Cancel", color="accent", on_click=lambda: dialog.submit(False)).props("outline")
                 ui.button(action, color="negative" if dangerous else "primary", on_click=lambda: dialog.submit(True))
@@ -223,41 +188,41 @@ class _OksaPage:
 
     def _build_monitoring(self) -> None:
         with ui.row().classes("w-full items-center justify-between gap-2"):
-            self.freshness = ui.label("Waiting for first readings").classes("text-sm text-[#4C566A] tabular-nums")
+            self.freshness = ui.label("Waiting for first readings").classes("text-sm text-secondary tabular-nums")
             ui.button("Refresh monitoring", color="accent", on_click=self._load_monitoring).props("outline")
         self.monitoring_error = ui.label("").classes("text-negative")
         self.monitoring_error.set_visibility(False)
         with ui.grid().classes("w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"):
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Serving").classes("text-sm text-[#4C566A]")
+                ui.label("Serving").classes("text-sm text-secondary")
                 self.inference = ui.label("Unavailable").classes("text-xl font-semibold break-words")
-                self.model_status = ui.label("No active model").classes("text-sm text-[#4C566A] w-full break-words")
+                self.model_status = ui.label("No active model").classes("text-sm text-secondary w-full break-words")
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Host memory").classes("text-sm text-[#4C566A]")
+                ui.label("Host memory").classes("text-sm text-secondary")
                 self.memory = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums break-words")
-                self.memory_percent = ui.label("").classes("text-sm text-[#4C566A] tabular-nums")
+                self.memory_percent = ui.label("").classes("text-sm text-secondary tabular-nums")
                 self.memory_percent.set_visibility(False)
                 self.memory_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.memory_progress.set_visibility(False)
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Requests").classes("text-sm text-[#4C566A]")
+                ui.label("Requests").classes("text-sm text-secondary")
                 self.requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-                self.requests_caption = ui.label("").classes("text-sm text-[#4C566A]")
+                self.requests_caption = ui.label("").classes("text-sm text-secondary")
                 self.requests_caption.set_visibility(False)
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("KV cache").classes("text-sm text-[#4C566A]")
+                ui.label("KV cache").classes("text-sm text-secondary")
                 self.kv_cache = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-                self.kv_caption = ui.label("").classes("text-sm text-[#4C566A]")
+                self.kv_caption = ui.label("").classes("text-sm text-secondary")
                 self.kv_caption.set_visibility(False)
                 self.kv_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.kv_progress.set_visibility(False)
-        self.gpus_label = ui.label("GPU data unavailable").classes("text-sm text-[#4C566A]")
+        self.gpus_label = ui.label("GPU data unavailable").classes("text-sm text-secondary")
         self.gpus_table = self._table("GPUs", {
             "index": "Index", "name": "Name", "utilization": "Utilization", "memory": "Memory (MiB)",
             "temperature": "Temperature", "power": "Power",
         })
         self.gpus_table.set_visibility(False)
-        self.workloads_label = ui.label("Workload data unavailable").classes("text-sm text-[#4C566A]")
+        self.workloads_label = ui.label("Workload data unavailable").classes("text-sm text-secondary")
         self.workloads_table = self._table("Workloads", {
             "name": "Name", "phase": "Phase", "ready": "Ready", "restarts": "Restarts",
         })
@@ -644,8 +609,6 @@ class _OksaPage:
             }, selection="single", row_key="repo_id").props("flat dense wrap-cells")
             self.search_table.set_visibility(False)
             self.search_table.on_select(self._select_search_result)
-            self.search_table.on("rowClick", self._search_row_clicked,
-                                 js_handler="(evt, row) => { if (!evt?.target?.closest?.('.q-table--col-auto-width, .q-checkbox')) emit(row.repo_id); }")
             self.inspection_text = ui.label("Choose a model to review its download size.").classes("whitespace-pre-line break-words")
             self.download_error = ui.label("").classes("text-negative")
             with ui.expansion("Advanced", icon="tune").classes("w-full"):
@@ -710,13 +673,6 @@ class _OksaPage:
             finally:
                 if not self.client.is_deleted:
                     self.search_button.enable()
-
-    async def _search_row_clicked(self, event) -> None:
-        if "download" in self.busy:
-            return
-        self.search_table.selected = [row for row in self.search_table.rows if row["repo_id"] == event.args]
-        self.search_table.update()
-        await self._select_search_result()
 
     async def _select_search_result(self) -> None:
         if "download" in self.busy:
@@ -830,21 +786,15 @@ class _OksaPage:
         with ui.column().classes("w-full") as self.users_list:
             with ui.row():
                 self.create_user_button = ui.button("Create user", on_click=self._open_user)
+                self.open_user_button = ui.button("Open selected user", on_click=self._open_selected_user)
                 self.delete_users_button = ui.button("Delete selected users", color="negative", on_click=self._delete_selected_users).props("outline")
             self.delete_users_button.disable()
+            self.open_user_button.disable()
             search = ui.input("Find user by ID or email")
             self.users_empty = ui.label("Loading users…")
             self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
             self.users_table.set_visibility(False)
             self.users_table.on_select(self._users_selection)
-            self.users_table.add_slot("body-cell-user_id", '''
-                <q-td :props="props">
-                    <q-btn flat dense no-caps color="primary" class="underline" :label="props.value"
-                        @click.stop="$parent.$emit('open-user', props.row.user_id)" />
-                </q-td>
-            ''')
-            self.users_table.on("open-user", lambda event: self._show_user(event.args))
-            self.users_table.on("rowClick", lambda event: self._show_user(event.args), js_handler="(evt, row) => { if (!evt?.target?.closest?.('.q-table--col-auto-width, .q-checkbox')) emit(row.user_id); }")
             search.bind_value_to(self.users_table, "filter")
         with ui.column().classes("w-full") as self.user_detail:
             with ui.row():
@@ -856,12 +806,17 @@ class _OksaPage:
             self.keys_count = ui.label("Keys not loaded")
             self.keys_table = self._table("User API keys", {"name": "Name", "models": "Models", "status": "Status", "expires": "Expires"}, selection="single")
         self.user_detail.set_visibility(False)
-        self.user_controls = [self.create_user_button, self.delete_users_button, self.delete_user_button, self.create_key_button, self.revoke_button]
+        self.user_controls = [self.create_user_button, self.open_user_button, self.delete_users_button, self.delete_user_button, self.create_key_button, self.revoke_button]
 
     def _users_selection(self) -> None:
         count = len(self.users_table.selected)
         self.delete_users_button.set_text(f"Delete selected users ({count})" if count else "Delete selected users")
         self.delete_users_button.set_enabled(count > 0 and "user" not in self.busy)
+        self.open_user_button.set_enabled(count == 1 and "user" not in self.busy)
+
+    async def _open_selected_user(self) -> None:
+        if len(self.users_table.selected) == 1:
+            await self._show_user(self.users_table.selected[0]["user_id"])
     @staticmethod
     def _expiry(value) -> datetime | None:
         if not isinstance(value, str):
