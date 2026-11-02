@@ -4,7 +4,7 @@
 [Unit]
 Description=Initial system setup monitor
 ConditionKernelCommandLine=!puu.live
-Wants=k3s.service puu-k3s-addons.service puu-vllm-preseed.service
+Wants=k3s.service puu-k3s-addons.service puu-vllm-preseed.service puu-vllm-planner.service
 After=puu-firstboot-homectl.service
 StartLimitIntervalSec=0
 

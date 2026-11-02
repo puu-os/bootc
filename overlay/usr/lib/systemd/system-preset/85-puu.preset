@@ -6,6 +6,7 @@ enable puu-k3s-addons.service
 enable puu-oksa.service
 enable puu-oksa-proxy.service
 enable puu-model-serving-labeler.timer
+enable puu-vllm-planner.service
 enable puu-vllm-planner.timer
 enable puu-vllm-preseed.service
 enable puu-nvidia-cdi-refresh.service
