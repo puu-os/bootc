@@ -49,7 +49,6 @@ class _OksaPage:
         self.job_details: set[str] = set()
         self.jobs_received = 0.0
         self.jobs_failed = True
-        self.job_widgets = []
         self.model_job: str | None = None
         self.model_operation: str | None = None
         self.model_uncertain = False
@@ -66,13 +65,15 @@ class _OksaPage:
         ui.label("OKSA").classes("text-xl font-semibold")
         self.warning_label = ui.label("").classes("text-warning")
         with ui.tabs().classes("max-w-full") as self.tabs:
-            for name in ("Monitoring", "Models", "Users"):
+            for name in ("Monitoring", "Models", "Activity", "Users"):
                 ui.tab(name)
         with ui.tab_panels(self.tabs, value="Monitoring").classes("w-full"):
             with ui.tab_panel("Monitoring"):
                 self._build_monitoring()
             with ui.tab_panel("Models"):
                 self._build_models()
+            with ui.tab_panel("Activity"):
+                self._build_activity()
             with ui.tab_panel("Users"):
                 self._build_users()
         self._build_download_dialog()
@@ -170,7 +171,7 @@ class _OksaPage:
         with ui.dialog() as dialog, ui.card():
             ui.label(message).classes("whitespace-pre-line break-words max-h-96 overflow-y-auto")
             with ui.row():
-                ui.button("Cancel", color="accent", on_click=lambda: dialog.submit(False)).props("outline")
+                ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("outline")
                 ui.button(action, color="negative" if dangerous else "primary", on_click=lambda: dialog.submit(True))
         try:
             return await dialog is True and not self.client.is_deleted
@@ -179,7 +180,7 @@ class _OksaPage:
                 dialog.delete()
 
     async def _tab_changed(self) -> None:
-        if self.tabs.value in ("Monitoring", "Models"):
+        if self.tabs.value in ("Monitoring", "Models", "Activity"):
             await self._refresh_model_state()
         elif self.tabs.value == "Users":
             await self._load_users()
@@ -187,46 +188,48 @@ class _OksaPage:
     async def _poll(self) -> None:
         if self.client.is_deleted or not self.client.has_socket_connection:
             return
-        if self.tabs.value in ("Monitoring", "Models") or self.model_uncertain or self.model_job:
+        if self.tabs.value in ("Monitoring", "Models", "Activity") or self.model_uncertain or self.model_job:
             await self._refresh_model_state()
 
     def _build_monitoring(self) -> None:
-        with ui.row().classes("w-full items-center justify-between gap-2"):
-            self.freshness = ui.label("Waiting for first readings").classes("text-sm text-secondary tabular-nums")
-            ui.button("Refresh monitoring", color="accent", on_click=self._load_monitoring).props("outline")
+        with ui.row().classes("w-full items-center"):
+            ui.label("Connection")
+            self.freshness = ui.badge("Connecting").props("outline")
+            with self.freshness:
+                self.freshness_detail = ui.tooltip("Waiting for the first update")
         self.monitoring_error = ui.label("").classes("text-negative")
         self.monitoring_error.set_visibility(False)
         with ui.grid().classes("w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"):
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Serving").classes("text-sm text-secondary")
+                ui.label("Serving").classes("text-sm")
                 self.inference = ui.label("Unavailable").classes("text-xl font-semibold break-words")
-                self.model_status = ui.label("No active model").classes("text-sm text-secondary w-full break-words")
+                self.model_status = ui.label("No active model").classes("text-sm w-full break-words")
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Host memory").classes("text-sm text-secondary")
+                ui.label("Host memory").classes("text-sm")
                 self.memory = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums break-words")
-                self.memory_percent = ui.label("").classes("text-sm text-secondary tabular-nums")
+                self.memory_percent = ui.label("").classes("text-sm tabular-nums")
                 self.memory_percent.set_visibility(False)
                 self.memory_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.memory_progress.set_visibility(False)
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Requests").classes("text-sm text-secondary")
+                ui.label("Requests").classes("text-sm")
                 self.requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-                self.requests_caption = ui.label("").classes("text-sm text-secondary")
+                self.requests_caption = ui.label("").classes("text-sm")
                 self.requests_caption.set_visibility(False)
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("KV cache").classes("text-sm text-secondary")
+                ui.label("KV cache").classes("text-sm")
                 self.kv_cache = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-                self.kv_caption = ui.label("").classes("text-sm text-secondary")
+                self.kv_caption = ui.label("").classes("text-sm")
                 self.kv_caption.set_visibility(False)
                 self.kv_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.kv_progress.set_visibility(False)
-        self.gpus_label = ui.label("GPU data unavailable").classes("text-sm text-secondary")
+        self.gpus_label = ui.label("GPU data unavailable").classes("text-sm")
         self.gpus_table = self._table("GPUs", {
             "index": "Index", "name": "Name", "utilization": "Utilization", "memory": "Memory (MiB)",
             "temperature": "Temperature", "power": "Power",
         })
         self.gpus_table.set_visibility(False)
-        self.workloads_label = ui.label("Workload data unavailable").classes("text-sm text-secondary")
+        self.workloads_label = ui.label("Workload data unavailable").classes("text-sm")
         self.workloads_table = self._table("Workloads", {
             "name": "Name", "phase": "Phase", "ready": "Ready", "restarts": "Restarts",
         })
@@ -257,7 +260,7 @@ class _OksaPage:
             return
         status = self.status
         model_state = status.get("model_status")
-        if (model_state not in ("stopped", "no-model", "not-ready", "ready")
+        if (model_state not in ("stopped", "no-model", "not-ready", "ready", "unavailable")
                 or status.get("gateway_status") not in ("ready", "authentication-required", "unreachable")):
             self.partial = True
         memory = status.get("host_memory") if isinstance(status.get("host_memory"), dict) else {}
@@ -285,11 +288,10 @@ class _OksaPage:
             active_text = "No active model"
         else:
             active_text = active_raw
-        if isinstance(selected_raw, str) and selected_raw.strip() and selected_raw not in ("-", active_raw):
-            active_text += f" · Selected: {selected_raw}"
-        elif not isinstance(selected_raw, str) or not selected_raw.strip():
+        if not isinstance(selected_raw, str) or not selected_raw.strip():
             self.partial = True
         self.model_status.set_text(active_text)
+        self.model_status.set_visibility(active_raw not in (None, "", "-"))
 
         metrics = status.get("metrics") if isinstance(status.get("metrics"), dict) else {}
         running, waiting = metrics.get("running_requests"), metrics.get("waiting_requests")
@@ -395,65 +397,37 @@ class _OksaPage:
                  and (error is None or isinstance(error, str)))
         elapsed = age + max(0, time.monotonic() - self.status_received) if known else None
         stale = not known or self.status_failed or metadata.get("stale") or error is not None or elapsed > maximum
-        if known:
-            parts = []
-            if stale:
-                parts.append("Stale")
-            parts.append(f"Updated {int(elapsed)}s ago")
-            if self.partial:
-                parts.append("Some readings unavailable")
-            self.freshness.set_text(" · ".join(parts))
-        else:
-            self.freshness.set_text("Update failed" if self.status_failed else
-                                    "Collection failed" if error else
-                                    "Freshness unavailable" if self.status is not None else "Waiting for first readings")
-        inference = "Unavailable"
-        if self.status is not None:
-            if stale:
-                inference = "Unverified — stale readings" if known else "Unverified — freshness unavailable"
-            else:
-                model, gateway = self.status.get("model_status"), self.status.get("gateway_status")
-                inference = {"stopped": "Stopped", "no-model": "No model loaded", "not-ready": "Starting…"}.get(model, "Unavailable")
-                if model == "ready":
-                    inference = {"ready": "Ready", "authentication-required": "Gateway auth required"}.get(gateway, "Gateway unavailable")
+        self.freshness.set_text("Offline" if self.status_failed else "Delayed" if stale else "Partial data" if self.partial else "Live")
+        self.freshness_detail.set_text(f"Last update {int(elapsed)} seconds ago" if known else "Waiting for a confirmed update")
+        inference = "Status unknown"
+        if self.status is not None and not stale:
+            model, gateway = self.status.get("model_status"), self.status.get("gateway_status")
+            inference = {"stopped": "Stopped", "no-model": "Stopped", "not-ready": "Not ready",
+                         "unavailable": "Status unknown"}.get(model, "Status unknown")
+            if model == "ready":
+                inference = {"ready": "Serving", "authentication-required": "Authentication required"}.get(gateway, "Gateway offline")
+        running = next((job for job in self.jobs.values()
+                        if self._jobs_fresh() and job["path"] in self.jobs_seen and job["state"] in ("queued", "running")
+                        and job["operation"] in ("StartModel", "StopServing", "Calibrate")), None)
+        if running:
+            inference = "Queued" if running["state"] == "queued" else self._operation_title(running)
         self.inference.set_text(inference)
         self.status_stale = stale
-        self.models_freshness.set_text(("Unverified · " if stale else "") + self.freshness.text)
-        self.models_resources.set_text(f"Requests (running / waiting): {self.requests.text} · KV cache: {self.kv_cache.text}"
-                                       + (" · Last readings, unverified" if stale else ""))
-        gpu_lines = [f"GPU {gpu['index']} {gpu['name']}: utilization {gpu['utilization']} · memory used / total {gpu['memory']} MiB"
-                     for gpu in self.gpus_table.rows]
-        self.models_gpus.set_text("Device-wide (not per model):\n" + ("\n".join(gpu_lines) or self.gpus_label.text))
-        jobs_fresh = self._jobs_fresh()
-        self.activity_freshness.set_text(("Activity checked " + str(int(max(0, time.monotonic() - self.jobs_received))) + "s ago"
-                                          if self.jobs_received else "Activity not loaded") + (" · Unverified" if not jobs_fresh else ""))
-        for job, badge, spinner, elapsed_label, cancel in self.job_widgets:
-            verified = jobs_fresh and job["path"] in self.jobs_seen
-            running = job["state"] in ("queued", "running")
-            badge.set_text(job["state"].title() + (" · Unverified" if not verified else ""))
-            badge.props("color=" + {"failed": "negative", "canceled": "warning", "succeeded": "positive"}.get(job["state"], "primary"))
-            spinner.set_visibility(running and verified)
-            cancel.set_visibility(job["state"] == "running")
-            cancel.set_enabled(verified and "cancel" not in self.busy)
-            end = job.get("ended_at")
-            elapsed_label.set_text(f"{int(max(0, (time.time() if running else end) - job['started_at']))}s"
-                                   + (" elapsed" if running else " duration") if running or end is not None else "Duration unavailable")
+        self.activity_freshness.set_text("Live" if self._jobs_fresh() else "Reconnecting")
+        self.activity_spinner.set_visibility(self._jobs_fresh() and any(job["state"] in ("queued", "running") for job in self.jobs.values()))
+        self._render_activity()
         self._render_models()
 
     def _build_models(self) -> None:
         with ui.row().classes("w-full items-center"):
-            ui.button("Find a model", icon="search", on_click=self._open_download)
-            self.start_button = ui.button("Start selected", on_click=lambda: self._model_action("start"))
-            self.stop_button = ui.button("Stop serving", on_click=lambda: self._model_action("stop")).props("outline")
-            self.remove_button = ui.button("Remove selected", color="negative", on_click=lambda: self._model_action("remove")).props("outline")
-            ui.button("Refresh confirmed state", icon="refresh", on_click=self._refresh_model_state).props("outline")
+            ui.button("Find", icon="search", on_click=self._open_download)
+            self.start_button = ui.button("Start", on_click=lambda: self._model_action("start"))
+            self.stop_button = ui.button("Stop", on_click=lambda: self._model_action("stop")).props("outline")
+            self.remove_button = ui.button("Delete", color="negative", on_click=lambda: self._model_action("remove")).props("outline")
+            self.model_spinner = ui.spinner()
+            self.model_spinner.set_visibility(False)
         self.model_controls = [self.start_button, self.stop_button, self.remove_button]
-        self.models_summary = ui.label("Loading model state…")
         self.models_error = ui.label("").classes("text-negative")
-        with ui.card().classes("w-full"):
-            self.models_freshness = ui.label("Waiting for first readings")
-            self.models_resources = ui.label("Runtime readings unavailable")
-            self.models_gpus = ui.label("Device-wide GPU readings unavailable").classes("whitespace-pre-line")
         self.models_empty = ui.label("Loading installed models…")
         self.models_table = self._table("Installed models", {
             "name": "Model", "storage_mib": "On disk (MiB)", "quantization": "Format",
@@ -461,22 +435,24 @@ class _OksaPage:
         }, selection="single")
         self.models_table.set_visibility(False)
         self.models_table.on_select(self._model_selection)
-        with ui.card().classes("w-full"):
-            self.model_detail = ui.label("Select an installed model")
-            with ui.row():
-                self.model_badge = ui.badge("No selection")
-                self.selection_badge = ui.badge("Selected for serving")
-                self.selection_badge.set_visibility(False)
-            self.model_profile = ui.label("")
-        with ui.card().classes("w-full"):
-            ui.label("Latest calibration activity (backend record, not current job completion)")
-            self.calibration_badge = ui.badge("Unavailable")
+        self._model_selection()
+
+    def _build_activity(self) -> None:
+        with ui.row().classes("w-full items-center"):
+            self.activity_cancel = ui.button("Cancel", on_click=self._cancel_selected_job).props("outline")
+            self.activity_details = ui.button("Details", on_click=self._show_job).props("outline")
+            self.activity_freshness = ui.badge("Connecting").props("outline")
+            self.activity_spinner = ui.spinner()
+            self.activity_spinner.set_visibility(False)
+        self.pull_error = ui.label("").classes("text-negative")
+        self.activity_table = self._table("Activity", {"action": "Action", "state": "Status", "elapsed": "Seconds"}, selection="single")
+        self.activity_table.on_select(self._activity_selection)
+        self._activity_selection()
+        with ui.expansion("Calibration", icon="tune").classes("w-full"):
+            self.calibration_badge = ui.badge("No record").props("outline")
             self.calibration_context = ui.label("")
             self.calibration_message = ui.label("").classes("whitespace-pre-line break-words")
-        ui.label("Running and recent activity").classes("text-lg")
-        self.activity_freshness = ui.label("Activity not loaded")
-        self.pull_error = ui.label("").classes("text-negative")
-        self.activity = ui.column().classes("w-full")
+            self.model_profile = ui.label("")
         self._model_selection()
 
     @staticmethod
@@ -502,16 +478,16 @@ class _OksaPage:
     def _model_state(self, model: dict) -> str:
         status = self.status or {}
         if self.status_stale:
-            return "Unverified" if model.get("active") or model.get("selected") else "Installed (runtime unverified)"
+            return "Status unknown"
         if not self.models_verified:
-            return "Installed (inventory unverified)"
+            return "Checking"
         if model["name"] == status.get("active_model"):
             if status.get("model_status") == "ready":
-                return "Serving" if status.get("gateway_status") == "ready" else "Runtime ready; gateway unverified"
+                return "Serving" if status.get("gateway_status") == "ready" else "Gateway not ready"
             if status.get("model_status") == "not-ready":
                 return "Starting"
         if model.get("active"):
-            return "Active marker (serving unverified)"
+            return "Status unknown"
         return "Installed"
 
     def _model_selection(self) -> None:
@@ -523,14 +499,7 @@ class _OksaPage:
         self.remove_button.set_enabled(available and model is not None and model.get("removable") is not False)
         if hasattr(self, "download_button"):
             self.download_button.set_enabled(self.inspection is not None and self._model_available() and "inspect" not in self.busy)
-        self.model_detail.set_text(f"{model['name']} · {model.get('repo_id') or 'Repository unavailable'} · "
-                                   + self._storage(model.get("storage_mib")) if model else "Select an installed model")
-        state = self._model_state(model) if model else "No selection"
-        self.model_badge.set_text(state)
-        self.model_badge.props("color=" + ("positive" if state == "Serving" else "warning" if "nverified" in state else "primary"))
-        self.selection_badge.set_visibility(model is not None and model.get("selected") is True)
-        self.selection_badge.set_text("Selected for serving" if self.models_verified else "Selected marker (unverified)")
-        profile = "Measured profile unavailable for this selection (not live limits)"
+        profile = ""
         calibration = self.calibration or {}
         result = calibration.get("result")
         if (model and self.models_verified and (model.get("selected") or model.get("active"))
@@ -543,7 +512,10 @@ class _OksaPage:
                 prefix = "Unverified measured profile" if self.status_stale or time.monotonic() - self.calibration_received > 10 else "Measured profile"
                 profile = (f"{prefix} (not live): context {limits['max_model_len']} tokens · "
                            f"concurrency {limits['max_num_seqs']}")
+        if not hasattr(self, "model_profile"):
+            return
         self.model_profile.set_text(profile if model else "")
+        self.model_profile.set_visibility(bool(profile) and model is not None)
         activity = calibration.get("status")
         valid_activity = (isinstance(activity, dict) and isinstance(calibration.get("model"), str)
                           and bool(calibration["model"].strip()) and activity.get("model") == calibration["model"]
@@ -551,16 +523,10 @@ class _OksaPage:
                           and isinstance(activity.get("message"), str)
                           and self._number(activity.get("updated_at"), 253402300799))
         verified = bool(self.calibration_received) and time.monotonic() - self.calibration_received <= 10
-        self.calibration_badge.set_text(activity["state"] + (" · Unverified" if not verified else "")
-                                        if valid_activity else "Unavailable · Unverified")
-        self.calibration_badge.props("color=" + ("primary" if verified and valid_activity else "warning"))
-        context = "No identity-verified calibration activity available"
-        if valid_activity:
-            updated = datetime.fromtimestamp(activity["updated_at"], timezone.utc).isoformat(timespec="seconds")
-            checked = (f"Checked {int(max(0, time.monotonic() - self.calibration_received))}s ago"
-                       if self.calibration_received else "Refresh failed or unavailable")
-            context = f"Model ID: {calibration['model']} · {checked} · Backend record timestamp: {updated}"
-        self.calibration_context.set_text(("Unverified · " if not verified else "") + context)
+        self.calibration_badge.set_text((activity["state"].replace("_", " ").capitalize() if verified else "Out of date")
+                                        if valid_activity else "No record")
+        self.calibration_context.set_text("Recorded " + datetime.fromtimestamp(activity["updated_at"], timezone.utc).strftime("%H:%M:%S UTC")
+                                          if valid_activity else "")
         self.calibration_message.set_text(activity["message"] if valid_activity else "")
 
     def _render_models(self) -> None:
@@ -570,7 +536,7 @@ class _OksaPage:
             "storage_mib": model.get("storage_mib") if self._number(model.get("storage_mib")) else None,
             "quantization": model.get("quantization") or "none",
             "capabilities": "Compatible" if model.get("capabilities") == "ok" else "Insufficient or unverified",
-            "state": self._model_state(model) + (" · Selected" if model.get("selected") else ""),
+            "state": self._model_state(model),
         } for model in self.models]
         selection = [row for row in rows if row["id"] in selected]
         if self.models_table.rows != rows or self.models_table.selected != selection:
@@ -579,18 +545,9 @@ class _OksaPage:
             self.models_table.update()
         waiting = (self.model_job is not None or bool(self.busy.intersection({"model", "download"}))
                    or any(job["state"] in ("queued", "running") for job in self.jobs.values()))
-        if waiting:
-            inventory = "Inventory refresh waits for the ongoing or unverified operation."
-            if self.models:
-                inventory += " Cached inventory is unverified."
-        elif not self.models_verified:
-            inventory = "Installed inventory unavailable or unverified; refresh confirmed state."
-        else:
-            inventory = "No installed models. Find a model to get started."
-        self.models_empty.set_text(inventory)
-        self.models_empty.set_visibility(waiting or not self.models or not self.models_verified)
-        self.models_summary.set_text(self.inference.text + " · " + self.model_status.text
-                                     + (" · Serving disabled" if self.models_verified and self.serving_enabled is False else ""))
+        self.model_spinner.set_visibility(waiting and self._jobs_fresh())
+        self.models_empty.set_text("Working…" if waiting else "Loading…" if not self.models_verified else "No installed models")
+        self.models_empty.set_visibility(not self.models)
         self._model_selection()
 
     async def _refresh_model_state(self) -> None:
@@ -683,7 +640,7 @@ class _OksaPage:
         self.models_verified = True
         self.serving_enabled = reply[1].get("serving_enabled")
         self.models_table.set_visibility(bool(models))
-        self.models_empty.set_text("No installed models. Find a model to get started.")
+        self.models_empty.set_text("No installed models. Use Find to get started.")
         self.models_empty.set_visibility(not models)
         self._render_models()
         return True
@@ -770,7 +727,7 @@ class _OksaPage:
             self.job_details.intersection_update(self.jobs)
             if any(job["state"] in ("queued", "running") for job in self.jobs.values()):
                 self.models_verified = False
-            if self.jobs != previous or self.job_details != previous_details or not self.job_widgets:
+            if self.jobs != previous or self.job_details != previous_details or not self.activity_table.rows:
                 self._render_activity()
             self._render_freshness()
             previous = self.jobs.copy()
@@ -793,9 +750,9 @@ class _OksaPage:
                         result = job.get("result") or {}
                         message = str((job.get("error") or {}).get("message") or result.get("warning") or result.get("error") or "")
                         if self.model_operation == "RemoveModel" and not (result.get("deleted") is True and result.get("reconciled") is True):
-                            message = message or "Removal or reconciliation was not confirmed; files or serving may be partially changed."
+                            message = message or "Deletion was not confirmed; files or serving may be partially changed."
                         if job["state"] != "succeeded" or result.get("ok") is not True or message:
-                            self._warn("model-operation", f"{self.model_operation}: {job['state']}. " + message)
+                            self._warn("model-operation", f"{self._operation_title(job)}: {job['state']}. " + message)
                         self.model_job = None
                         self.models_verified = False
                         await self._load_models()
@@ -810,31 +767,66 @@ class _OksaPage:
         finally:
             self._end("activity-refresh", [])
 
+    @staticmethod
+    def _operation_title(job: dict) -> str:
+        titles = {"StartModel": ("Start", "Starting"), "StopServing": ("Stop", "Stopping"),
+                  "Calibrate": ("Calibration", "Calibrating"), "DownloadModel": ("Download", "Downloading"),
+                  "RemoveModel": ("Delete", "Deleting"), "DeleteUser": ("User deletion", "Deleting user")}
+        return titles.get(job["operation"], ("Operation", "Working"))[job["state"] == "running"]
+
     def _render_activity(self) -> None:
-        self.activity.clear()
-        self.job_widgets = []
-        with self.activity:
-            if not self.jobs:
-                ui.label("No recent jobs reported")
-            for job in sorted(self.jobs.values(), key=lambda job: (job["state"] in ("queued", "running"), job["started_at"]), reverse=True):
-                with ui.card().classes("w-full"):
-                    with ui.row().classes("items-center"):
-                        spinner = ui.spinner()
-                        ui.label(job["operation"] + (" · " + str(job.get("repo_id") or job.get("model_name") or "")
-                                                     if job["operation"] == "DownloadModel" else ""))
-                        badge = ui.badge(job["state"])
-                        elapsed = ui.label("")
-                        cancel = ui.button("Cancel job", color="negative", on_click=lambda _, path=job["path"]: self._cancel_pull(path)).props("outline")
-                    if job["state"] in ("succeeded", "failed", "canceled") and job["path"] not in self.job_details:
-                        ui.label("Summary only · Full terminal details unverified").classes("text-warning")
-                    ui.label(job.get("progress") or "No progress reported").classes("whitespace-pre-line break-words")
-                    error = job.get("error") or {}
-                    if error:
-                        ui.label(str(error.get("message") or error)).classes("text-negative whitespace-pre-line break-words")
-                    result = job.get("result") or {}
-                    if result.get("warning") or result.get("error"):
-                        ui.label(str(result.get("warning") or result.get("error"))).classes("text-warning break-words")
-                    self.job_widgets.append((job, badge, spinner, elapsed, cancel))
+        selected = {row["id"] for row in self.activity_table.selected}
+        rows = []
+        for job in sorted(self.jobs.values(), key=lambda job: (job["state"] in ("queued", "running"), job["started_at"]), reverse=True):
+            running = job["state"] in ("queued", "running")
+            state = {"queued": "Queued", "running": "Running", "succeeded": "Completed", "failed": "Failed", "canceled": "Canceled"}[job["state"]]
+            result = job.get("result") or {}
+            if job["state"] == "succeeded" and (result.get("ok") is not True or result.get("warning") or result.get("error")):
+                state = "Needs attention"
+            verified = self._jobs_fresh() and job["path"] in self.jobs_seen
+            if not verified:
+                state = "Status unknown"
+            elif not running and job["path"] not in self.job_details:
+                state = "Checking result"
+            end = time.time() if running else job.get("ended_at")
+            rows.append({"id": job["path"], "action": self._operation_title(job), "state": state,
+                         "elapsed": int(max(0, end - job["started_at"])) if end is not None else None})
+        if self.activity_table.rows != rows:
+            self.activity_table.rows = rows
+            self.activity_table.selected = [row for row in rows if row["id"] in selected]
+            self.activity_table.update()
+        self._activity_selection()
+
+    def _activity_selection(self) -> None:
+        selected = self.activity_table.selected
+        job = self.jobs.get(selected[0]["id"]) if selected else None
+        self.activity_details.set_enabled(job is not None)
+        self.activity_cancel.set_enabled(bool(job and job["state"] == "running" and self._jobs_fresh()
+                                             and job["path"] in self.jobs_seen and "cancel" not in self.busy))
+
+    async def _cancel_selected_job(self) -> None:
+        if self.activity_table.selected:
+            await self._cancel_pull(self.activity_table.selected[0]["id"])
+
+    def _show_job(self) -> None:
+        selected = self.activity_table.selected
+        job = self.jobs.get(selected[0]["id"]) if selected else None
+        if job is None:
+            return
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
+            ui.label(self._operation_title(job)).classes("text-lg")
+            target = job.get("repo_id") or job.get("model_name")
+            if target:
+                ui.input("Model", value=str(target)).props("readonly").classes("w-full")
+            if job["state"] in ("queued", "running") and job.get("progress"):
+                ui.textarea("Progress", value=job["progress"]).props("readonly autogrow").classes("w-full")
+            error, result = job.get("error") or {}, job.get("result") or {}
+            message = error.get("message") or result.get("warning") or result.get("error")
+            if message:
+                ui.textarea("Problem", value=str(message)).props("readonly autogrow").classes("w-full")
+            ui.button("Close", on_click=dialog.close).props("outline")
+        dialog.on_value_change(lambda event: dialog.delete() if not event.value else None)
+        dialog.open()
 
     async def _cancel_pull(self, path: str) -> None:
         job = self.jobs.get(path)
@@ -843,7 +835,7 @@ class _OksaPage:
         if not self._begin("cancel", []):
             return
         try:
-            if not await self._confirm(f"Cancel {job['operation']}? Partial changes may remain.", "Cancel job", dangerous=True):
+            if not await self._confirm("Cancel this operation? Partial changes may remain.", "Cancel", dangerous=True):
                 return
             try:
                 canceled = await run.io_bound(self.service.cancel_job, path)
@@ -867,13 +859,13 @@ class _OksaPage:
             return
         name = str(model.get("name")) if model else "model serving"
         try:
-            message = {"start": f"Start {name}? This replaces the current serving selection.",
-                       "stop": "Stop all model serving? Applications will lose inference access.",
-                       "remove": f"Permanently remove {name}? If serving, it must be safely stopped before files are deleted."}[action]
-            if not await self._confirm(message, {"start": "Start model", "stop": "Stop serving", "remove": "Remove model"}[action], dangerous=action != "start"):
-                return
+            if action != "start":
+                message = {"stop": "Stop all model serving? Applications will lose inference access.",
+                           "remove": f"Delete {name}? Serving will be stopped before files are deleted."}[action]
+                if not await self._confirm(message, {"stop": "Stop", "remove": "Delete"}[action], dangerous=True):
+                    return
             if not self._jobs_fresh() or any(job["state"] in ("queued", "running") for job in self.jobs.values()):
-                self._warn("model-operation", "Activity changed or became unverified. Refresh confirmed state before retrying.")
+                self._warn("model-operation", "Activity changed. Checking status automatically before another operation.")
                 return
             for key in ("models", "status", "pull", "calibration"):
                 self.generations[key] += 1
@@ -894,7 +886,7 @@ class _OksaPage:
                 self._warn("model-operation", "")
                 ui.notify("Operation accepted; following job state")
             else:
-                self._warn("model-operation", f"{action.title()} acceptance was not confirmed. Refresh confirmed state before retrying. " + self._error(reply))
+                self._warn("model-operation", f"{action.title()} acceptance was not confirmed. Checking status automatically; do not retry yet. " + self._error(reply))
             await self._load_pull()
         finally:
             self._end("model", self.model_controls)
@@ -903,13 +895,13 @@ class _OksaPage:
 
     def _build_download_dialog(self) -> None:
         with ui.dialog() as self.download_dialog, ui.card().classes("w-full max-w-3xl"):
-            ui.label("Find a model").classes("text-lg font-semibold").props("role=heading aria-level=2")
+            ui.label("Find").classes("text-lg font-semibold").props("role=heading aria-level=2")
             ui.label("Browse downloadable AI models from Hugging Face.").classes("text-sm")
             with ui.row().classes("w-full items-start gap-2"):
                 self.model_search = ui.input("Search models", placeholder="Model name",
                                              on_change=self._search_models).props("outlined clearable debounce=500").classes("grow")
                 self.model_search.on("keydown.enter", self._search_models)
-                self.search_button = ui.button("Search", icon="search", on_click=self._search_models)
+                self.search_button = ui.button("Find", icon="search", on_click=self._search_models)
             self.search_message = ui.label("Search by model name.").classes("text-sm")
             self.search_table = self._table("Search results", {
                 "name": "Model", "author": "Publisher", "downloads": "Downloads", "access": "Access",
@@ -923,9 +915,9 @@ class _OksaPage:
                 self.download_name = ui.input("Local name (optional)", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
                 self.revision = ui.input("Version or commit", value="main", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
                 self.inspection_revision = ui.label("").classes("text-sm font-mono break-all")
-                self.inspect_button = ui.button("Review model", color="accent", on_click=self._inspect).props("outline")
+                self.inspect_button = ui.button("Review", on_click=self._inspect).props("outline")
             with ui.row().classes("w-full justify-end gap-2"):
-                self.download_cancel = ui.button("Close", color="accent", on_click=self.download_dialog.close).props("flat")
+                self.download_cancel = ui.button("Close", on_click=self.download_dialog.close).props("flat")
                 self.download_button = ui.button("Download", icon="download", on_click=self._download)
         self.download_button.disable()
         self.download_dialog.on_value_change(self._download_dialog_changed)
@@ -1065,7 +1057,7 @@ class _OksaPage:
         try:
             if inspection["fits"] is False and not await self._confirm(
                 f"Force download of incompatible model {inspection['repo_id']} @ {inspection['revision']}? It may not run on this host.",
-                "Force download", dangerous=True,
+                "Download", dangerous=True,
             ):
                 return
             if (not self.download_dialog.value or self.inspection is not inspection
@@ -1073,7 +1065,7 @@ class _OksaPage:
                     or inspection["inputs"] != self._download_inputs()):
                 return
             if not self._jobs_fresh() or any(job["state"] in ("queued", "running") for job in self.jobs.values()):
-                self.download_error.set_text("Activity changed or became unverified. Refresh confirmed state before downloading.")
+                self.download_error.set_text("Activity changed. Checking status automatically before downloading.")
                 return
             self.inspection = None
             for key in ("models", "status", "pull", "calibration"):
@@ -1095,7 +1087,7 @@ class _OksaPage:
                 self.download_dialog.close()
                 ui.notify("Download accepted; following job state")
             else:
-                message = "Download acceptance was not confirmed. Refresh confirmed state before any manual retry. " + self._error(reply)
+                message = "Download acceptance was not confirmed. Checking status automatically; do not retry yet. " + self._error(reply)
                 self.download_error.set_text(message)
                 self._warn("download", message)
             await self._load_pull()
