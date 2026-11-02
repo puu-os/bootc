@@ -262,6 +262,12 @@ if [ -n "${ldconfig_bin}" ] && [ -f "${ldconfig_bin}" ]; then
   install -Dm0755 "${ldconfig_bin}" "${TARGET_DIR}/usr/bin/ldconfig"
 fi
 
+# Restore Toolbx's host-library RPATH after Buildroot's target sanitization.
+if [[ -f "${TARGET_DIR}/usr/bin/toolbox" ]]; then
+  "${HOST_DIR}/bin/patchelf" --force-rpath --set-rpath /run/host/lib \
+    "${TARGET_DIR}/usr/bin/toolbox"
+fi
+
 getty_port=$(sed -n 's/^BR2_TARGET_GENERIC_GETTY_PORT="\(.*\)"$/\1/p' "${BR2_CONFIG}")
 if [[ -n "${getty_port}" && "${getty_port}" != console && ! "${getty_port}" =~ ^tty[0-9]*$ ]]; then
   mkdir -p "${TARGET_DIR}/etc/systemd/system/getty.target.wants"

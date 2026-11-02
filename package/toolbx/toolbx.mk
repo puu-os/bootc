@@ -3,7 +3,7 @@ TOOLBX_SOURCE = toolbox-$(TOOLBX_VERSION)-vendored.tar.xz
 TOOLBX_SITE = https://github.com/containers/toolbox/releases/download/$(TOOLBX_VERSION)
 TOOLBX_LICENSE = Apache-2.0
 TOOLBX_LICENSE_FILES = COPYING
-TOOLBX_DEPENDENCIES = podman shadow
+TOOLBX_DEPENDENCIES = host-patchelf podman shadow
 
 TOOLBX_GOMOD = github.com/containers/toolbox
 TOOLBX_BIN_NAME = toolbox
