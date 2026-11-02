@@ -60,8 +60,10 @@ class WorkloadPlanner:
              if model.spec.name == selected or (not selected and model.spec.autostart)),
             key=lambda model: -model.spec.autostart_priority,
         )
-        if not candidates and state.snapshot.models:
-            raise RuntimeError("No selected model or autostart model is configured")
+        if not candidates:
+            if selected:
+                raise RuntimeError(f"Selected model {selected} was not discovered")
+            return
         rejected = []
         measured = False
         for model in candidates:

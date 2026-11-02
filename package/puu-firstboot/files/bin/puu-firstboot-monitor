@@ -397,7 +397,7 @@ def unit_checks(progress):
         failed = planner.get("ActiveState") == "failed"
         try:
             status = cs.read_record(cs.STATUS_PATH)
-            if status.get("boot_id") == fs.boot_id():
+            if status.get("boot_id") == fs.boot_id() and (status.get("model") or status.get("state") == "error"):
                 message = clean(status.get("message", message), 512)
                 if status.get("model"):
                     message = clean(clean(status["model"]) + ": " + message, 512)
@@ -453,15 +453,21 @@ def snapshot(progress):
                 result = cs.applied_result(candidate)
                 if result["limits"] == cs.ZERO_LIMITS and result["fingerprint"] == status.get("fingerprint"):
                     model = candidate
+        except FileNotFoundError:
+            pass
         except (OSError, ValueError) as error:
             raise Pending("calibration", "No current calibrated model is available: " + clean(error), True) from error
     served_model = None
     calibration = None
     zero_capacity = False
     if model is None:
-        if state.catalogue:
-            raise Pending("model", "Waiting for the planner to activate a discovered model.")
-        progress.publish("calibration", "Inference not configured: no models discovered.", "done")
+        if not disabled and state.catalogue:
+            if state.snapshot is None:
+                raise Pending("calibration", "Model metadata or capacity is unavailable.", True)
+            if any(entry.spec.autostart for entry in state.snapshot.models):
+                raise Pending("model", "Waiting for the planner to activate a discovered model.")
+        reason = "no model enabled." if state.catalogue else "no models discovered."
+        progress.publish("calibration", "Inference not configured: " + reason, "done")
     else:
         if state.snapshot is None:
             raise Pending("calibration", "Model metadata or capacity is unavailable.", True)
