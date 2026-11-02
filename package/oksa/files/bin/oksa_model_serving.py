@@ -899,6 +899,17 @@ def check_model_capacity(estimated_memory_mib: int) -> tuple[bool, str]:
     return True, f"Model fits within available memory (~{estimated_memory_mib} MiB)"
 
 
+def model_context_length(config: dict) -> int:
+    """Return the smallest valid native context ceiling, without a serving cap."""
+    ceilings = [
+        section[key] for section in (config, config.get("text_config", {}))
+        if isinstance(section, dict)
+        for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length")
+        if type(section.get(key)) is int and section[key] > 0
+    ]
+    return min(ceilings, default=4096)
+
+
 def inspect_hf_model(
     repo_id: str,
     revision: str = "main",
@@ -961,26 +972,25 @@ def inspect_hf_model(
     if not config_entry or weight_bytes == 0:
         return None
 
-    config_dict = data.get("config", {})
+    config_url = f"https://huggingface.co/{repo_id}/raw/{resolved_revision}/config.json"
+    cfg_req = urllib.request.Request(config_url, headers=headers)
+    max_config_bytes = 1024 * 1024
+    try:
+        with urllib.request.urlopen(cfg_req, timeout=timeout_sec) as resp:
+            raw_config = resp.read(max_config_bytes + 1)
+        if len(raw_config) > max_config_bytes:
+            return None
+        config_dict = json.loads(raw_config.decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+        return None
     if not isinstance(config_dict, dict):
         return None
-    if not config_dict:
-        config_url = f"https://huggingface.co/{repo_id}/raw/{resolved_revision}/config.json"
-        cfg_req = urllib.request.Request(config_url, headers=headers)
-        try:
-            with urllib.request.urlopen(cfg_req, timeout=timeout_sec) as resp:
-                config_dict = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
-            return None
-        if not isinstance(config_dict, dict):
-            return None
 
     storage_mib = max(1, (sum(f["size"] for f in files) + 1048575) // 1048576)
     weight_mib = max(1, (weight_bytes + 1048575) // 1048576)
     estimated_memory_mib = weight_mib + max(1024, (weight_mib * 20) // 100)
 
-    raw_context = config_dict.get("max_position_embeddings") or config_dict.get("seq_length") or config_dict.get("n_positions") or 4096
-    max_context = parse_int(raw_context, 4096)
+    max_context = model_context_length(config_dict)
 
     quantization = ""
     quant_config = config_dict.get("quantization_config")
