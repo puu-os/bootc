@@ -126,6 +126,36 @@ class WorkloadPlanner:
         if changed:
             ms.atomic_write_text(self.manifest, content)
         if active:
+            if not dry_run:
+                deployment = f"deployment/{planned.app_name}"
+                try:
+                    ms.run_kubectl(
+                        "wait", "--for=create", deployment, "-n", ms.OKSA_NAMESPACE,
+                        "--timeout=120s", timeout=130,
+                    )
+                    # K3s may not yet have restored a previously stopped deployment.
+                    ms.run_kubectl(
+                        "wait", f"--for=jsonpath={{.spec.replicas}}={planned.replicas}",
+                        deployment, "-n", ms.OKSA_NAMESPACE, "--timeout=120s", timeout=130,
+                    )
+                    ms.run_kubectl(
+                        "rollout", "status", deployment, "-n", ms.OKSA_NAMESPACE,
+                        "--timeout=600s", timeout=610,
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                    detail = str(error)
+                    if isinstance(error, subprocess.CalledProcessError):
+                        detail = (error.stderr or error.stdout or detail).strip()
+                    try:
+                        self.active_file.unlink(missing_ok=True)
+                    except OSError as cleanup_error:
+                        detail += f"; failed to clear active model marker: {cleanup_error}"
+                    try:
+                        if not ms.sync_litellm_models(None, ms.STATE_DIR):
+                            detail += "; failed to unpublish model routing"
+                    except Exception as cleanup_error:
+                        detail += f"; failed to unpublish model routing: {cleanup_error}"
+                    raise RuntimeError(f"Failed to start {active}: {detail}") from error
             if not dry_run and not ms.sync_litellm_models(active, ms.STATE_DIR):
                 raise RuntimeError(f"Failed to publish {active} to LiteLLM")
             ms.atomic_write_text(self.active_file, f"{active}\n")
