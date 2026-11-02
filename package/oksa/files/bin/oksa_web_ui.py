@@ -201,11 +201,10 @@ class _OksaPage:
                 self.freshness_detail = ui.tooltip("Waiting for the first update")
         self.monitoring_error = ui.label("").classes("text-negative")
         self.monitoring_error.set_visibility(False)
-        with ui.grid().classes("w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"):
+        with ui.grid().classes("w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4"):
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
                 ui.label("Serving").classes("text-sm")
                 self.inference = ui.label("Unavailable").classes("text-xl font-semibold break-words")
-                self.model_status = ui.label("No active model").classes("text-sm w-full break-words")
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
                 ui.label("Host memory").classes("text-sm")
                 self.memory = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums break-words")
@@ -214,15 +213,14 @@ class _OksaPage:
                 self.memory_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.memory_progress.set_visibility(False)
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Requests").classes("text-sm")
-                self.requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-                self.requests_caption = ui.label("").classes("text-sm")
-                self.requests_caption.set_visibility(False)
+                ui.label("Running requests").classes("text-sm")
+                self.running_requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
+            with ui.card().props("flat").classes("w-full p-4 gap-1"):
+                ui.label("Queued requests").classes("text-sm")
+                self.queued_requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
             with ui.card().props("flat").classes("w-full p-4 gap-1"):
                 ui.label("KV cache").classes("text-sm")
                 self.kv_cache = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-                self.kv_caption = ui.label("").classes("text-sm")
-                self.kv_caption.set_visibility(False)
                 self.kv_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.kv_progress.set_visibility(False)
         self.gpus_label = ui.label("GPU data unavailable").classes("text-sm")
@@ -281,51 +279,30 @@ class _OksaPage:
             self.memory_percent.set_visibility(False)
         self._progress(self.memory_progress, used_pct)
 
-        active_raw = status.get("active_model")
-        selected_raw = status.get("selected_model")
-        if not isinstance(active_raw, str) or not active_raw.strip():
+        if any(not isinstance(status.get(field), str) or not status[field].strip()
+               for field in ("active_model", "selected_model")):
             self.partial = True
-            active_text = "Model unavailable"
-        elif active_raw == "-":
-            active_text = "No active model"
-        else:
-            active_text = active_raw
-        if not isinstance(selected_raw, str) or not selected_raw.strip():
-            self.partial = True
-        self.model_status.set_text(active_text)
-        self.model_status.set_visibility(active_raw not in (None, "", "-"))
 
         metrics = status.get("metrics") if isinstance(status.get("metrics"), dict) else {}
-        running, waiting = metrics.get("running_requests"), metrics.get("waiting_requests")
-        idle_caption = "starting" if model_state == "not-ready" else "no active runtime" if model_state in ("stopped", "no-model") else ""
-        if self._number(running, integer=True) and self._number(waiting, integer=True):
-            self.requests.set_text(f"{int(running)} / {int(waiting)}")
-            self.requests_caption.set_text("running / waiting")
-            self.requests_caption.set_visibility(True)
-        elif idle_caption:
-            self.requests.set_text("—")
-            self.requests_caption.set_text(idle_caption)
-            self.requests_caption.set_visibility(True)
-        else:
-            self.partial = True
-            self.requests.set_text("Unavailable")
-            self.requests_caption.set_text("")
-            self.requests_caption.set_visibility(False)
+        idle = model_state in ("stopped", "no-model", "not-ready")
+        for widget, field in ((self.running_requests, "running_requests"), (self.queued_requests, "waiting_requests")):
+            value = metrics.get(field)
+            if self._number(value, integer=True):
+                widget.set_text(str(int(value)))
+            elif idle:
+                widget.set_text("—")
+            else:
+                self.partial = True
+                widget.set_text("Unavailable")
 
         kv_pct = metrics.get("kv_cache_usage_pct")
         if self._number(kv_pct, 100):
             self.kv_cache.set_text(f"{kv_pct:g}%")
-            self.kv_caption.set_text("cache used")
-            self.kv_caption.set_visibility(True)
-        elif idle_caption:
+        elif idle:
             self.kv_cache.set_text("—")
-            self.kv_caption.set_text(idle_caption)
-            self.kv_caption.set_visibility(True)
         else:
             self.partial = True
             self.kv_cache.set_text("Unavailable")
-            self.kv_caption.set_text("")
-            self.kv_caption.set_visibility(False)
         self._progress(self.kv_progress, kv_pct)
 
         gpus = status.get("gpus")
