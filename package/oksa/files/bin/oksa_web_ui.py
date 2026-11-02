@@ -179,9 +179,7 @@ class _OksaPage:
                 dialog.delete()
 
     async def _tab_changed(self) -> None:
-        if self.tabs.value == "Monitoring":
-            await self._load_monitoring()
-        elif self.tabs.value == "Models":
+        if self.tabs.value in ("Monitoring", "Models"):
             await self._refresh_model_state()
         elif self.tabs.value == "Users":
             await self._load_users()
@@ -189,14 +187,8 @@ class _OksaPage:
     async def _poll(self) -> None:
         if self.client.is_deleted or not self.client.has_socket_connection:
             return
-        if self.tabs.value in ("Monitoring", "Models") and not self.locks["status"].locked():
-            await self._load_monitoring()
-        if (self.tabs.value == "Models" or self.model_job or self.model_uncertain) and not self.locks["pull"].locked():
-            await self._load_pull()
-        if self.tabs.value == "Models":
-            await self._refresh_models()
-            if not self.locks["calibration"].locked():
-                await self._load_calibration()
+        if self.tabs.value in ("Monitoring", "Models") or self.model_uncertain or self.model_job:
+            await self._refresh_model_state()
 
     def _build_monitoring(self) -> None:
         with ui.row().classes("w-full items-center justify-between gap-2"):
@@ -602,18 +594,22 @@ class _OksaPage:
         self._model_selection()
 
     async def _refresh_model_state(self) -> None:
-        await self._load_pull()
-        await self._load_monitoring()
-        if not any(job["state"] in ("queued", "running") for job in self.jobs.values()):
-            await self._load_models()
-        await self._load_calibration()
-        if self.client.is_deleted:
+        if not self._begin("model-state-refresh", []):
             return
-        if (self._jobs_fresh() and self.models_verified and not self.status_stale and not self.model_job
-                and not self.busy.intersection({"model", "download"})
-                and not any(job["state"] in ("queued", "running") for job in self.jobs.values())):
-            self.model_uncertain = False
-        self._model_selection()
+        try:
+            await self._load_pull()
+            await self._load_monitoring()
+            await self._refresh_models()
+            await self._load_calibration()
+            if self.client.is_deleted:
+                return
+            if (self._jobs_fresh() and self.models_verified and not self.status_stale and not self.model_job
+                    and not self.busy.intersection({"model", "download"})
+                    and not any(job["state"] in ("queued", "running") for job in self.jobs.values())):
+                self.model_uncertain = False
+            self._model_selection()
+        finally:
+            self._end("model-state-refresh", [])
 
     async def _load_calibration(self) -> None:
         requested = time.monotonic()
@@ -733,6 +729,33 @@ class _OksaPage:
             self.jobs_seen = {job["path"] for job in jobs}
             previous = self.jobs.copy()
             previous_details = self.job_details.copy()
+            missing = set(self.jobs) - self.jobs_seen
+            if self.model_job and self.model_job not in self.jobs_seen:
+                missing.add(self.model_job)
+            for path in missing:
+                old = self.jobs.get(path)
+                if old and old["state"] not in ("queued", "running") and path != self.model_job:
+                    continue
+                recovered = await self._call("GetJob", path, wait=False)
+                if self.client.is_deleted or generation != self.generations["pull"]:
+                    return
+                candidate = recovered[1]
+                if (self._success(recovered) and self._valid_job(candidate) and candidate["path"] == path
+                        and (old is None or all(candidate.get(key) == old.get(key) for key in ("operation", "started_at", "repo_id", "model_name")))
+                        and (path != self.model_job or candidate["operation"] == self.model_operation)):
+                    self.jobs[path] = candidate
+                    self.jobs_seen.add(path)
+                    if self._valid_terminal_details(candidate, candidate):
+                        self.job_details.add(path)
+                elif candidate.get("code") == "NotFound":
+                    self.jobs.pop(path, None)
+                    self.job_details.discard(path)
+                    if path == self.model_job:
+                        self.model_job = None
+                    self.model_uncertain = True
+                    self.models_verified = False
+                    self.status_failed = True
+                    self._warn("model-operation", "Previous operation history expired. Checking the current state automatically; the operation will not be repeated.")
             for job in jobs:
                 path = job["path"]
                 old = self.jobs.get(path)
