@@ -148,6 +148,7 @@ class OksaControl:
     def __init__(self, state_dir: Path | None = None) -> None:
         self.state_dir = Path(state_dir or os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
         self.discover_bin = ms.resolve_helper("oksa-discover-vllm-models")
+        self.labeler_bin = ms.resolve_helper("oksa-label-model-serving-node")
         self.planner_bin = ms.resolve_helper("oksa-plan-vllm-workloads")
         self.preseed_bin = ms.resolve_helper("oksa-preseed-vllm-models")
 
@@ -296,6 +297,7 @@ class OksaControl:
             command.append("--force")
         self.run_helper(command)
         self.run_helper([str(self.discover_bin)])
+        self.run_helper([str(self.labeler_bin)])
         return {"ok": True, "message": "Model download completed successfully."}
 
     def start_model(self, name: str) -> dict:
