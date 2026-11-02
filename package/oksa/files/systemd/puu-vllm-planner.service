@@ -10,3 +10,6 @@ ExecStartPre=/usr/libexec/puu/oksa-discover-vllm-models
 ExecStart=/usr/libexec/puu/oksa-plan-vllm-workloads
 TimeoutStartSec=5h
 TimeoutStopSec=180s
+
+[Install]
+WantedBy=multi-user.target
