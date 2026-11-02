@@ -26,6 +26,13 @@ define OKSA_EXTRACT_CMDS
 	$(INSTALL) -D -m 0644 $(OKSA_PKGDIR)/LICENSE.Apache-2.0 $(@D)/LICENSE.Apache-2.0
 endef
 
+ifeq ($(BR2_PER_PACKAGE_DIRECTORIES),y)
+define OKSA_RESET_TARGET_DIR
+	rm -rf $(TARGET_DIR)
+	$(call per-package-rsync,$(OKSA_FINAL_DEPENDENCIES),target,$(TARGET_DIR),hardlink)
+endef
+OKSA_POST_PREPARE_HOOKS += OKSA_RESET_TARGET_DIR
+endif
 define OKSA_STAGE_NATIVE_SOURCES
 	mkdir -p $(@D)/native
 	rsync -a --delete --delete-excluded $(RSYNC_VCS_EXCLUSIONS) \
@@ -93,5 +100,5 @@ $(OKSA_TARGET_CONFIGURE): $(K3S_TARGET_INSTALL_TARGET)
 
 # Reinstall when the support files change so the image gets the current copies and
 # the file accounting from the configure/install steps stays consistent.
-$(OKSA_TARGET_CONFIGURE): $(wildcard $(OKSA_FILES)/* \
-	$(OKSA_FILES)/*/* $(OKSA_FILES)/*/*/*) $(OKSA_PKGDIR)/oksa.mk
+$(OKSA_TARGET_CONFIGURE): $(shell find $(OKSA_FILES) \
+	! -path '*/dist*' ! -path '*/__pycache__*') $(OKSA_PKGDIR)/oksa.mk

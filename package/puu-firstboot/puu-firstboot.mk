@@ -39,6 +39,13 @@ PUU_FIRSTBOOT_DCONF_FILES = \
 	db/puu-firstboot.d/00-lockdown \
 	db/puu-firstboot.d/locks/00-lockdown
 
+ifeq ($(BR2_PER_PACKAGE_DIRECTORIES),y)
+define PUU_FIRSTBOOT_RESET_TARGET_DIR
+	rm -rf $(TARGET_DIR)
+	$(call per-package-rsync,$(PUU_FIRSTBOOT_FINAL_DEPENDENCIES),target,$(TARGET_DIR),hardlink)
+endef
+PUU_FIRSTBOOT_POST_PREPARE_HOOKS += PUU_FIRSTBOOT_RESET_TARGET_DIR
+endif
 define PUU_FIRSTBOOT_CLEAN_DIST
 	rm -rf $(@D)/dist
 endef
@@ -87,6 +94,7 @@ $(eval $(python-package))
 
 # Local packages otherwise keep their cached scripts across incremental builds.
 $(PUU_FIRSTBOOT_TARGET_RSYNC): $(shell find $(PUU_FIRSTBOOT_SITE) \
-	-type f ! -path '*/dist/*' ! -path '*/__pycache__/*') \
+	! -path '*/dist*' ! -path '*/__pycache__*') \
 	$(PUU_FIRSTBOOT_PKGDIR)/puu-firstboot.mk
-$(PUU_FIRSTBOOT_TARGET_CONFIGURE): $(PUU_FIRSTBOOT_TARGET_RSYNC)
+$(PUU_FIRSTBOOT_TARGET_CONFIGURE): $(PUU_FIRSTBOOT_TARGET_RSYNC) \
+	$(OKSA_TARGET_INSTALL_TARGET)
