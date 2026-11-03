@@ -35,6 +35,8 @@ class _OksaPage:
         self.models: list[dict] = []
         self.users: list[dict] = []
         self.keys: dict[str, dict] = {}
+        self.users_verified = False
+        self.keys_verified = False
         self.owner: str | None = None
         self.snapshot: dict = {}
         self.status: dict | None = None
@@ -1077,16 +1079,16 @@ class _OksaPage:
                 self._model_selection()
 
     def _build_users(self) -> None:
-        self.users_error = ui.label("").classes("text-negative")
         with ui.column().classes("w-full") as self.users_list:
             with ui.row().classes("w-full items-center"):
                 self.create_user_button = ui.button("Create", on_click=self._open_user)
                 self.delete_users_button = ui.button("Delete", color="negative", on_click=self._delete_selected_users).props("outline")
                 search = ui.input("Filter", placeholder="User ID or email").props("clearable")
-            self.delete_users_button.disable()
-            self.users_empty = ui.label("Loading users…")
+                self.users_state = ui.badge("Loading").props("outline")
+                with self.users_state:
+                    self.users_state_detail = ui.tooltip("Loading users and API keys")
             self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
-            self.users_table.set_visibility(False)
+            self.users_table.props('loading no-data-label="Loading users…" no-results-label="No matching users"')
             self.users_table.on_select(self._users_selection)
             self.users_table.on("rowClick", lambda event: self._show_user(event.args[1]["user_id"]), args=[[], ["user_id"]])
             search.bind_value_to(self.users_table, "filter")
@@ -1096,20 +1098,24 @@ class _OksaPage:
                 self.delete_user_button = ui.button("Delete", color="negative", on_click=self._delete_user).props("outline")
                 self.create_key_button = ui.button("Create", on_click=self._open_key)
                 self.revoke_button = ui.button("Revoke", color="negative", on_click=self._revoke_key).props("outline")
-            self.owner_label = ui.label("").classes("text-lg")
-            self.keys_count = ui.label("Keys not loaded")
+                self.keys_state = ui.badge("Loading").props("outline")
+                with self.keys_state:
+                    self.keys_state_detail = ui.tooltip("Loading API keys")
             self.keys_table = self._table("API keys", {"name": "Name", "models": "Models", "status": "Status", "expires": "Expires"}, selection="single")
+            self.keys_table.props('loading no-data-label="Loading API keys…"')
             self.keys_table.on_select(self._users_selection)
         self.user_detail.set_visibility(False)
         self.user_controls = [self.create_user_button, self.delete_users_button, self.delete_user_button, self.create_key_button, self.revoke_button]
+        self._users_selection()
 
     def _users_selection(self) -> None:
-        count = len(self.users_table.selected)
-        self.delete_users_button.set_enabled(count > 0 and "user" not in self.busy)
-        available = "user" not in self.busy and self.owner is not None and any(user["user_id"] == self.owner for user in self.users)
+        idle = "user" not in self.busy
+        self.create_user_button.set_enabled(idle and self.users_verified)
+        self.delete_users_button.set_enabled(idle and self.users_verified and bool(self.users_table.selected))
+        available = idle and self.users_verified and self.owner is not None and any(user["user_id"] == self.owner for user in self.users)
         self.delete_user_button.set_enabled(available)
-        self.create_key_button.set_enabled(available)
-        self.revoke_button.set_enabled(available and len(self.keys_table.selected) == 1)
+        self.create_key_button.set_enabled(available and self.keys_verified)
+        self.revoke_button.set_enabled(available and self.keys_verified and len(self.keys_table.selected) == 1)
     @staticmethod
     def _expiry(value) -> datetime | None:
         if not isinstance(value, str):
@@ -1145,18 +1151,18 @@ class _OksaPage:
                 return
             selected_users = {row["user_id"] for row in self.users_table.selected}
             selected_keys = {self.keys[row["id"]]["token"] for row in self.keys_table.selected if row["id"] in self.keys}
-            errors = []
             users, keys = users_reply[1].get("users"), keys_reply[1].get("keys")
             users_ok = self._success(users_reply) and isinstance(users, list) and all(isinstance(user, dict) and isinstance(user.get("user_id"), str) for user in users)
             keys_ok = self._success(keys_reply) and isinstance(keys, list) and all(isinstance(key, dict) and isinstance(key.get("token"), str) for key in keys)
+            self.users_verified, self.keys_verified = users_ok, keys_ok
             if users_ok:
                 self.users = [{"user_id": user["user_id"], "user_email": user.get("user_email")} for user in users]
-            else:
-                message = "Unable to refresh users; previous list may be stale. " if self.users else "Unable to load users. "
-                errors.append(message + self._error(users_reply))
-            if not keys_ok:
-                errors.append("API keys unavailable. " + self._error(keys_reply))
-            self.users_error.set_text(" ".join(errors))
+            self.users_state.set_text("Up to date" if users_ok and keys_ok else "Users unavailable" if not users_ok else "Keys unavailable")
+            self.users_state.props("color=positive" if users_ok and keys_ok else "color=warning")
+            self.users_state_detail.set_text("Users and enabled-key counts are current" if users_ok and keys_ok else
+                                             "Updates continue automatically. " + self._error(users_reply if not users_ok else keys_reply))
+            self.users_table.props(remove="loading")
+            self.users_table.props['no-data-label'] = "No users yet" if users_ok else "Users unavailable — reconnecting automatically"
             counts: dict[str, int] = {}
             if keys_ok:
                 for key in keys:
@@ -1165,9 +1171,6 @@ class _OksaPage:
             self.users_table.rows = [{"user_id": user["user_id"], "email": user.get("user_email") or "—",
                                       "enabled": str(counts.get(user["user_id"], 0)) if keys_ok and owner is None else "Unavailable"}
                                      for user in self.users]
-            self.users_table.set_visibility(bool(self.users))
-            self.users_empty.set_text("No users yet." if users_ok else "Users unavailable.")
-            self.users_empty.set_visibility(not self.users)
             self.users_table.selected = [row for row in self.users_table.rows if row["user_id"] in selected_users]
             self._users_selection()
             self.users_table.update()
@@ -1176,7 +1179,6 @@ class _OksaPage:
             self.keys_table.rows = []
             if owner is not None:
                 user = next((user for user in self.users if user["user_id"] == owner), None)
-                self.owner_label.set_text(owner)
                 if keys_ok:
                     self.keys = {f"{generation}:{index}": {
                         field: key.get(field) for field in ("token", "user_id", "key_alias", "key_name", "models", "blocked", "expires")
@@ -1188,27 +1190,35 @@ class _OksaPage:
                         "status": self._key_status(key), "expires": str(key.get("expires")) if self._expiry(key.get("expires")) else "Unknown" if key.get("expires") else "Never",
                     } for identity, key in self.keys.items()]
                 self.keys_table.selected = [row for row in self.keys_table.rows if self.keys[row["id"]]["token"] in selected_keys]
-                self.keys_count.set_text("API keys unavailable" if not keys_ok else "")
-                self.keys_count.set_visibility(not keys_ok)
+                self.keys_table.props(remove="loading")
+                self.keys_table.props['no-data-label'] = "No API keys yet" if keys_ok else "API keys unavailable — reconnecting automatically"
+                self.keys_state.set_text("Up to date" if keys_ok else "Unavailable")
+                self.keys_state.props("color=positive" if keys_ok else "color=warning")
+                self.keys_state_detail.set_text("API keys are current" if keys_ok else "Updates continue automatically. " + self._error(keys_reply))
                 if users_ok and user is None:
-                    self.users_error.set_text("This user has been deleted. Use Back to return to the list.")
-            else:
-                self.owner_label.set_text("")
-                self.keys_count.set_text("Keys not loaded")
+                    self.keys_state.set_text("User deleted")
+                    self.keys_state.props("color=warning")
+                    self.keys_state_detail.set_text("This user no longer exists. Use Back to return to Users.")
+                    self.keys_table.rows = []
+                    self.keys_table.props['no-data-label'] = "User deleted"
             self.keys_table.update()
             self._users_selection()
 
     def _set_owner(self, owner: str | None) -> None:
         self.owner = owner
+        self.keys_verified = False
         self.keys = {}
         self.keys_table.rows = []
         self.keys_table.selected = []
+        self.keys_table.props['title'] = f"API keys for {owner}" if owner is not None else "API keys"
+        self.keys_table.props('loading color=primary no-data-label="Loading API keys…"')
+        self.keys_state.set_text("Loading")
+        self.keys_state.props("color=primary")
+        self.keys_state_detail.set_text("Loading API keys")
         self.keys_table.update()
-        self.owner_label.set_text(owner or "")
-        self.keys_count.set_text("Loading…" if owner is not None else "")
-        self.keys_count.set_visibility(owner is not None)
         self.users_list.set_visibility(owner is None)
         self.user_detail.set_visibility(owner is not None)
+        self._users_selection()
 
     async def _show_user(self, owner: str) -> None:
         if not isinstance(owner, str) or "user" in self.busy or not any(user["user_id"] == owner for user in self.users):
@@ -1495,6 +1505,17 @@ class _OksaPage:
         self.jobs_failed = True
         self.models_verified = False
         self.calibration_received = 0.0
+        self.users_verified = False
+        self.keys_verified = False
+        for state, detail, table in ((self.users_state, self.users_state_detail, self.users_table),
+                                     (self.keys_state, self.keys_state_detail, self.keys_table)):
+            state.set_text("Disconnected")
+            state.props("color=warning")
+            detail.set_text("Connection lost. Displayed data is unverified; updates resume automatically.")
+            table.props(remove="loading")
+            table.props['no-data-label'] = "Connection lost — reconnecting automatically"
+            table.update()
+        self._users_selection()
         self._render_freshness()
         if not self.secret_dialog.is_deleted:
             self.secret_dialog.close()
