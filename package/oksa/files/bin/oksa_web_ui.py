@@ -61,6 +61,7 @@ class _OksaPage:
         self.secret = ""
         self.models_revision: str | None = None
         self.search_generation = 0
+        self.downloads_seen: set[str] = set()
 
     def build(self) -> None:
         ui.dark_mode(False)
@@ -84,6 +85,7 @@ class _OksaPage:
                         self._build_activity()
                     with ui.tab_panel("Users").classes("h-full flex-nowrap"):
                         self._build_users()
+                self._build_download_manager()
         self._build_download_dialog()
         self._build_user_dialog()
         self._build_key_dialog()
@@ -199,6 +201,8 @@ class _OksaPage:
             return
         if self.tabs.value in ("Monitoring", "Models", "Activity") or self.model_uncertain or self.model_job:
             await self._refresh_model_state()
+        else:
+            await self._load_pull()
         if self.tabs.value == "Users" and "user" not in self.busy and not self.locks["users"].locked():
             await self._load_users()
 
@@ -451,6 +455,63 @@ class _OksaPage:
             self.calibration_message = ui.label("").classes("whitespace-pre-line break-words")
             self.model_profile = ui.label("")
         self._model_selection()
+
+    def _build_download_manager(self) -> None:
+        with ui.expansion("Downloads", icon="download").props("dense").classes("w-full shrink-0 border-t bg-gray-50") as self.download_manager:
+            with ui.column().classes("w-full max-h-64 overflow-auto p-2 gap-2"):
+                with ui.row().classes("items-center"):
+                    self.download_job_cancel = ui.button("Cancel", on_click=self._cancel_selected_download).props("outline dense")
+                    self.download_details = ui.button("Details", on_click=self._show_download).props("outline dense")
+                    self.download_spinner = ui.spinner(size="sm")
+                    self.download_spinner.set_visibility(False)
+                self.download_table = self._table("", {"model": "Model", "state": "Status", "progress": "Progress", "elapsed": "Seconds"}, selection="single")
+                self.download_table.props('wrap-cells no-data-label="Loading downloads…"')
+                self.download_table.on_select(self._download_selection)
+                self._download_selection()
+
+    def _render_downloads(self, activity: list[dict]) -> None:
+        rows = []
+        for row in activity:
+            job = self.jobs[row["id"]]
+            if job["operation"] != "DownloadModel":
+                continue
+            lines = job["progress"].splitlines()
+            rows.append({**row, "model": job.get("repo_id") or job.get("model_name") or "Model download",
+                         "progress": lines[-1][:512] if lines else ""})
+        selected = {row["id"] for row in self.download_table.selected}
+        selection = [row for row in rows if row["id"] in selected]
+        if self.download_table.rows != rows or self.download_table.selected != selection:
+            self.download_table.rows = rows
+            self.download_table.selected = selection
+            self.download_table.update()
+        active = {row["id"] for row in rows if row["state"] in ("Queued", "Running")}
+        fresh = self._jobs_fresh()
+        if fresh:
+            if active - self.downloads_seen:
+                self.download_manager.open()
+            self.downloads_seen.update(row["id"] for row in rows if row["id"] in self.jobs_seen)
+        summary = f"Downloads — {len(active)} active" if active else "Downloads"
+        if not fresh:
+            summary += " — waiting for updates"
+        self.download_manager.set_text(summary)
+        self.download_table.props["no-data-label"] = "No downloads yet" if fresh else "Downloads unavailable — checking automatically"
+        self.download_spinner.set_visibility(fresh and bool(active))
+        self._download_selection()
+
+    def _download_selection(self) -> None:
+        selected = self.download_table.selected
+        job = self.jobs.get(selected[0]["id"]) if selected else None
+        self.download_details.set_enabled(job is not None)
+        self.download_job_cancel.set_enabled(bool(job and job["state"] == "running" and self._jobs_fresh()
+                                             and job["path"] in self.jobs_seen and "cancel" not in self.busy))
+
+    async def _cancel_selected_download(self) -> None:
+        if self.download_table.selected:
+            await self._cancel_pull(self.download_table.selected[0]["id"])
+
+    def _show_download(self) -> None:
+        if self.download_table.selected:
+            self._show_job_details(self.download_table.selected[0]["id"])
 
     @staticmethod
     def _storage(value) -> str:
@@ -720,7 +781,8 @@ class _OksaPage:
             for job in sorted(self.jobs.values(), key=lambda job: job["started_at"]):
                 latest[job["operation"]] = job["path"]
             self.jobs = {path: job for path, job in self.jobs.items()
-                         if path in latest.values() or path == self.model_job or job["state"] in ("queued", "running")}
+                         if path in latest.values() or path == self.model_job or job["state"] in ("queued", "running")
+                         or (job["operation"] == "DownloadModel" and path in self.jobs_seen)}
             self.job_details.intersection_update(self.jobs)
             if any(job["state"] in ("queued", "running") for job in self.jobs.values()):
                 self.models_verified = False
@@ -793,6 +855,7 @@ class _OksaPage:
             self.activity_table.selected = [row for row in rows if row["id"] in selected]
             self.activity_table.update()
         self._activity_selection()
+        self._render_downloads(rows)
 
     def _activity_selection(self) -> None:
         selected = self.activity_table.selected
@@ -806,8 +869,11 @@ class _OksaPage:
             await self._cancel_pull(self.activity_table.selected[0]["id"])
 
     def _show_job(self) -> None:
-        selected = self.activity_table.selected
-        job = self.jobs.get(selected[0]["id"]) if selected else None
+        if self.activity_table.selected:
+            self._show_job_details(self.activity_table.selected[0]["id"])
+
+    def _show_job_details(self, path: str) -> None:
+        job = self.jobs.get(path)
         if job is None:
             return
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
