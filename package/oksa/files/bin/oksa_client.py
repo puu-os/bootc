@@ -14,6 +14,13 @@ class OksaClientError(OksaError):
         super().__init__(code, message, payload)
         self.payload = payload if payload is not None else {"ok": False, "code": code, "error": message}
 
+    @classmethod
+    def from_dbus(cls, error: GLib.Error) -> "OksaClientError":
+        remote = Gio.DBusError.get_remote_error(error)
+        code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
+        message = error.message.removeprefix(f"GDBus.Error:{remote}: ") if remote else error.message
+        return cls(code, message)
+
 
 class OksaClient:
     def __init__(self, connection=None, timeout: float = 95) -> None:
@@ -50,14 +57,7 @@ class OksaClient:
                                              GLib.Variant(signature, args), GLib.VariantType.new(f"({output})"),
                                              Gio.DBusCallFlags.NONE, int(self.timeout * 1000), None)
         except GLib.Error as error:
-            remote = Gio.DBusError.get_remote_error(error)
-            code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
-            Gio.DBusError.strip_remote_error(error)
-            try:
-                payload = Contract.decode(error.message)
-            except OksaError:
-                payload = {"ok": False, "code": code, "error": error.message}
-            raise OksaClientError(code, str(payload.get("error", error.message)), payload) from error
+            raise OksaClientError.from_dbus(error) from error
         if mutation:
             return {"ok": True, "job": reply.unpack()[0]}
         return reply.unpack()[0]
@@ -79,10 +79,7 @@ class OksaClient:
                                      None, None, Gio.DBusCallFlags.NONE, int(self.timeout * 1000), None)
             return True
         except GLib.Error as error:
-            remote = Gio.DBusError.get_remote_error(error)
-            code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
-            Gio.DBusError.strip_remote_error(error)
-            raise OksaClientError(code, error.message, {"ok": False, "code": code, "error": error.message}) from error
+            raise OksaClientError.from_dbus(error) from error
 
     def get_managed_objects(self) -> dict:
         try:
@@ -91,10 +88,7 @@ class OksaClient:
                                              Gio.DBusCallFlags.NONE, int(self.timeout * 1000), None)
             return reply.unpack()[0]
         except GLib.Error as error:
-            remote = Gio.DBusError.get_remote_error(error)
-            code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
-            Gio.DBusError.strip_remote_error(error)
-            raise OksaClientError(code, error.message, {"ok": False, "code": code, "error": error.message}) from error
+            raise OksaClientError.from_dbus(error) from error
 
     def get_properties(self, interface: str = Contract.BUS, path: str = Contract.PATH) -> dict:
         try:
@@ -104,10 +98,7 @@ class OksaClient:
                                              int(self.timeout * 1000), None)
             return reply.unpack()[0]
         except GLib.Error as error:
-            remote = Gio.DBusError.get_remote_error(error)
-            code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
-            Gio.DBusError.strip_remote_error(error)
-            raise OksaClientError(code, error.message, {"ok": False, "code": code, "error": error.message}) from error
+            raise OksaClientError.from_dbus(error) from error
 
     def wait_job(self, path: str, timeout: float = 600) -> dict:
         deadline = time.monotonic() + timeout
