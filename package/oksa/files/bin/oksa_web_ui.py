@@ -64,20 +64,26 @@ class _OksaPage:
 
     def build(self) -> None:
         ui.dark_mode(False)
-        ui.label("OKSA").classes("text-xl font-semibold")
-        self.warning_label = ui.label("").classes("text-warning")
-        with ui.tabs().classes("max-w-full") as self.tabs:
-            for name in ("Monitoring", "Models", "Activity", "Users"):
-                ui.tab(name)
-        with ui.tab_panels(self.tabs, value="Monitoring").classes("w-full"):
-            with ui.tab_panel("Monitoring"):
-                self._build_monitoring()
-            with ui.tab_panel("Models"):
-                self._build_models()
-            with ui.tab_panel("Activity"):
-                self._build_activity()
-            with ui.tab_panel("Users"):
-                self._build_users()
+        self.client.content.classes("p-0 gap-0 h-screen overflow-hidden")
+        with ui.row().classes("w-full h-full flex-nowrap items-stretch gap-0"):
+            with ui.column().classes("w-44 shrink-0 h-full border-r bg-gray-50 p-2 gap-3"):
+                ui.label("OKSA").classes("text-lg font-semibold px-3 py-2")
+                with ui.tabs(value="Models").props("vertical inline-label no-caps").classes("w-full") as self.tabs:
+                    for name, icon in (("Models", "storage"), ("Monitoring", "monitor_heart"),
+                                       ("Activity", "history"), ("Users", "people")):
+                        ui.tab(name, icon=icon).classes("justify-start")
+            with ui.column().classes("flex-1 min-w-0 h-full gap-0"):
+                self.warning_label = ui.label("").classes("text-warning px-3")
+                self.warning_label.set_visibility(False)
+                with ui.tab_panels(self.tabs, value="Models", animated=False).classes("w-full flex-1 min-h-0 overflow-auto"):
+                    with ui.tab_panel("Monitoring"):
+                        self._build_monitoring()
+                    with ui.tab_panel("Models").classes("h-full flex-nowrap"):
+                        self._build_models()
+                    with ui.tab_panel("Activity").classes("h-full flex-nowrap"):
+                        self._build_activity()
+                    with ui.tab_panel("Users").classes("h-full flex-nowrap"):
+                        self._build_users()
         self._build_download_dialog()
         self._build_user_dialog()
         self._build_key_dialog()
@@ -95,7 +101,7 @@ class _OksaPage:
             columns=[{"name": key, "field": key, "label": label, "sortable": True}
                      for key, label in fields.items()],
             rows=[], row_key=row_key, selection=selection, pagination=10,
-        ).props("color=primary").classes("w-full")
+        ).props("color=primary dense flat bordered").classes("w-full")
 
     @staticmethod
     def _number(value, maximum: float = math.inf, *, integer: bool = False) -> bool:
@@ -151,6 +157,7 @@ class _OksaPage:
         self.warnings[key] = message
         if not self.client.is_deleted:
             self.warning_label.set_text("\n".join(self.warnings.values()))
+            self.warning_label.set_visibility(any(self.warnings.values()))
 
     def _begin(self, name: str, controls: list) -> bool:
         if name in self.busy or self.client.is_deleted:
@@ -421,7 +428,7 @@ class _OksaPage:
         self.models_table = self._table("Installed models", {
             "name": "Model", "storage_mib": "On disk (MiB)", "quantization": "Format",
             "capabilities": "Host capabilities", "state": "State",
-        }, selection="single")
+        }, selection="single").classes("flex-1 min-h-0")
         self.models_table.set_visibility(False)
         self.models_table.on_select(self._model_selection)
         self._model_selection()
@@ -436,6 +443,7 @@ class _OksaPage:
         self.pull_error = ui.label("").classes("text-negative")
         self.activity_table = self._table("Activity", {"action": "Action", "state": "Status", "elapsed": "Seconds"}, selection="single")
         self.activity_table.on_select(self._activity_selection)
+        self.activity_table.classes("flex-1 min-h-0")
         self._activity_selection()
         with ui.expansion("Calibration", icon="tune").classes("w-full"):
             self.calibration_badge = ui.badge("No record").props("outline")
@@ -1087,7 +1095,7 @@ class _OksaPage:
                 self._model_selection()
 
     def _build_users(self) -> None:
-        with ui.column().classes("w-full") as self.users_list:
+        with ui.column().classes("w-full flex-1 min-h-0 flex-nowrap") as self.users_list:
             with ui.row().classes("w-full items-center"):
                 self.create_user_button = ui.button("Create", on_click=self._open_user)
                 self.delete_users_button = ui.button("Delete", color="negative", on_click=self._delete_selected_users).props("outline")
@@ -1096,12 +1104,13 @@ class _OksaPage:
                 with self.users_state:
                     self.users_state_detail = ui.tooltip("Loading users and API keys")
             self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
+            self.users_table.classes("flex-1 min-h-0")
             self.users_table.props('loading no-data-label="Loading users…" no-results-label="No matching users"')
             self.users_table.on_select(self._users_selection)
             self.users_table.on("rowClick", lambda event: self._show_user(event.args[1]["user_id"]), args=[[], ["user_id"]])
             search.bind_value_to(self.users_table, "filter")
-        with ui.column().classes("w-full") as self.user_detail:
-            with ui.row():
+        with ui.column().classes("w-full flex-1 min-h-0 flex-nowrap") as self.user_detail:
+            with ui.row().classes("items-center"):
                 ui.button("Back", on_click=self._show_users).props("outline")
                 self.delete_user_button = ui.button("Delete", color="negative", on_click=self._delete_user).props("outline")
                 self.create_key_button = ui.button("Create", on_click=self._open_key)
@@ -1110,6 +1119,7 @@ class _OksaPage:
                 with self.keys_state:
                     self.keys_state_detail = ui.tooltip("Loading API keys")
             self.keys_table = self._table("API keys", {"name": "Name", "models": "Models", "status": "Status", "expires": "Expires"}, selection="single")
+            self.keys_table.classes("flex-1 min-h-0")
             self.keys_table.props('loading no-data-label="Loading API keys…"')
             self.keys_table.on_select(self._users_selection)
         self.user_detail.set_visibility(False)
@@ -1331,6 +1341,7 @@ class _OksaPage:
                     deleted += 1
                     self.warnings.pop("user-delete:" + owner, None)
                     self.warning_label.set_text("\n".join(self.warnings.values()))
+                    self.warning_label.set_visibility(any(self.warnings.values()))
                     if self.owner == owner:
                         self._set_owner(None)
                 else:
