@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import http.client
 import json
+import logging
 import math
 import os
 from pathlib import Path, PurePosixPath
@@ -1103,7 +1104,7 @@ def get_litellm_master_key(timeout: float | None = None) -> str | None:
     return None
 
 
-def litellm_base_url(timeout: float | None = None) -> str:
+def litellm_base_url(timeout: float | None = None) -> str | None:
     env_url = os.environ.get("PUU_LITELLM_API_URL")
     if env_url:
         return env_url.rstrip("/")
@@ -1118,9 +1119,9 @@ def litellm_base_url(timeout: float | None = None) -> str:
             url = f"http://{proc.stdout.strip()}:4000"
             _litellm_cache["base_url"] = url
             return url
-    except Exception:
-        pass
-    return "http://127.0.0.1:4000"
+    except (OSError, subprocess.SubprocessError):
+        logging.warning("Unable to discover the model gateway", exc_info=True)
+    return None
 
 
 def litellm_api_call(
@@ -1132,6 +1133,8 @@ def litellm_api_call(
     subprocess_timeout: float | None = None,
 ) -> tuple[int, dict]:
     base_url = litellm_base_url(timeout=subprocess_timeout)
+    if base_url is None:
+        return 0, {"error": "Model gateway is starting or unavailable."}
     key = master_key if master_key is not None else get_litellm_master_key(timeout=subprocess_timeout)
     headers = {"Content-Type": "application/json"}
     if key:
@@ -1158,7 +1161,8 @@ def litellm_api_call(
             return exc.code, {"error": raw.decode("utf-8", errors="replace")}
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         _litellm_cache.pop("base_url", None)
-        return 0, {"error": str(exc)}
+        logging.warning("Model gateway connection failed: %s", exc)
+        return 0, {"error": "Model gateway is temporarily unavailable."}
 
 
 def litellm_user_create(
@@ -1280,8 +1284,8 @@ def litellm_key_list(
             query["user_id"] = user_id
         status, resp = litellm_api_call("GET", "/key/list?" + urllib.parse.urlencode(query), master_key=master_key)
         if status != 200:
-            detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
-            return False, f"HTTP {status}" + (f": {detail}" if detail else "")
+            detail = resp.get("error") or resp.get("message")
+            return False, str(detail) if detail else f"Model gateway returned HTTP {status}"
         if (not isinstance(resp, dict) or any(field in resp for field in ("error", "errors", "detail"))
                 or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
             return False, "Invalid LiteLLM key-list response"
