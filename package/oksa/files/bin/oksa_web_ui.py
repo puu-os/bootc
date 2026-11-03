@@ -429,7 +429,7 @@ class _OksaPage:
         self.model_controls = [self.start_button, self.stop_button, self.remove_button]
         self.models_error = ui.label("").classes("text-negative")
         self.models_empty = ui.label("Loading installed models…")
-        self.models_table = self._table("Installed models", {
+        self.models_table = self._table("", {
             "name": "Model", "storage_mib": "On disk (MiB)", "quantization": "Format",
             "capabilities": "Host capabilities", "state": "State",
         }, selection="single").classes("flex-1 min-h-0")
@@ -445,7 +445,7 @@ class _OksaPage:
             self.activity_spinner = ui.spinner()
             self.activity_spinner.set_visibility(False)
         self.pull_error = ui.label("").classes("text-negative")
-        self.activity_table = self._table("Activity", {"action": "Action", "state": "Status", "elapsed": "Seconds"}, selection="single")
+        self.activity_table = self._table("", {"action": "Action", "state": "Status", "elapsed": "Seconds"}, selection="single")
         self.activity_table.on_select(self._activity_selection)
         self.activity_table.classes("flex-1 min-h-0")
         self._activity_selection()
@@ -966,7 +966,7 @@ class _OksaPage:
                 self.model_search.on("keydown.enter", self._search_models)
                 self.search_button = ui.button("Find", icon="search", on_click=self._search_models)
             self.search_message = ui.label("Search by model name or publisher.").classes("text-sm")
-            self.search_table = self._table("Search results", {
+            self.search_table = self._table("", {
                 "name": "Model", "author": "Publisher", "downloads": "Downloads", "access": "Access",
             }, selection="single", row_key="repo_id").props("flat dense wrap-cells")
             self.search_table.set_visibility(False)
@@ -1169,7 +1169,7 @@ class _OksaPage:
                 self.users_state = ui.badge("Loading").props("outline")
                 with self.users_state:
                     self.users_state_detail = ui.tooltip("Loading users and API keys")
-            self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
+            self.users_table = self._table("", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
             self.users_table.classes("flex-1 min-h-0")
             self.users_table.props('loading no-data-label="Loading users…" no-results-label="No matching users"')
             self.users_table.on_select(self._users_selection)
