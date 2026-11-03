@@ -196,11 +196,9 @@ class _OksaPage:
             await self._load_users()
 
     def _build_monitoring(self) -> None:
-        with ui.row().classes("w-full items-center"):
-            ui.label("Connection")
-            self.freshness = ui.badge("Connecting").props("outline")
-            with self.freshness:
-                self.freshness_detail = ui.tooltip("Waiting for the first update")
+        self.freshness = ui.badge("Loading monitoring data…").props("outline")
+        with self.freshness:
+            self.freshness_detail = ui.tooltip("Waiting for the first update")
         self.monitoring_error = ui.label("").classes("text-negative")
         self.monitoring_error.set_visibility(False)
         with ui.grid().classes("w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4"):
@@ -378,7 +376,17 @@ class _OksaPage:
                  and (error is None or isinstance(error, str)))
         elapsed = age + max(0, time.monotonic() - self.status_received) if known else None
         stale = not known or self.status_failed or metadata.get("stale") or error is not None or elapsed > maximum
-        self.freshness.set_text("Offline" if self.status_failed else "Delayed" if stale else "Partial data" if self.partial else "Live")
+        if self.status_failed:
+            update_text = "Monitoring updates unavailable"
+        elif not known:
+            update_text = "Loading monitoring data…"
+        elif stale:
+            update_text = f"Data is out of date — updated {int(elapsed)} seconds ago"
+        elif self.partial:
+            update_text = "Some monitoring data is unavailable"
+        else:
+            update_text = "Updated just now" if elapsed < 5 else f"Updated {int(elapsed)} seconds ago"
+        self.freshness.set_text(update_text)
         self.freshness_detail.set_text(f"Last update {int(elapsed)} seconds ago" if known else "Waiting for a confirmed update")
         inference = "Status unknown"
         if self.status is not None and not stale:
@@ -394,7 +402,7 @@ class _OksaPage:
             inference = "Queued" if running["state"] == "queued" else self._operation_title(running)
         self.inference.set_text(inference)
         self.status_stale = stale
-        self.activity_freshness.set_text("Live" if self._jobs_fresh() else "Reconnecting")
+        self.activity_freshness.set_text("Up to date" if self._jobs_fresh() else "Waiting for activity updates")
         self.activity_spinner.set_visibility(self._jobs_fresh() and any(job["state"] in ("queued", "running") for job in self.jobs.values()))
         self._render_activity()
         self._render_models()
@@ -422,7 +430,7 @@ class _OksaPage:
         with ui.row().classes("w-full items-center"):
             self.activity_cancel = ui.button("Cancel", on_click=self._cancel_selected_job).props("outline")
             self.activity_details = ui.button("Details", on_click=self._show_job).props("outline")
-            self.activity_freshness = ui.badge("Connecting").props("outline")
+            self.activity_freshness = ui.badge("Loading activity…").props("outline")
             self.activity_spinner = ui.spinner()
             self.activity_spinner.set_visibility(False)
         self.pull_error = ui.label("").classes("text-negative")
