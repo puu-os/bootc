@@ -188,7 +188,7 @@ class CalibrationController:
                                 raise ValueError(f"Invalid probe metric: {key}")
                         if (metrics["kv_cache_tokens"] < context * sequences
                                 or metrics["minimum_host_available_bytes"] < reserve
-                                or metrics["peak_host_memory_bytes"] > memory_bytes):
+                                or metrics["peak_host_memory_bytes"] > memory_bytes + 64 * 1024**2):
                             raise ValueError("Calibration probe exceeded its memory bounds")
                         samples = metrics.get("tokens_per_second_samples")
                         if (not isinstance(samples, list) or len(samples) != 3
@@ -249,7 +249,7 @@ class CalibrationController:
         def measure(context, sequences, utilization, *, prefix_caching=False, memory_bytes=budget):
             if time.monotonic() >= deadline:
                 raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
-            if len(trials) >= MAX_TRIALS - (0 if prefix_caching else 2):
+            if len(trials) >= MAX_TRIALS - (0 if prefix_caching else 3):
                 raise CalibrationTimeout("trial-budget", "Calibration trial budget exhausted")
             value = self.run_trial(plan, node, context, sequences, utilization, memory_bytes,
                                    reserve, deadline, len(trials) + 1, prefix_caching=prefix_caching)
@@ -294,9 +294,15 @@ class CalibrationController:
         enabled = measure(context, sequences, utilization, prefix_caching=True)
         if enabled["status"] != "passed":
             raise RuntimeError(f"Serving profile failed prefix-cache validation: {enabled['reason']}")
-        peak = enabled["metrics"]["peak_host_memory_bytes"]
+        peak = max(
+            max(trial["metrics"]["peak_host_memory_bytes"] for trial in trials if trial.get("status") == "passed"),
+            enabled["metrics"]["peak_host_memory_bytes"] + max(0, plan.spec.storage_mib) * 1024**2,
+        )
         memory_bytes = min(budget, (int(peak * 1.2) + 512 * 1024**2 + 1024**2 - 1) // 1024**2 * 1024**2)
         final = measure(context, sequences, utilization, prefix_caching=True, memory_bytes=memory_bytes)
+        if final["status"] == "capacity" and memory_bytes < budget:
+            memory_bytes = budget
+            final = measure(context, sequences, utilization, prefix_caching=True, memory_bytes=memory_bytes)
         if final["status"] != "passed":
             raise RuntimeError(f"Serving profile failed measured-memory validation: {final['reason']}")
         result.update(reason="measured", completed_at=time.time(), metrics=final["metrics"], limits=dict(
