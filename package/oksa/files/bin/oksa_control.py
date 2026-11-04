@@ -40,6 +40,7 @@ class Contract:
         "InspectModel": ((('repo', 's'), ('revision', 's')), "a{sv}", False),
         "DownloadModel": ((('repo', 's'), ('name', 's'), ('commit', 's'), ('force', 'b')), "o", True),
         "StartModel": ((('name', 's'),), "o", True),
+        "RestartModel": ((('name', 's'),), "o", True),
         "StopServing": ((), "o", True),
         "RemoveModel": ((('name', 's'),), "o", True),
         "ListUsers": ((), "a{sv}", False),
@@ -55,7 +56,7 @@ class Contract:
         "ListJobs": ((), "a{sv}", False),
     }
     OPTIONAL_STRINGS = {"email", "duration", "user", "commit", "revision", "query"}
-    MODEL_MUTATIONS = frozenset({"DownloadModel", "StartModel", "StopServing", "RemoveModel", "Calibrate"})
+    MODEL_MUTATIONS = frozenset({"DownloadModel", "StartModel", "RestartModel", "StopServing", "RemoveModel", "Calibrate"})
     USER_MUTATIONS = frozenset({"CreateUser", "DeleteUser", "CreateKey", "RevokeKey"})
     MUTATIONS = MODEL_MUTATIONS | USER_MUTATIONS
 
@@ -159,8 +160,9 @@ class OksaControl:
             "ListModels": self.list_models,
             "SearchModels": self.search_models,
             "InspectModel": self.inspect_model, "DownloadModel": self.download_model,
-            "StartModel": self.start_model, "StopServing": self.stop_serving,
-            "RemoveModel": self.remove_model, "ListUsers": self.list_users,
+            "StartModel": self.start_model, "RestartModel": self.restart_model,
+            "StopServing": self.stop_serving, "RemoveModel": self.remove_model,
+            "ListUsers": self.list_users,
             "GetUser": self.get_user, "CreateUser": self.create_user,
             "DeleteUser": self.delete_user, "ListKeys": self.list_keys,
             "CreateKey": self.create_key, "RevokeKey": self.revoke_key,
@@ -318,6 +320,17 @@ class OksaControl:
         self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
         return {"ok": True, "message": f"Model {ms.public_model_name(model_name, self.state_dir)} activated"}
 
+    def restart_model(self, name: str) -> dict:
+        model_name = ms.resolve_model_name(name, self.state_dir)
+        if not ms.check_capabilities(self.planner_bin, model_name):
+            raise OksaError("InvalidInput", "Model has insufficient host capabilities")
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        selected, disabled = ms.control_files(self.state_dir)
+        ms.atomic_write_text(selected, f"{model_name}\n")
+        disabled.unlink(missing_ok=True)
+        env = dict(os.environ, PUU_VLLM_SELECTED_MODEL=model_name, PUU_VLLM_REQUIRE_SELECTED_MODEL="true")
+        self.run_helper([str(self.planner_bin), "--require-reconcile", "--restart"], env)
+        return {"ok": True, "message": f"Model {ms.public_model_name(model_name, self.state_dir)} restarted"}
     def stop_serving(self) -> dict:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         selected, disabled = ms.control_files(self.state_dir)

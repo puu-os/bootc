@@ -17,8 +17,9 @@ from oksa_workload_manifest import WorkloadManifestBuilder
 
 
 class WorkloadPlanner:
-    def __init__(self, require_reconcile: bool = False):
-        self.require_selected = require_reconcile or ms.parse_bool(
+    def __init__(self, require_reconcile: bool = False, restart: bool = False):
+        self.restart = restart
+        self.require_selected = require_reconcile or restart or ms.parse_bool(
             os.environ.get("PUU_VLLM_REQUIRE_SELECTED_MODEL"), False
         )
         self.selected = ""
@@ -123,16 +124,17 @@ class WorkloadPlanner:
         planned = evaluation.plan
         content = WorkloadManifestBuilder(planned, ms.MODELS_DIR).render() if planned else self.empty_manifest
         changed = not self.manifest.is_file() or self.manifest.read_text() != content
+        restarting = self.restart and bool(planned)
         active = planned.spec.name if planned else ""
         previous = ms.read_first_line(self.active_file)
         if not dry_run:
-            if changed or previous != active or not active:
+            if changed or restarting or previous != active or not active:
                 if not ms.sync_litellm_models(None, ms.STATE_DIR):
                     raise RuntimeError("Failed to unpublish model routing before reconciliation")
                 self.active_file.unlink(missing_ok=True)
             if changed:
                 ms.atomic_write_text(self.manifest, self.empty_manifest)
-            WorkloadManifestBuilder.stop_workloads(planned.app_name if planned and not changed else "")
+            WorkloadManifestBuilder.stop_workloads(planned.app_name if planned and not (changed or restarting) else "")
         if changed:
             ms.atomic_write_text(self.manifest, content)
         if active:
@@ -143,6 +145,11 @@ class WorkloadPlanner:
                         "wait", "--for=create", deployment, "-n", ms.OKSA_NAMESPACE,
                         "--timeout=120s", timeout=130,
                     )
+                    if not changed and (restarting or previous != active):
+                        ms.run_kubectl(
+                            "scale", "-n", ms.OKSA_NAMESPACE, deployment,
+                            f"--replicas={planned.replicas}", "--request-timeout=20s", timeout=30,
+                        )
                     # K3s may not yet have restored a previously stopped deployment.
                     ms.run_kubectl(
                         "wait", f"--for=jsonpath={{.spec.replicas}}={planned.replicas}",
@@ -178,12 +185,13 @@ class WorkloadPlanner:
     def main(cls) -> None:
         parser = argparse.ArgumentParser(description="Reconcile model serving workloads")
         parser.add_argument("--require-reconcile", action="store_true", help="Fail instead of skipping live reconciliation")
+        parser.add_argument("--restart", action="store_true", help="Restart the active serving workload")
         args = parser.parse_args()
-        planner = cls(args.require_reconcile)
+        planner = cls(args.require_reconcile, args.restart)
         dry_run = (ms.parse_bool(os.environ.get("PUU_VLLM_IGNORE_SERVING_DISABLED"), False)
                    or planner.manifest.parent != Path("/var/lib/rancher/k3s/server/manifests"))
         if dry_run:
-            if args.require_reconcile:
+            if args.require_reconcile or args.restart:
                 sys.exit("Live reconciliation is required; dry-run configuration is active")
             planner.reconcile(dry_run=True)
             return
