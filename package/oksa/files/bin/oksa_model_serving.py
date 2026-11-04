@@ -4,6 +4,7 @@
 
 from contextlib import contextmanager
 import dataclasses
+import errno
 import fcntl
 import hashlib
 import http.client
@@ -1124,6 +1125,27 @@ def litellm_base_url(timeout: float | None = None) -> str | None:
     return None
 
 
+class UnconfirmedMessage(str):
+    """Error message for a write whose server-side effect could not be confirmed."""
+
+
+def litellm_error_detail(resp: object, status: int) -> str:
+    if isinstance(resp, dict):
+        for field in ("error", "detail", "message"):
+            value = resp.get(field)
+            if isinstance(value, dict):
+                value = value.get("message") or value.get("detail") or value.get("error")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return f"Model gateway returned HTTP {status}" if status else "Model gateway is temporarily unavailable."
+
+
+def _write_rejected(status: int, resp: object) -> bool:
+    return (status == 0 and isinstance(resp, dict) and resp.get("not_sent") is True) or (
+        400 <= status < 500 and status != 408
+    )
+
+
 def litellm_api_call(
     method: str,
     endpoint: str,
@@ -1134,7 +1156,7 @@ def litellm_api_call(
 ) -> tuple[int, dict]:
     base_url = litellm_base_url(timeout=subprocess_timeout)
     if base_url is None:
-        return 0, {"error": "Model gateway is starting or unavailable."}
+        return 0, {"error": "Model gateway is starting or unavailable.", "not_sent": True}
     key = master_key if master_key is not None else get_litellm_master_key(timeout=subprocess_timeout)
     headers = {"Content-Type": "application/json"}
     if key:
@@ -1162,7 +1184,16 @@ def litellm_api_call(
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         _litellm_cache.pop("base_url", None)
         logging.warning("Model gateway connection failed: %s", exc)
-        return 0, {"error": "Model gateway is temporarily unavailable."}
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(reason, socket.gaierror) or (
+            isinstance(reason, OSError)
+            and not isinstance(reason, TimeoutError)
+            and getattr(reason, "errno", None) in (
+                errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EADDRNOTAVAIL,
+            )
+        ):
+            return 0, {"error": "Model gateway is temporarily unavailable.", "not_sent": True}
+        return 0, {"error": "Model gateway connection was interrupted."}
 
 
 def litellm_user_create(
@@ -1180,18 +1211,17 @@ def litellm_user_create(
         payload["user_email"] = email
     if max_budget is not None:
         payload["max_budget"] = max_budget
-    warning = "Warning: User creation not confirmed. The user may exist; check before retrying."
     try:
         status, resp = litellm_api_call("POST", "/user/new", payload=payload, master_key=master_key)
     except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
-        return False, f"{warning} {type(exc).__name__}: {exc}"
+        return False, UnconfirmedMessage(f"{type(exc).__name__}: {exc}")
     if status != 200:
-        detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
-        return False, f"{warning} HTTP {status}" + (f": {detail}" if detail else "")
+        detail = litellm_error_detail(resp, status)
+        return False, detail if _write_rejected(status, resp) else UnconfirmedMessage(detail)
     if (not isinstance(resp, dict) or resp.get("user_id") != user_id
             or any(field in resp for field in ("error", "errors", "detail"))
             or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
-        return False, f"{warning} Invalid LiteLLM user-create response (HTTP 200)"
+        return False, UnconfirmedMessage("Invalid LiteLLM user-create response (HTTP 200)")
     return True, resp
 
 
@@ -1205,8 +1235,7 @@ def litellm_user_list(master_key: str | None = None) -> tuple[bool, list[dict] |
             master_key=master_key,
         )
         if status != 200:
-            err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-            return False, str(err)
+            return False, litellm_error_detail(resp, status)
         if isinstance(resp.get("data"), list) and "users" not in resp:
             return True, [u for u in resp["data"] if isinstance(u, dict)]
         batch = resp.get("users")
@@ -1226,8 +1255,7 @@ def litellm_user_info(user_id: str, master_key: str | None = None) -> tuple[bool
         if isinstance(resp.get("keys"), list):
             resp["keys"] = [key for key in resp["keys"] if isinstance(key, dict) and key.get("key_alias") != "open-webui"]
         return True, resp
-    err = resp.get("error") or resp.get("message") or f"HTTP {status}"
-    return False, str(err)
+    return False, litellm_error_detail(resp, status)
 
 
 def litellm_key_create(
@@ -1255,19 +1283,18 @@ def litellm_key_create(
         payload["max_budget"] = max_budget
     if duration:
         payload["duration"] = duration
-    warning = "Warning: Key creation not confirmed. The key may exist; check before retrying."
     try:
         status, resp = litellm_api_call("POST", "/key/generate", payload=payload, master_key=master_key)
     except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
-        return False, f"{warning} {type(exc).__name__}: {exc}"
+        return False, UnconfirmedMessage(f"{type(exc).__name__}: {exc}")
     if status != 200:
-        detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
-        return False, f"{warning} HTTP {status}" + (f": {detail}" if detail else "")
+        detail = litellm_error_detail(resp, status)
+        return False, detail if _write_rejected(status, resp) else UnconfirmedMessage(detail)
     if (not isinstance(resp, dict) or not isinstance(resp.get("key"), str) or not resp["key"].strip()
             or ("user_id" in resp and resp["user_id"] != user_id)
             or any(field in resp for field in ("error", "errors", "detail"))
             or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
-        return False, f"{warning} Invalid LiteLLM key-create response (HTTP 200)"
+        return False, UnconfirmedMessage("Invalid LiteLLM key-create response (HTTP 200)")
     return True, resp
 
 
@@ -1284,8 +1311,7 @@ def litellm_key_list(
             query["user_id"] = user_id
         status, resp = litellm_api_call("GET", "/key/list?" + urllib.parse.urlencode(query), master_key=master_key)
         if status != 200:
-            detail = resp.get("error") or resp.get("message")
-            return False, str(detail) if detail else f"Model gateway returned HTTP {status}"
+            return False, litellm_error_detail(resp, status)
         if (not isinstance(resp, dict) or any(field in resp for field in ("error", "errors", "detail"))
                 or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
             return False, "Invalid LiteLLM key-list response"
@@ -1368,22 +1394,21 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
         return False, "The Open WebUI service key cannot be revoked here"
     token = key.get("token")
     payload = {"keys": [token]}
-    warning = "Warning: Key revocation not confirmed. The key may still grant access; check the key list before retrying."
     try:
         status, resp = litellm_api_call("POST", "/key/delete", payload=payload, master_key=master_key)
     except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
-        return False, f"{warning} {type(exc).__name__}: {exc}"
+        return False, UnconfirmedMessage(f"{type(exc).__name__}: {exc}")
     if status != 200:
-        detail = (resp.get("error") or resp.get("message")) if isinstance(resp, dict) else None
-        return False, f"{warning} HTTP {status}" + (f": {detail}" if detail else "")
+        detail = litellm_error_detail(resp, status)
+        return False, detail if _write_rejected(status, resp) else UnconfirmedMessage(detail)
     if (not isinstance(resp, dict) or resp.get("deleted_keys") != [token]
             or any(field in resp for field in ("error", "errors", "detail"))
             or resp.get("status") in ("error", "failed", "failure") or resp.get("success") is False):
-        return False, f"{warning} Invalid LiteLLM key-delete acknowledgement (HTTP 200)"
+        return False, UnconfirmedMessage("Invalid LiteLLM key-delete acknowledgement (HTTP 200)")
     # LiteLLM 1.90.1 echoes deletion requests; an unfiltered scan is not a snapshot.
     absent, detail = litellm_key_absent(token, master_key=master_key)
     if not absent:
-        return False, f"{warning} {detail}"
+        return False, UnconfirmedMessage(detail)
     return True, f"Key {key_or_alias} revoked"
 
 

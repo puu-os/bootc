@@ -17,8 +17,12 @@ class OksaClientError(OksaError):
     @classmethod
     def from_dbus(cls, error: GLib.Error) -> "OksaClientError":
         remote = Gio.DBusError.get_remote_error(error)
-        code = remote.rsplit(".", 1)[-1] if remote else "Unavailable"
-        message = error.message.removeprefix(f"GDBus.Error:{remote}: ") if remote else error.message
+        if not remote:
+            return cls("Unconfirmed", error.message)
+        code = remote.rsplit(".", 1)[-1]
+        if code in ("NoReply", "Timeout", "TimedOut", "Disconnected"):
+            code = "Unconfirmed"
+        message = error.message.removeprefix(f"GDBus.Error:{remote}: ")
         return cls(code, message)
 
 
