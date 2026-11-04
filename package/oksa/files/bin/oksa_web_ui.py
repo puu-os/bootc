@@ -416,7 +416,7 @@ class _OksaPage:
                 inference = {"ready": "Serving", "authentication-required": "Authentication required"}.get(gateway, "Gateway offline")
         running = next((job for job in self.jobs.values()
                         if self._jobs_fresh() and job["path"] in self.jobs_seen and job["state"] in ("queued", "running")
-                        and job["operation"] in ("StartModel", "StopServing", "Calibrate")), None)
+                        and job["operation"] in ("StartModel", "RestartModel", "StopServing", "Calibrate")), None)
         if running:
             inference = "Queued" if running["state"] == "queued" else self._operation_title(running)
         self.inference.set_text(inference)
@@ -430,11 +430,12 @@ class _OksaPage:
         with ui.row().classes("w-full items-center"):
             ui.button("Find", icon="search", on_click=self._open_download)
             self.start_button = ui.button("Start", on_click=lambda: self._model_action("start"))
+            self.restart_button = ui.button("Restart", on_click=lambda: self._model_action("restart")).props("outline")
             self.stop_button = ui.button("Stop", on_click=lambda: self._model_action("stop")).props("outline")
             self.remove_button = ui.button("Delete", color="negative", on_click=lambda: self._model_action("remove")).props("outline")
             self.model_spinner = ui.spinner()
             self.model_spinner.set_visibility(False)
-        self.model_controls = [self.start_button, self.stop_button, self.remove_button]
+        self.model_controls = [self.start_button, self.restart_button, self.stop_button, self.remove_button]
         self.models_error = ui.label("").classes("text-negative")
         self.models_empty = ui.label("Loading installed models…")
         self.models_table = self._table("", {
@@ -547,6 +548,13 @@ class _OksaPage:
                 and not self.busy.intersection({"model", "download"})
                 and not self._active_model_jobs())
 
+    def _restart_target(self) -> dict | None:
+        model = self._selected_model()
+        if model is not None:
+            return model if (model.get("active") or model.get("selected")) and model.get("capabilities") == "ok" else None
+        return next((item for item in self.models
+                     if (item.get("active") or item.get("selected")) and item.get("capabilities") == "ok"), None)
+
     def _model_state(self, model: dict) -> str:
         status = self.status or {}
         if self.status_stale:
@@ -567,6 +575,7 @@ class _OksaPage:
         available = self._model_available() and self.models_verified
         self.start_button.set_enabled(available and model is not None and model.get("capabilities") == "ok"
                                       and self._model_state(model) != "Serving")
+        self.restart_button.set_enabled(available and self._restart_target() is not None)
         self.stop_button.set_enabled(available)
         self.remove_button.set_enabled(available and model is not None and model.get("removable") is not False)
         if hasattr(self, "download_button"):
@@ -836,9 +845,10 @@ class _OksaPage:
 
     @staticmethod
     def _operation_title(job: dict) -> str:
-        titles = {"StartModel": ("Start", "Starting"), "StopServing": ("Stop", "Stopping"),
-                  "Calibrate": ("Calibration", "Calibrating"), "DownloadModel": ("Download", "Downloading"),
-                  "RemoveModel": ("Delete", "Deleting"), "DeleteUser": ("User deletion", "Deleting user")}
+        titles = {"StartModel": ("Start", "Starting"), "RestartModel": ("Restart", "Restarting"),
+                  "StopServing": ("Stop", "Stopping"), "Calibrate": ("Calibration", "Calibrating"),
+                  "DownloadModel": ("Download", "Downloading"), "RemoveModel": ("Delete", "Deleting"),
+                  "DeleteUser": ("User deletion", "Deleting user")}
         return titles.get(job["operation"], ("Operation", "Working"))[job["state"] == "running"]
 
     def _render_activity(self) -> None:
@@ -921,7 +931,7 @@ class _OksaPage:
             self._end("cancel", [])
 
     async def _model_action(self, action: str) -> None:
-        model = self._selected_model()
+        model = self._restart_target() if action == "restart" else self._selected_model()
         if not self._model_available() or not self.models_verified:
             return
         if action != "stop" and (model is None or not isinstance(model.get("id"), str)):
@@ -933,9 +943,12 @@ class _OksaPage:
         name = str(model.get("name")) if model else "model serving"
         try:
             if action != "start":
-                message = {"stop": "Stop all model serving? Applications will lose inference access.",
-                           "remove": f"Delete {name}? Serving will be stopped before files are deleted."}[action]
-                if not await self._confirm(message, {"stop": "Stop", "remove": "Delete"}[action], dangerous=True):
+                message, label, dangerous = {
+                    "restart": (f"Restart {name}? Inference will be briefly unavailable.", "Restart", False),
+                    "stop": ("Stop all model serving? Applications will lose inference access.", "Stop", True),
+                    "remove": (f"Delete {name}? Serving will be stopped before files are deleted.", "Delete", True),
+                }[action]
+                if not await self._confirm(message, label, dangerous=dangerous):
                     return
             if not self._jobs_fresh() or self._active_model_jobs():
                 self._warn("model-operation", "Activity changed. Checking status automatically before another operation.")
@@ -947,7 +960,7 @@ class _OksaPage:
             self.calibration_received = 0.0
             self.model_uncertain = True
             self._render_freshness()
-            method = {"start": "StartModel", "stop": "StopServing", "remove": "RemoveModel"}[action]
+            method = {"start": "StartModel", "restart": "RestartModel", "stop": "StopServing", "remove": "RemoveModel"}[action]
             reply = await self._call(method, *(() if action == "stop" else (model["id"],)), wait=False)
             if self.client.is_deleted:
                 return
