@@ -344,7 +344,8 @@ class CalibrationController:
         if (cached is not None and valid_result(cached, self.model)
                 and cached["fingerprint"] == self.fingerprint
                 and cached["identity"] == identity
-                and cached["search_complete"] and cached["reason"] != "insufficient-memory"):
+                and (cached["limits"]["max_num_seqs"] > 0 or cached["search_complete"])
+                and cached["reason"] != "insufficient-memory"):
             message = (f"Calibration complete with zero limits: {cached['reason']}."
                        if not cached["limits"]["max_num_seqs"]
                        else "Matching measured profile applied for this boot.")
