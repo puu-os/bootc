@@ -337,7 +337,8 @@ class OksaControl:
     def response(response: tuple, key: str) -> dict:
         ok, result = response
         if not ok:
-            raise OksaError("OperationFailed", str(result))
+            code = "Unconfirmed" if isinstance(result, ms.UnconfirmedMessage) else "OperationFailed"
+            raise OksaError(code, str(result))
         return {"ok": True, key: result}
 
     def list_users(self) -> dict:

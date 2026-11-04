@@ -75,7 +75,7 @@ class _OksaPage:
                                        ("Activity", "history"), ("Users", "people")):
                         ui.tab(name, icon=icon).classes("justify-start")
             with ui.column().classes("flex-1 min-w-0 h-full gap-0"):
-                self.warning_label = ui.label("").classes("text-warning px-3")
+                self.warning_label = ui.label("").classes("text-warning px-3 py-1 whitespace-pre-line break-words")
                 self.warning_label.set_visibility(False)
                 with ui.tab_panels(self.tabs, value="Models", animated=False).classes("w-full flex-1 min-h-0 overflow-auto"):
                     with ui.tab_panel("Monitoring"):
@@ -133,6 +133,10 @@ class _OksaPage:
     def _error(reply: tuple[int, dict]) -> str:
         return str(reply[1].get("error") or f"Invalid service response (status {reply[0]})")
 
+    @staticmethod
+    def _unconfirmed(reply: tuple[int, dict]) -> bool:
+        return reply[1].get("code") in ("Unconfirmed", "Timeout", "Interrupted", "WorkerFailed")
+
     async def _call(self, method: str, *args, wait: bool = True) -> tuple[int, dict]:
         try:
             result = await run.io_bound(self.service.call, method, *args)
@@ -141,9 +145,9 @@ class _OksaPage:
         except OksaClientError as error:
             return 0, {"ok": False, **error.payload, "error": str(error)}
         except (OSError, ValueError, TimeoutError) as error:
-            return 0, {"ok": False, "error": f"Service result could not be confirmed: {error}"}
+            return 0, {"ok": False, "code": "Unconfirmed", "error": f"Service result could not be confirmed: {error}"}
         if not isinstance(result, dict):
-            return 0, {"ok": False, "error": "Service result could not be confirmed."}
+            return 0, {"ok": False, "code": "Unconfirmed", "error": "Service result could not be confirmed."}
         return 200, result
 
     async def _load(self, name: str, method: str) -> tuple[int, dict] | None:
@@ -158,11 +162,13 @@ class _OksaPage:
             return reply
 
     def _warn(self, key: str, message: str) -> None:
-        self.warnings[key] = message
+        if message:
+            self.warnings[key] = message
+        else:
+            self.warnings.pop(key, None)
         if not self.client.is_deleted:
             self.warning_label.set_text("\n".join(self.warnings.values()))
-            self.warning_label.set_visibility(any(self.warnings.values()))
-
+            self.warning_label.set_visibility(bool(self.warnings))
     def _begin(self, name: str, controls: list) -> bool:
         if name in self.busy or self.client.is_deleted:
             return False
@@ -908,6 +914,8 @@ class _OksaPage:
                 return
             try:
                 canceled = await run.io_bound(self.service.cancel_job, path)
+                if canceled:
+                    self._warn("cancel", "")
                 if not self.client.is_deleted:
                     ui.notify("Cancellation requested; checking job state" if canceled else "Cancellation was not confirmed", type="info" if canceled else "warning")
             except (OksaClientError, OSError, ValueError, TimeoutError) as error:
@@ -954,8 +962,13 @@ class _OksaPage:
                 self.model_uncertain = False
                 self._warn("model-operation", "")
                 ui.notify("Operation accepted; following job state")
-            else:
+            elif self._unconfirmed(reply) or self._success(reply):
                 self._warn("model-operation", f"{action.title()} acceptance was not confirmed. Checking status automatically; do not retry yet. " + self._error(reply))
+            else:
+                self.model_uncertain = False
+                self._warn("model-operation", self._error(reply))
+                await self._refresh_model_state()
+                return
             await self._load_pull()
         finally:
             self._end("model", self.model_controls)
@@ -1136,7 +1149,7 @@ class _OksaPage:
             if not self._jobs_fresh() or self._active_model_jobs():
                 self.download_error.set_text("Activity changed. Checking status automatically before downloading.")
                 return
-            self.inspection = None
+            self.download_error.set_text("")
             for key in ("models", "status", "pull", "calibration"):
                 self.generations[key] += 1
             self.models_verified = False
@@ -1149,16 +1162,23 @@ class _OksaPage:
                 return
             path = reply[1].get("job")
             if self._success(reply) and isinstance(path, str) and re.fullmatch(r"/io/github/puu_os/Oksa/jobs/[A-Za-z0-9_]+", path):
+                self.inspection = None
                 self.model_job = path
                 self.model_operation = "DownloadModel"
                 self.model_uncertain = False
                 self._warn("download", "")
                 self.download_dialog.close()
                 ui.notify("Download accepted; following job state")
-            else:
+            elif self._unconfirmed(reply) or self._success(reply):
+                self.inspection = None
                 message = "Download acceptance was not confirmed. Checking status automatically; do not retry yet. " + self._error(reply)
                 self.download_error.set_text(message)
                 self._warn("download", message)
+            else:
+                self.model_uncertain = False
+                self.download_error.set_text(self._error(reply))
+                await self._refresh_model_state()
+                return
             await self._load_pull()
         finally:
             self._end("download", controls)
@@ -1354,6 +1374,8 @@ class _OksaPage:
         controls = [*self.user_controls, self.user_submit, self.user_cancel, self.new_user_id, self.new_user_email]
         if not self._begin("user", controls):
             return
+        self.new_user_error.set_text("")
+        self._warn("user-create:" + owner, "")
         self.user_dialog.props("persistent")
         self.generations["users"] += 1
         try:
@@ -1364,10 +1386,12 @@ class _OksaPage:
                 self.user_dialog.close()
                 ui.notify("User created")
                 self._set_owner(None)
-            else:
+            elif self._unconfirmed(reply) or self._success(reply):
                 message = f"Creation of user {owner} was not confirmed. Check the user list before retrying. " + self._error(reply)
                 self.new_user_error.set_text(message)
                 self._warn("user-create:" + owner, message)
+            else:
+                self.new_user_error.set_text(self._error(reply))
             await self._load_users()
         finally:
             self._end("user", controls)
@@ -1411,13 +1435,13 @@ class _OksaPage:
                 data = reply[1]
                 if self._success(reply) and data.get("outcome") == "deleted" and data.get("deleted") is True:
                     deleted += 1
-                    self.warnings.pop("user-delete:" + owner, None)
-                    self.warning_label.set_text("\n".join(self.warnings.values()))
-                    self.warning_label.set_visibility(any(self.warnings.values()))
+                    self._warn("user-delete:" + owner, "")
                     if self.owner == owner:
                         self._set_owner(None)
                 else:
-                    if data.get("outcome") in ("invalid", "protected", "not_started"):
+                    if data.get("outcome") in ("invalid", "protected", "not_started") or (
+                        not self._success(reply) and not self._unconfirmed(reply) and not data.get("outcome")
+                    ):
                         message = self._error(reply)
                     else:
                         revoked = data.get("confirmed_revoked_keys")
@@ -1504,6 +1528,8 @@ class _OksaPage:
         controls = [*self.user_controls, self.key_submit, self.key_cancel, self.key_alias, self.key_access, self.key_models, self.key_duration]
         if not self._begin("user", controls):
             return
+        self.key_error.set_text("")
+        self._warn("key-create:" + owner, "")
         self.key_dialog.props("persistent")
         self.generations["users"] += 1
         generation = self.key_form_generation
@@ -1531,9 +1557,12 @@ class _OksaPage:
             else:
                 if isinstance(data, dict):
                     data.pop("key", None)
-                message = f"Key creation for {owner} was not confirmed. Check the key list before retrying."
-                self.key_error.set_text(message)
-                self._warn("key-create:" + owner, message)
+                if self._unconfirmed(reply) or self._success(reply):
+                    message = f"Key creation for {owner} was not confirmed. Check the key list before retrying. " + self._error(reply)
+                    self.key_error.set_text(message)
+                    self._warn("key-create:" + owner, message)
+                else:
+                    self.key_error.set_text(self._error(reply))
             await self._load_users()
         finally:
             self._end("user", controls)
@@ -1551,14 +1580,17 @@ class _OksaPage:
         try:
             if not await self._confirm(f"Revoke {key.get('key_alias') or key.get('key_name') or 'Unnamed key'} for {owner}? Applications using it will lose access.", "Revoke", dangerous=True):
                 return
+            self._warn("key-revoke:" + owner, "")
             self.generations["users"] += 1
             reply = await self._call("RevokeKey", key["token"])
             if self.client.is_deleted:
                 return
             if self._success(reply):
                 ui.notify("API key revocation confirmed")
-            else:
+            elif self._unconfirmed(reply):
                 self._warn("key-revoke:" + owner, f"Key revocation for {owner} was not confirmed; the key may still grant access. Check the key list before retrying. " + self._error(reply))
+            else:
+                self._warn("key-revoke:" + owner, f"Could not revoke key for {owner}: " + self._error(reply))
             await self._load_users()
         finally:
             self._end("user", self.user_controls)

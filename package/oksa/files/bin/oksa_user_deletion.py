@@ -106,7 +106,10 @@ class UserDeletionService:
         except _GATEWAY_ERRORS as exc:
             return self._user_unconfirmed(user_id, f"{type(exc).__name__}: {exc}", confirmed)
         if status != 200:
-            return self._user_unconfirmed(user_id, self._error_detail(response, status), confirmed)
+            detail = self._error_detail(response, status)
+            if confirmed == 0 and ms._write_rejected(status, response):
+                return UserDeletionResult(UserDeletionOutcome.NOT_STARTED, f"Deletion of user {user_id} failed: {detail}")
+            return self._user_unconfirmed(user_id, detail, confirmed)
         count = response.get("data") if isinstance(response, dict) else None
         if type(count) is not int or count != 1:
             return self._user_unconfirmed(user_id, "Invalid LiteLLM user-deletion acknowledgement", confirmed)
@@ -127,9 +130,7 @@ class UserDeletionService:
 
     @staticmethod
     def _error_detail(response: object, status: int) -> str:
-        if isinstance(response, dict):
-            return str(response.get("error") or response.get("message") or f"HTTP {status}")
-        return f"HTTP {status}"
+        return ms.litellm_error_detail(response, status)
 
     @staticmethod
     def _key_unconfirmed(user_id: str, detail: str, confirmed: int = 0) -> UserDeletionResult:
