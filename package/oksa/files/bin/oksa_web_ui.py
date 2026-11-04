@@ -10,6 +10,7 @@ import time
 from nicegui import run, ui
 
 from oksa_client import OksaClient, OksaClientError
+from oksa_control import Contract
 
 
 class OksaWebUI:
@@ -91,6 +92,7 @@ class _OksaPage:
         self._build_key_dialog()
         self._build_secret_dialog()
         self.tabs.on_value_change(self._tab_changed)
+        self.client.on_connect(self._poll)
         self.client.on_disconnect(self._disconnect)
         self.client.on_delete(self._clear_secret)
         ui.timer(1, self._render_freshness)
@@ -528,10 +530,16 @@ class _OksaPage:
     def _jobs_fresh(self) -> bool:
         return not self.jobs_failed and time.monotonic() - self.jobs_received <= 10
 
+    def _active_model_jobs(self) -> bool:
+        return any(
+            job["operation"] in Contract.MODEL_MUTATIONS and job["state"] in ("queued", "running")
+            for job in self.jobs.values()
+        )
+
     def _model_available(self) -> bool:
         return (self._jobs_fresh() and not self.model_job and not self.model_uncertain
                 and not self.busy.intersection({"model", "download"})
-                and not any(job["state"] in ("queued", "running") for job in self.jobs.values()))
+                and not self._active_model_jobs())
 
     def _model_state(self, model: dict) -> str:
         status = self.status or {}
@@ -602,7 +610,7 @@ class _OksaPage:
             self.models_table.selected = selection
             self.models_table.update()
         waiting = (self.model_job is not None or bool(self.busy.intersection({"model", "download"}))
-                   or any(job["state"] in ("queued", "running") for job in self.jobs.values()))
+                   or self._active_model_jobs())
         self.model_spinner.set_visibility(waiting and self._jobs_fresh())
         self.models_empty.set_text("Working…" if waiting else "Loading…" if not self.models_verified else "No installed models")
         self.models_empty.set_visibility(not self.models)
@@ -620,7 +628,7 @@ class _OksaPage:
                 return
             if (self._jobs_fresh() and self.models_verified and not self.status_stale and not self.model_job
                     and not self.busy.intersection({"model", "download"})
-                    and not any(job["state"] in ("queued", "running") for job in self.jobs.values())):
+                    and not self._active_model_jobs()):
                 self.model_uncertain = False
             self._model_selection()
         finally:
@@ -642,9 +650,7 @@ class _OksaPage:
         self._model_selection()
 
     async def _refresh_models(self) -> None:
-        if (self.locks["models"].locked() or "model" in self.busy
-                or any(job["state"] in ("queued", "running") for job in self.jobs.values())
-                or not self._begin("model-refresh", [])):
+        if self.locks["models"].locked() or "model" in self.busy or not self._begin("model-refresh", []):
             return
         generation = self.generations["models"]
         try:
@@ -665,7 +671,8 @@ class _OksaPage:
                 self.models_verified = False
                 self.models_error.set_text("Automatic model updates unavailable: missing model revision.")
                 return
-            if (revision != self.models_revision or not self.models_verified) and await self._load_models():
+            mutating = bool(self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
+            if (revision != self.models_revision or (not mutating and not self.models_verified)) and await self._load_models():
                 self.models_revision = revision
         finally:
             self._end("model-refresh", [])
@@ -674,11 +681,6 @@ class _OksaPage:
 
     async def _load_models(self) -> bool:
         if self.client.is_deleted:
-            return False
-        if (self.model_job or self.busy.intersection({"model", "download"})
-                or any(job["state"] in ("queued", "running") for job in self.jobs.values())):
-            self.models_verified = False
-            self._render_models()
             return False
         reply = await self._load("models", "ListModels")
         if reply is None:
@@ -695,7 +697,7 @@ class _OksaPage:
             return False
         self.models_error.set_text("")
         self.models = models
-        self.models_verified = True
+        self.models_verified = not (self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
         self.serving_enabled = reply[1].get("serving_enabled")
         self.models_table.set_visibility(bool(models))
         self.models_empty.set_text("No installed models. Use Find to get started.")
@@ -784,7 +786,7 @@ class _OksaPage:
                          if path in latest.values() or path == self.model_job or job["state"] in ("queued", "running")
                          or (job["operation"] == "DownloadModel" and path in self.jobs_seen)}
             self.job_details.intersection_update(self.jobs)
-            if any(job["state"] in ("queued", "running") for job in self.jobs.values()):
+            if self._active_model_jobs():
                 self.models_verified = False
             if self.jobs != previous or self.job_details != previous_details or not self.activity_table.rows:
                 self._render_activity()
@@ -927,7 +929,7 @@ class _OksaPage:
                            "remove": f"Delete {name}? Serving will be stopped before files are deleted."}[action]
                 if not await self._confirm(message, {"stop": "Stop", "remove": "Delete"}[action], dangerous=True):
                     return
-            if not self._jobs_fresh() or any(job["state"] in ("queued", "running") for job in self.jobs.values()):
+            if not self._jobs_fresh() or self._active_model_jobs():
                 self._warn("model-operation", "Activity changed. Checking status automatically before another operation.")
                 return
             for key in ("models", "status", "pull", "calibration"):
@@ -1127,7 +1129,7 @@ class _OksaPage:
                     or inspection["generation"] != self.inspection_generation
                     or inspection["inputs"] != self._download_inputs()):
                 return
-            if not self._jobs_fresh() or any(job["state"] in ("queued", "running") for job in self.jobs.values()):
+            if not self._jobs_fresh() or self._active_model_jobs():
                 self.download_error.set_text("Activity changed. Checking status automatically before downloading.")
                 return
             self.inspection = None

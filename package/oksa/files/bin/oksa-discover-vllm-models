@@ -3,6 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 from contextlib import nullcontext
+import fcntl
 import hashlib
 import json
 import os
@@ -229,7 +230,9 @@ def main() -> None:
 
     model_state_dir.mkdir(parents=True, exist_ok=True)
 
-    with ms.preseed_publish_lock(models_dir) if models_dir.parent.is_dir() else nullcontext():
+    publish_lock = ms.preseed_publish_lock(models_dir) if models_dir.parent.is_dir() else nullcontext()
+    with publish_lock, (state_dir / "discover.lock").open("a") as discover_lock:
+        fcntl.flock(discover_lock, fcntl.LOCK_EX)
         models_list_lines = []
         models_json_items = []
         created_envs: set[Path] = set()

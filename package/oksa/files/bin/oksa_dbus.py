@@ -187,7 +187,7 @@ class Invocation:
 
 
 class OksaDBusService:
-    READ_LIMIT = 2
+    READ_LIMIT = 8
     READ_TIMEOUT = 90
     JOB_TIMEOUT = 6 * 60 * 60
     JOB_XML = f'''<node><interface name="{Contract.JOB}">
@@ -534,10 +534,11 @@ class OksaDBusService:
                 invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict({"ok": True, "jobs": snapshots}),)))
             else:
                 mutation = Contract.METHODS[method][2]
-                exclusive = Contract.MUTATIONS | {"ListModels"}
-                if method in exclusive and any(worker.operation in exclusive for worker in self.workers):
-                    raise OksaError("Busy", "A conflicting operation is already running")
-                if not mutation and sum(worker.job is None for worker in self.workers) >= self.READ_LIMIT:
+                if method in Contract.MODEL_MUTATIONS and any(worker.operation in Contract.MODEL_MUTATIONS for worker in self.workers):
+                    raise OksaError("Busy", "Another model operation is already running")
+                if method in Contract.USER_MUTATIONS and any(worker.operation in Contract.USER_MUTATIONS for worker in self.workers):
+                    raise OksaError("Busy", "Another user or API-key operation is already running")
+                if method not in Contract.MUTATIONS and sum(worker.operation not in Contract.MUTATIONS for worker in self.workers) >= self.READ_LIMIT:
                     raise OksaError("Busy", "All read workers are busy; retry later")
                 self.launch(method, args, sender, invocation, mutation)
         except OksaError as error:
@@ -574,6 +575,8 @@ class OksaDBusService:
             job = Job(Contract.PATH + "/jobs/" + uuid.uuid4().hex, method, time.time(), subscribers={sender})
             if method == "DownloadModel":
                 job.repo_id, job.model_name = args[:2]
+            elif method in ("StartModel", "RemoveModel"):
+                job.model_name = args[0]
             self.store.save(job)
             self.store.jobs[job.path] = job
             self.register_job(job)
@@ -600,7 +603,7 @@ class OksaDBusService:
         finally:
             child.close()
         worker = Invocation(process, parent, time.monotonic(), None if mutation else invocation, method, job)
-        if method in Contract.MUTATIONS:
+        if method in Contract.MODEL_MUTATIONS:
             self.monitoring.invalidate()
         self.workers.append(worker)
         if mutation:
@@ -642,7 +645,7 @@ class OksaDBusService:
         else:
             worker.invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict(result),)))
         self.dispose(worker)
-        if worker.operation in Contract.MUTATIONS:
+        if worker.operation in Contract.MODEL_MUTATIONS:
             self.monitoring.invalidate()
     def dispose(self, worker: Invocation) -> None:
         process = worker.process

@@ -55,8 +55,9 @@ class Contract:
         "ListJobs": ((), "a{sv}", False),
     }
     OPTIONAL_STRINGS = {"email", "duration", "user", "commit", "revision", "query"}
-    MUTATIONS = frozenset({"DownloadModel", "StartModel", "StopServing", "RemoveModel", "CreateUser",
-                           "DeleteUser", "CreateKey", "RevokeKey", "Calibrate"})
+    MODEL_MUTATIONS = frozenset({"DownloadModel", "StartModel", "StopServing", "RemoveModel", "Calibrate"})
+    USER_MUTATIONS = frozenset({"CreateUser", "DeleteUser", "CreateKey", "RevokeKey"})
+    MUTATIONS = MODEL_MUTATIONS | USER_MUTATIONS
 
     @classmethod
     def validate(cls, method: str, args: tuple) -> None:
