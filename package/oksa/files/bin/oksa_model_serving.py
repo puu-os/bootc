@@ -1387,7 +1387,7 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
     return True, f"Key {key_or_alias} revoked"
 
 
-def sync_litellm_models(
+def _sync_litellm_models_once(
     active_model: str | None,
     state_dir: Path = STATE_DIR,
     master_key: str | None = None,
@@ -1468,6 +1468,19 @@ def sync_litellm_models(
         return len(managed) == 0
     return len(managed) == 1 and _matches(managed[0])
 
+
+def sync_litellm_models(
+    active_model: str | None,
+    state_dir: Path = STATE_DIR,
+    master_key: str | None = None,
+) -> bool:
+    deadline = time.monotonic() + 30
+    while True:
+        if _sync_litellm_models_once(active_model, state_dir, master_key):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2)
 
 def collect_gpu_telemetry() -> list[dict] | None:
     from oksa_accelerator import AcceleratorManager
