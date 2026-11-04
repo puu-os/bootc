@@ -87,10 +87,18 @@ class WorkloadPlanner:
             except (FileNotFoundError, ValueError):
                 pass
             if needs_calibration:
-                subprocess.run(
-                    [str(Path(__file__).with_name("oksa-calibrate")), "--model", model.spec.name],
-                    check=True,
-                )
+                try:
+                    subprocess.run(
+                        [str(Path(__file__).with_name("oksa-calibrate")), "--model", model.spec.name],
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as error:
+                    try:
+                        record = read_record(STATUS_PATH)
+                    except (OSError, ValueError):
+                        record = {}
+                    detail = record.get("message") if record.get("state") == "error" else ""
+                    raise RuntimeError(f"Calibration failed for {model.spec.name}: {detail or f'exit {error.returncode}'}") from error
                 state = self.load()
                 if self.disabled or self.selected != selected:
                     return

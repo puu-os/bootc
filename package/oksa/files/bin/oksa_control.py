@@ -281,12 +281,17 @@ class OksaControl:
         return {"ok": True, "metadata": meta, "fits": fits, "reason": reason}
 
     def run_helper(self, command: list[str], env: dict | None = None) -> None:
+        last_line = ""
         with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
             for line in iter(lambda: process.stdout.readline(4096), ""):
-                self.progress(line.strip())
+                text = line.strip()
+                if text:
+                    last_line = text
+                self.progress(text)
             code = process.wait()
         if code:
-            raise OksaError("OperationFailed", f"{Path(command[0]).name} exited with code {code}")
+            detail = f": {last_line}" if last_line else ""
+            raise OksaError("OperationFailed", f"{Path(command[0]).name} failed (exit {code}){detail}")
 
     def download_model(self, repo: str, name: str, commit: str, force: bool) -> dict:
         effective_name = ms.normalize_storage_id(repo, name or None)
