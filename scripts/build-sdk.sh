@@ -24,7 +24,7 @@ exec 9>"$sdk_lock"
 flock 9
 
 install_stamp="${sdk_install_root}/.stamp/${arch}/install"
-if [[ -e "$install_stamp" ]]; then
+if [[ -e "$install_stamp" && -d "${sdk_install_root}/${arch}/${arch}-puu-linux-gnu_sdk-buildroot" ]]; then
   exit 0
 fi
 
