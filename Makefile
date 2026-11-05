@@ -69,16 +69,9 @@ $(error PUU_COSIGN_KEYS is required; set it empty for an unsigned build)
 endif
 endif
 
-define buildroot
-  $(MAKE) -j$(BUILDROOT_JOBS) -l$(BUILDROOT_JOBS) -C "$(BUILDROOT_SRC_DIR)" O="$(BOARD_DIR)" \
-    BR2_EXTERNAL="$(CURDIR)" \
-    BR2_CCACHE_DIR="$(CCACHE_DIR)" BR2_DL_DIR="$(BUILDROOT_DL_DIR)" \
-    SDK_INSTALL_DIR="$(SDK_INSTALL_DIR)" \
-    PUU_VERSION="$(PUU_VERSION)" \
-    PUU_VARIANT="$(PUU_VARIANT)" \
-    SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
-    $(1)
-endef
+export BOARD BOARD_DIR BUILDROOT_SRC_DIR BUILDROOT_JOBS BUILDROOT_DL_DIR
+export BUILDROOT_PATCH_LOCK BUILDROOT_TARBALL BUILDROOT_HASH BUILDROOT_PATCH_STAMP BUILDROOT_PATCH
+export SDK_INSTALL_DIR SDK_INSTALL_STAMP CCACHE_DIR PUU_VERSION PUU_VARIANT SOURCE_DATE_EPOCH
 
 .PHONY: default help list download sdk clean-sdk configure build refresh-flatpaks burn clean lint release publish
 
@@ -106,48 +99,11 @@ $(SDK_INSTALL_ROOT)/.stamp/%/install: $(BUILDROOT_TARBALL) sdk/%_defconfig
 	./scripts/build-sdk.sh "$*" "sdk/$*_defconfig" "$(BUILDROOT_TARBALL)" "$(BUILDROOT_HASH)" \
 		"$(SDK_BUILD_DIR)" "$(SDK_INSTALL_ROOT)" "$(SDK_LOCK)" "$(BUILDROOT_DL_DIR)" "$(SOURCE_DATE_EPOCH)"
 
-$(BUILDROOT_PATCH_STAMP): $(BUILDROOT_TARBALL) $(BUILDROOT_PATCH)
-	./scripts/setup-buildroot.sh "$(BUILDROOT_PATCH_LOCK)" "$(BUILDROOT_TARBALL)" "$(BUILDROOT_HASH)" \
-		"$(BOARD_DIR)" "$(BUILDROOT_SRC_DIR)" "$@" "$(BUILDROOT_PATCH)"
+configure: $(BUILDROOT_TARBALL) $(SDK_INSTALL_STAMP) ## Force <BOARD> configuration
+	./scripts/build-board.sh configure
 
-configure: $(SDK_INSTALL_STAMP) $(BUILDROOT_PATCH_STAMP) ## Run <BOARD>_defconfig
-	$(call buildroot,$(BOARD)_defconfig)
-
-build: configure ## Build <BOARD>
-	linux_version=$$(awk -F '"' '/^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="/ { print $$2; exit }' "configs/$(BOARD)_defconfig")
-	[[ -n "$$linux_version" ]] || { echo 'missing kernel version in board defconfig' >&2; exit 1; }
-	linux_dir="$(BOARD_DIR)/build/linux-$$linux_version"
-	linux_changed=false
-	linux_built=
-	if [[ ! -d "$$linux_dir" || ! -f "$$linux_dir/.stamp_configured" || ! -d "$(BOARD_DIR)/per-package/linux" || "linux/$(patsubst puu_%,%,$(BOARD))_efi_defconfig" -nt "$$linux_dir/.stamp_configured" ]]; then
-		linux_changed=true
-		if [[ -d "$$linux_dir" || -d "$(BOARD_DIR)/per-package/linux" ]]; then
-			$(call buildroot,linux-dirclean)
-		fi
-	elif [[ ! -f "$$linux_dir/.stamp_built" ]]; then
-		linux_changed=true
-	else
-		linux_built="$$linux_dir/.stamp_built"
-	fi
-	modules_changed=$$linux_changed
-	nvidia_count=0
-	for package in linux-tools nvidia-driver; do
-		if [[ "$$package" == linux-tools ]]; then
-			package_dir="$(BOARD_DIR)/build/linux-tools"
-		else
-			package_dir=$$(find "$(BOARD_DIR)/build" -mindepth 1 -maxdepth 1 -type d -name 'nvidia-driver-[0-9]*' -print -quit)
-			nvidia_count=$$(find "$(BOARD_DIR)/build" -mindepth 1 -maxdepth 1 -type d -name 'nvidia-driver-[0-9]*' -printf x | wc -c)
-		fi
-		package_cache="$(BOARD_DIR)/per-package/$$package"
-		if [[ ( -d "$$package_dir" || -d "$$package_cache" ) && ( "$$linux_changed" == true || ! -d "$$package_cache" || "$$linux_built" -nt "$$package_dir/.stamp_configured" || ( "$$package" == nvidia-driver && "$$nvidia_count" -gt 1 ) ) ]]; then
-			$(call buildroot,$${package}-dirclean)
-			modules_changed=true
-		fi
-	done
-	if [[ "$$modules_changed" == true ]]; then
-		rm -rf -- "$(BOARD_DIR)/target/usr/lib/modules"
-	fi
-	$(call buildroot,BR2_CCACHE=y)
+build: $(BUILDROOT_TARBALL) $(SDK_INSTALL_STAMP) ## Incrementally build <BOARD> (FORCE=1 to run again)
+	./scripts/build-board.sh build
 
 refresh-flatpaks: ## Refresh the pinned Flatpak snapshot for <BOARD>
 	PUU_ARCH="$(PUU_ARCH)" BR2_EXTERNAL_PUU_PATH="$(CURDIR)" ./scripts/refresh-flatpaks.sh
