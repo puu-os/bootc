@@ -48,14 +48,16 @@ SDK_ARCH := $(shell awk -F= '/^BR2_(x86_64|aarch64)=y$$/ { sub(/^BR2_/, "", $$1)
 ifeq ($(SDK_ARCH),)
 $(error configs/$(BOARD)_defconfig must select BR2_x86_64 or BR2_aarch64)
 endif
+PUU_ARCH := $(if $(filter x86_64,$(SDK_ARCH)),amd64,arm64)
 else
 SDK_ARCH :=
+PUU_ARCH :=
 endif
 
 SDK_INSTALL_DIR       := $(SDK_INSTALL_ROOT)/$(SDK_ARCH)/$(SDK_ARCH)-puu-linux-gnu_sdk-buildroot
 SDK_INSTALL_STAMP     := $(SDK_INSTALL_ROOT)/.stamp/$(SDK_ARCH)/install
 
-ifneq ($(filter configure build burn,$(MAKECMDGOALS)),)
+ifneq ($(filter configure build refresh-flatpaks burn,$(MAKECMDGOALS)),)
 ifndef BOARD
 $(error BOARD is required, e.g.: make build BOARD=puu_amd64)
 endif
@@ -78,7 +80,7 @@ define buildroot
     $(1)
 endef
 
-.PHONY: default help list download sdk clean-sdk configure build burn clean lint release publish
+.PHONY: default help list download sdk clean-sdk configure build refresh-flatpaks burn clean lint release publish
 
 default: help
 
@@ -146,6 +148,9 @@ build: configure ## Build <BOARD>
 		rm -rf -- "$(BOARD_DIR)/target/usr/lib/modules"
 	fi
 	$(call buildroot,BR2_CCACHE=y)
+
+refresh-flatpaks: ## Refresh the pinned Flatpak snapshot for <BOARD>
+	PUU_ARCH="$(PUU_ARCH)" BR2_EXTERNAL_PUU_PATH="$(CURDIR)" ./scripts/refresh-flatpaks.sh
 
 burn: ## Write <BOARD>.iso to DEVICE
 	./scripts/burn.sh "$(BOARD_DIR)/images/$(BOARD).iso" "$(DEVICE)"

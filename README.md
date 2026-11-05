@@ -69,10 +69,18 @@ sudo /usr/libexec/puu/oksa-plan-vllm-workloads --require-reconcile
 
 ### Building
 
+    make BOARD=puu_amd64 refresh-flatpaks
     make BOARD=puu_amd64 build
+    make BOARD=puu_arm64 refresh-flatpaks
     make BOARD=puu_arm64 build
     make BOARD=puu_amd64 burn DEVICE=/dev/sdX
     make lint
+
+Flatpak preseeding uses an immutable, per-architecture snapshot. Only
+`refresh-flatpaks` contacts the remote and resolves new app/runtime commits;
+ordinary builds validate and copy the selected snapshot. Refresh before the
+first build and after changing `overlay/usr/share/puu/flatpaks.list` or its remote
+configuration. To omit preseeding, set `PUU_FLATPAK_PRESEED=0`.
 
 The primary installer artifact is `build/<board>/images/<board>.iso`. The same
 hybrid ISO can be burned to optical media, attached as a virtual CD/DVD (including
