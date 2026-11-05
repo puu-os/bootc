@@ -82,6 +82,10 @@ ordinary builds validate and copy the selected snapshot. Refresh before the
 first build and after changing `overlay/usr/share/puu/flatpaks.list` or its remote
 configuration. To omit preseeding, set `PUU_FLATPAK_PRESEED=0`.
 
+Image assembly preserves Buildroot's base `rootfs.squashfs` and OCI archive.
+The installer-specific filesystem is `rootfs-live.squashfs`. Live-rootfs,
+signing and ISO stages keep independent successful-output records.
+
 The primary installer artifact is `build/<board>/images/<board>.iso`. The same
 hybrid ISO can be burned to optical media, attached as a virtual CD/DVD (including
 PiKVM), or written directly to a USB stick with `make burn`. UEFI boot is required.

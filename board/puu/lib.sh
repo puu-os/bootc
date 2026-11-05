@@ -36,6 +36,20 @@ write_cosign_public_key() {
   chmod 0644 "${output}"
 }
 
+oci_archive_digest() {
+  python3 -c '
+import json, re, sys, tarfile
+with tarfile.open(sys.argv[1]) as archive:
+    entry = archive.extractfile("index.json")
+    if entry is None:
+        sys.exit("missing index.json in " + sys.argv[1])
+    digest = json.load(entry)["manifests"][0]["digest"]
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+    sys.exit("invalid OCI digest in " + sys.argv[1])
+print(digest)
+' "$1"
+}
+
 init_puu_arch() {
   local arch="${1:-${PUU_ARCH:-}}"
   case "${arch}" in
