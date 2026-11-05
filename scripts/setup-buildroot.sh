@@ -21,7 +21,7 @@ mkdir -p "$(dirname "$lock_file")"
 exec 9>"$lock_file"
 flock 9
 
-if [[ -e "$stamp_file" ]]; then
+if [[ -e "$stamp_file" && -f "$src_dir/Makefile" ]]; then
   exit 0
 fi
 
