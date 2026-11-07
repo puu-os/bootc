@@ -32,6 +32,7 @@ flatpak_snapshot_init() {
   local project manifest_refs
   project="${BR2_EXTERNAL_PUU_PATH:-${BASH_SOURCE%/*}/..}"
   project=$(cd "${project}" && pwd)
+  snapshot_project="${project}"
   snapshot_state_tool="${project}/scripts/state.py"
   snapshot_source="${PUU_FLATPAK_SOURCE_DIR:-${project}/overlay}"
   [ -d "${snapshot_source}" ] || flatpak_snapshot_error "missing Flatpak source: ${snapshot_source}"
@@ -98,4 +99,17 @@ flatpak_snapshot_select() {
   ); then
     flatpak_snapshot_error 'Flatpak snapshot integrity check failed'
   fi
+}
+
+flatpak_snapshot_ensure() {
+  if [ ! -e "${snapshot_root}/current" ] && [ ! -L "${snapshot_root}/current" ]; then
+    if [ -n "${FAKEROOTKEY:-}" ]; then
+      flatpak_snapshot_error "missing Flatpak snapshot for ${PUU_TARGET_ARCH}"
+    fi
+    PUU_ARCH="${PUU_ARCH}" BR2_EXTERNAL_PUU_PATH="${snapshot_project}" \
+      PUU_FLATPAK_SOURCE_DIR="${snapshot_source}" \
+      PUU_FLATPAK_CACHE_DIR="${cache_root}" \
+      "${snapshot_project}/scripts/flatpak-update.sh" >&2
+  fi
+  flatpak_snapshot_select
 }

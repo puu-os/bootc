@@ -26,7 +26,7 @@ if [ "${#refs[@]}" -eq 0 ]; then
   exit 0
 fi
 
-flatpak_snapshot_select
+flatpak_snapshot_ensure
 if [ "${1:-}" = --key ]; then
   printf '%s\n' "${snapshot_generation_key}"
   exit 0

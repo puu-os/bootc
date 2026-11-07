@@ -32,17 +32,21 @@ flatpak remote-add --user --if-not-exists flathub "${remote}"
 flatpak install --user --noninteractive --assumeyes --or-update \
   --arch="${PUU_TARGET_ARCH}" flathub "${refs[@]}"
 
-installed_refs=$(flatpak list --user --all --columns=ref)
-[ -n "${installed_refs}" ] || { echo 'Flatpak refresh installed no refs' >&2; exit 1; }
-while IFS= read -r ref; do
-  [[ "${ref}" =~ ^(app|runtime)/[^/[:space:]]+/${PUU_TARGET_ARCH}/[^/[:space:]]+$ ]] \
-    || { echo "invalid installed Flatpak ref: ${ref}" >&2; exit 1; }
-  commit=$(flatpak info --user --show-commit "${ref}")
-  [[ "${commit}" =~ ^[0-9a-f]{64}$ ]] \
-    || { echo "invalid Flatpak commit for ${ref}: ${commit}" >&2; exit 1; }
-  printf '%s\t%s\n' "${ref}" "${commit}"
-done <<< "${installed_refs}" > "${staging}/refs"
-LC_ALL=C sort -o "${staging}/refs" "${staging}/refs"
+: > "${staging}/refs"
+for kind in app runtime; do
+  while IFS= read -r partial_ref; do
+    [ -n "${partial_ref}" ] || continue
+    ref="${kind}/${partial_ref}"
+    [[ "${ref}" =~ ^(app|runtime)/[^/[:space:]]+/${PUU_TARGET_ARCH}/[^/[:space:]]+$ ]] \
+      || { echo "invalid installed Flatpak ref: ${ref}" >&2; exit 1; }
+    commit=$(flatpak info --user --show-commit "${ref}")
+    [[ "${commit}" =~ ^[0-9a-f]{64}$ ]] \
+      || { echo "invalid Flatpak commit for ${ref}: ${commit}" >&2; exit 1; }
+    printf '%s\t%s\n' "${ref}" "${commit}" >> "${staging}/refs"
+  done < <(flatpak list --user "--${kind}" --all --columns=ref:f)
+done
+[ -s "${staging}/refs" ] || { echo 'Flatpak refresh installed no refs' >&2; exit 1; }
+LC_ALL=C sort -u -o "${staging}/refs" "${staging}/refs"
 [ -d "${staging}/flatpak/repo" ] || { echo 'Flatpak refresh created no repository' >&2; exit 1; }
 [ "$(flatpak_snapshot_input_key "${snapshot_source}")" = "${snapshot_input_key}" ] \
   || flatpak_snapshot_error 'Flatpak source configuration changed during refresh'
