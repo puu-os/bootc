@@ -79,38 +79,6 @@ sudo /usr/libexec/puu/oksa-plan-vllm-workloads --require-reconcile
 Set `PUU_COSIGN_KEYS` to a colon-separated list of signing keys for signed builds;
 set it empty explicitly for unsigned builds.
 
-`build` reapplies the board configuration only when its inputs change. Once a
-build succeeds, repeating it with unchanged sources, options, package state and
-outputs skips Buildroot and image generation. Source content, modes, symlink
-names and deletions are tracked, including uncommitted and untracked files under
-the source directories. Generated `dist` and Python cache directories are ignored.
-Output identities include filesystem metadata (including ctime), avoiding a
-complete reread of the installed trees on every build.
-
-Use `make BOARD=puu_amd64 build PUU_COSIGN_KEYS= FORCE=1` to run Buildroot even
-when the build is current, and `make BOARD=puu_amd64 configure` to force defconfig.
-Manual package operations invalidate the successful-build record. Use `FORCE=1`
-after editing extracted Buildroot sources directly; prefer editing this external
-tree instead. Existing package stamps are adopted on the first tracked build.
-Later package recipe/patch changes require `make clean` because Buildroot does
-not automatically rebuild reverse dependencies. Changes under `package/oksa/files`
-and `package/puu-firstboot/files` clean and rebuild those local packages automatically.
-
-Flatpak preseeding uses an immutable, per-architecture snapshot. Only
-`refresh-flatpaks` contacts the remote and resolves new app/runtime commits;
-ordinary builds validate and copy the selected snapshot. Refresh before the
-first build and after changing `overlay/usr/share/puu/flatpaks.list` or its remote
-configuration. To omit preseeding, set `PUU_FLATPAK_PRESEED=0`.
-
-Image assembly preserves Buildroot's base `rootfs.squashfs` and OCI archive.
-The installer-specific filesystem is `rootfs-live.squashfs`. Live-rootfs,
-signing and ISO stages keep independent successful-output records.
-
-The primary installer artifact is `build/<board>/images/<board>.iso`. The same
-hybrid ISO can be burned to optical media, attached as a virtual CD/DVD (including
-PiKVM), or written directly to a USB stick with `make burn`. UEFI boot is required.
-Do not extract the ISO or modify its partition table after writing it.
-
 ### Releasing
 
     make release VERSION=N
