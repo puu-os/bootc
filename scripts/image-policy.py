@@ -21,7 +21,7 @@ def generate_policy(repo: str, keys: list[str]) -> dict:
         }]
         transports = {
             "oci-archive": {
-                "/run/puu-installer/payload/image.tar": [
+                "/run/puu-install/payload/image.tar": [
                     {"type": "insecureAcceptAnything"},
                 ],
             },

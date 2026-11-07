@@ -56,7 +56,7 @@ fi
 [[ ${boot_uuid,,} == "${ids[boot]}" ]] || fail "UKI was not loaded from its expected boot partition"
 
 udevadm settle
-payload=/run/puu-installer/payload
+payload=/run/puu-install/payload
 livedev=$(readlink -f /run/initramfs/livedev)
 [[ -b ${livedev} ]] || fail "dracut selected no live block device"
 type=$(lsblk --nodeps --noheadings --output TYPE "${livedev}")

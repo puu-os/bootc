@@ -116,14 +116,14 @@ mkdir -p "${work}/root"
   install -D -m 0644 "$machine_src" "$stage/usr/share/puu/machine.yaml"
   printf "\nimage:\n  expectedDigest: %s\n  sourceLabel: null\n" "$digest" >> "$stage/usr/share/puu/machine.yaml"
   install -d -m 0755 "$stage/etc/sudoers.d"
-  printf "PUU_INSTALLER_CONFIG=/usr/share/puu/machine.yaml\n" > "$stage/etc/environment"
-  echo "Defaults env_file=/etc/environment" > "$stage/etc/sudoers.d/30-puu-installer"
+  printf "PUU_INSTALL_CONFIG=/usr/share/puu/machine.yaml\n" > "$stage/etc/environment"
+  echo "Defaults env_file=/etc/environment" > "$stage/etc/sudoers.d/30-puu-install"
   chmod 0644 "$stage/etc/environment"
-  chmod 0440 "$stage/etc/sudoers.d/30-puu-installer"
+  chmod 0440 "$stage/etc/sudoers.d/30-puu-install"
   touch -d "@${source_date_epoch}" \
     "$stage/usr/share/puu/machine.yaml" \
     "$stage/etc/environment" \
-    "$stage/etc/sudoers.d/30-puu-installer"
+    "$stage/etc/sudoers.d/30-puu-install"
   SOURCE_DATE_EPOCH="$source_date_epoch" "$mksquashfs" "$stage" "$output" -noappend -b 128K -comp zstd
 ' _ "${HOST_DIR}/bin/unsquashfs" "${HOST_DIR}/bin/mksquashfs" \
   "${rootfs}" "${work}/root" "${work}/rootfs.squashfs" "${oci_digest}" \

@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
-# Default puu-installer configuration.
+# Default puu-install configuration.
+
+branding:
+  name: Puu
+
+partitions:
+  efi: 2G
+
+labels:
+  root: puu-root
+  swap: puu-swap
+  home: puu-home
 
 identity:
   keymap: us
@@ -8,13 +19,43 @@ identity:
   timezone: UTC
   hostname: puu
 
-partitions:
-  efi: 2G
+homed:
+  groups:
+    - adm
+    - audio
+    - cdrom
+    - dip
+    - input
+    - lpadmin
+    - netdev
+    - plugdev
+    - render
+    - sudo
+    - video
+    - wheel
+    - realtime
+    - uucp
+  identityPath: /var/lib/puu/identity.json
+  sessionLauncher: gnome
 
-flatpak:
-  manifestPath: /usr/share/puu/flatpaks.list
-  syncHelper: /usr/libexec/puu/puu-flatpak-sync
-  liveStore: /var/lib/flatpak
+seeds:
+  - name: flatpak
+    target: /var/lib/flatpak
+    liveStore: /var/lib/flatpak
+    syncHelper: /usr/libexec/puu/puu-flatpak-sync
+    manifestPath: /usr/share/puu/flatpaks.list
+  - name: models
+    target: /var/lib/vllm/models
+    liveStore: /var/lib/vllm/models
+
+k3s:
+  role: server
+
+kernelArgs:
+  - vt.global_cursor_default=0
+  - console=tty0
+  - threadirqs
+  - preempt=full
 
 serialConsole:
   x86_64: console=ttyS0,115200
