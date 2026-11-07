@@ -57,7 +57,7 @@ endif
 SDK_INSTALL_DIR       := $(SDK_INSTALL_ROOT)/$(SDK_ARCH)/$(SDK_ARCH)-puu-linux-gnu_sdk-buildroot
 SDK_INSTALL_STAMP     := $(SDK_INSTALL_ROOT)/.stamp/$(SDK_ARCH)/install
 
-ifneq ($(filter configure build refresh-flatpaks burn,$(MAKECMDGOALS)),)
+ifneq ($(filter configure build flatpak-update burn,$(MAKECMDGOALS)),)
 ifndef BOARD
 $(error BOARD is required, e.g.: make build BOARD=puu_amd64)
 endif
@@ -73,7 +73,7 @@ export BOARD BOARD_DIR BUILDROOT_SRC_DIR BUILDROOT_JOBS BUILDROOT_DL_DIR
 export BUILDROOT_PATCH_LOCK BUILDROOT_TARBALL BUILDROOT_HASH BUILDROOT_PATCH_STAMP BUILDROOT_PATCH
 export SDK_INSTALL_DIR SDK_INSTALL_STAMP CCACHE_DIR PUU_VERSION PUU_VARIANT SOURCE_DATE_EPOCH
 
-.PHONY: default help list download sdk clean-sdk configure build refresh-flatpaks burn clean lint release publish
+.PHONY: default help list download sdk clean-sdk configure build flatpak-update burn clean lint release publish
 
 default: help
 
@@ -96,17 +96,17 @@ sdk: $(addprefix sdk-,$(SDK_ARCHS)) ## Build and cache SDK toolchains
 	rm -rf "$(SDK_BUILD_DIR)"
 
 $(SDK_INSTALL_ROOT)/.stamp/%/install: $(BUILDROOT_TARBALL) sdk/%_defconfig
-	./scripts/build-sdk.sh "$*" "sdk/$*_defconfig" "$(BUILDROOT_TARBALL)" "$(BUILDROOT_HASH)" \
+	./scripts/buildroot-sdk.sh "$*" "sdk/$*_defconfig" "$(BUILDROOT_TARBALL)" "$(BUILDROOT_HASH)" \
 		"$(SDK_BUILD_DIR)" "$(SDK_INSTALL_ROOT)" "$(SDK_LOCK)" "$(BUILDROOT_DL_DIR)" "$(SOURCE_DATE_EPOCH)"
 
 configure: $(BUILDROOT_TARBALL) $(SDK_INSTALL_STAMP) ## Force <BOARD> configuration
-	./scripts/build-board.sh configure
+	./scripts/buildroot-board.sh configure
 
 build: $(BUILDROOT_TARBALL) $(SDK_INSTALL_STAMP) ## Incrementally build <BOARD> (FORCE=1 to run again)
-	./scripts/build-board.sh build
+	./scripts/buildroot-board.sh build
 
-refresh-flatpaks: ## Refresh the pinned Flatpak snapshot for <BOARD>
-	PUU_ARCH="$(PUU_ARCH)" BR2_EXTERNAL_PUU_PATH="$(CURDIR)" ./scripts/refresh-flatpaks.sh
+flatpak-update: ## Update the pinned Flatpak snapshot for <BOARD>
+	PUU_ARCH="$(PUU_ARCH)" BR2_EXTERNAL_PUU_PATH="$(CURDIR)" ./scripts/flatpak-update.sh
 
 burn: ## Write <BOARD>.iso to DEVICE
 	./scripts/burn.sh "$(BOARD_DIR)/images/$(BOARD).iso" "$(DEVICE)"
@@ -121,7 +121,7 @@ lint: ## Run linters
 	./scripts/lint.sh
 
 release: ## Tag a signed release (VERSION=N)
-	./scripts/release.sh "$(VERSION)"
+	./scripts/release-tag.sh "$(VERSION)"
 
 publish: ## Publish a GitLab release from a tag
-	./scripts/publish.sh "$(VERSION)"
+	./scripts/release-publish.sh "$(VERSION)"

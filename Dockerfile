@@ -40,8 +40,8 @@ RUN apt-get -o APT::Retries=3 update \
 ENV HOME=/cache \
     LC_ALL=en_US.UTF-8
 
-COPY --chmod=0755 scripts/build-helper.sh /usr/local/bin/build-helper
+COPY --chmod=0755 scripts/container-entrypoint.sh /usr/local/bin/container-entrypoint
 
 WORKDIR /workspace
 
-CMD ["/usr/local/bin/build-helper"]
+CMD ["/usr/local/bin/container-entrypoint"]

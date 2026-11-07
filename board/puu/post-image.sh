@@ -14,8 +14,8 @@ export PUU_ARCH="${2:?arch argument must be set (amd64 or arm64)}"
 : "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set by Buildroot}"
 export SOURCE_DATE_EPOCH TZ=UTC
 
-# shellcheck source=board/puu/lib.sh
-. "${BASH_SOURCE%/*}/lib.sh"
+# shellcheck source=scripts/image-lib.sh
+. "${BR2_EXTERNAL_PUU_PATH}/scripts/image-lib.sh"
 
 init_puu_arch "${PUU_ARCH}"
 bootc_bin="${TARGET_DIR}/usr/bin/bootc"
@@ -30,6 +30,6 @@ else
   echo "warning: skipping bootc container lint: cannot run target bootc on host" >&2
 fi
 
-"${BASH_SOURCE%/*}/prepare-live-rootfs.sh"
-"${BASH_SOURCE%/*}/sign-image.sh"
-"${BASH_SOURCE%/*}/build-live-iso.sh"
+"${BR2_EXTERNAL_PUU_PATH}/scripts/image-live-rootfs.sh"
+"${BR2_EXTERNAL_PUU_PATH}/scripts/image-sign.sh"
+"${BR2_EXTERNAL_PUU_PATH}/scripts/image-live-iso.sh"

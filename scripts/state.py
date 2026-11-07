@@ -164,7 +164,7 @@ def main():
             if data.get("metadata_outputs") != fingerprint(args.metadata_path, metadata=True):
                 return 1
     except (OSError, ValueError) as error:
-        print(f"build-state: {error}", file=sys.stderr)
+        print(f"state: {error}", file=sys.stderr)
         return 2
     return 0
 

@@ -4,4 +4,4 @@
 *
 !Dockerfile
 !scripts/
-!scripts/build-helper.sh
+!scripts/container-entrypoint.sh

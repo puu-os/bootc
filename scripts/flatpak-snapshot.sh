@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
-# shellcheck source=board/puu/lib.sh
-. "${BASH_SOURCE%/*}/lib.sh"
+# shellcheck source=scripts/image-lib.sh
+. "${BASH_SOURCE%/*}/image-lib.sh"
 
 flatpak_snapshot_error() {
-  echo "${*}; run make refresh-flatpaks BOARD=${BOARD:-puu_${PUU_ARCH:-<board>}}" >&2
+  echo "${*}; run make flatpak-update BOARD=${BOARD:-puu_${PUU_ARCH:-<board>}}" >&2
   exit 1
 }
 
@@ -30,9 +30,9 @@ flatpak_snapshot_init() {
   : "${PUU_ARCH:?PUU_ARCH must be set (amd64 or arm64)}"
   init_puu_arch "${PUU_ARCH}"
   local project manifest_refs
-  project="${BR2_EXTERNAL_PUU_PATH:-${BASH_SOURCE%/*}/../..}"
+  project="${BR2_EXTERNAL_PUU_PATH:-${BASH_SOURCE%/*}/..}"
   project=$(cd "${project}" && pwd)
-  snapshot_state_tool="${project}/scripts/build-state.py"
+  snapshot_state_tool="${project}/scripts/state.py"
   snapshot_source="${PUU_FLATPAK_SOURCE_DIR:-${project}/overlay}"
   [ -d "${snapshot_source}" ] || flatpak_snapshot_error "missing Flatpak source: ${snapshot_source}"
   snapshot_source=$(cd "${snapshot_source}" && pwd)

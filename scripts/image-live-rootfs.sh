@@ -15,11 +15,11 @@ export SOURCE_DATE_EPOCH TZ=UTC
 export PATH="${HOST_DIR}/bin:${HOST_DIR}/sbin:${PATH}"
 
 script_dir="${BASH_SOURCE%/*}"
-# shellcheck source=board/puu/lib.sh
-. "${script_dir}/lib.sh"
+# shellcheck source=scripts/image-lib.sh
+. "${script_dir}/image-lib.sh"
 init_puu_arch "${PUU_ARCH}"
-state_helper="${BR2_EXTERNAL_PUU_PATH}/scripts/build-state.py"
-state="${BINARIES_DIR}/.prepare-live-rootfs.state"
+state_helper="${script_dir}/state.py"
+state="${BINARIES_DIR}/.image-live-rootfs.state"
 rootfs="${BINARIES_DIR}/rootfs.squashfs"
 oci_source="${BINARIES_DIR}/rootfs-oci-latest-${PUU_ARCH}-linux.oci-image.tar"
 output="${BINARIES_DIR}/rootfs-live.squashfs"
@@ -28,7 +28,7 @@ oci_digest=$(oci_archive_digest "${oci_source}")
 
 flatpak_key=""
 case "${PUU_FLATPAK_PRESEED:-1}" in
-  1) flatpak_key=$("${script_dir}/seed-flatpaks.sh" --key) ;;
+  1) flatpak_key=$("${script_dir}/flatpak-seed.sh" --key) ;;
   0) ;;
   *) echo "PUU_FLATPAK_PRESEED must be 0 or 1" >&2; exit 1 ;;
 esac
@@ -36,7 +36,7 @@ esac
 inputs=(--value "arch=${PUU_ARCH}" --value "epoch=${SOURCE_DATE_EPOCH}"
   --value "oci_digest=${oci_digest}" --value "preseed=${PUU_FLATPAK_PRESEED:-1}"
   --value "flatpak_snapshot=${flatpak_key}")
-for path in "${BASH_SOURCE[0]}" "${script_dir}/lib.sh" "${state_helper}" \
+for path in "${BASH_SOURCE[0]}" "${script_dir}/image-lib.sh" "${state_helper}" \
   "${rootfs}" "${machine_src}" "${HOST_DIR}/bin/fakeroot" "${HOST_DIR}/bin/faked" \
   "${HOST_DIR}/bin/unsquashfs" "${HOST_DIR}/bin/mksquashfs"; do
   resolved=$(realpath -e "${path}")
@@ -44,7 +44,7 @@ for path in "${BASH_SOURCE[0]}" "${script_dir}/lib.sh" "${state_helper}" \
   [ "${path}" = "${resolved}" ] || inputs+=(--path "${resolved}")
 done
 if [ "${PUU_FLATPAK_PRESEED:-1}" = 1 ]; then
-  inputs+=(--path "${script_dir}/seed-flatpaks.sh" --path "${script_dir}/flatpak-snapshot.sh")
+  inputs+=(--path "${script_dir}/flatpak-seed.sh" --path "${script_dir}/flatpak-snapshot.sh")
   for path in "${TARGET_DIR}/usr/share/puu/flatpaks.list" "${TARGET_DIR}/etc/flatpak" \
     "${TARGET_DIR}/usr/share/flatpak/remotes.d"; do
     if [ -e "${path}" ] || [ -L "${path}" ]; then
@@ -83,8 +83,8 @@ flatpak_root=""
 if [ "${PUU_FLATPAK_PRESEED:-1}" = 1 ]; then
   flatpak_root="${work}/flatpak"
   mkdir -p "${flatpak_root}"
-  DEST_DIR="${flatpak_root}" "${script_dir}/seed-flatpaks.sh"
-  copied_key=$("${script_dir}/seed-flatpaks.sh" --key)
+  DEST_DIR="${flatpak_root}" "${script_dir}/flatpak-seed.sh"
+  copied_key=$("${script_dir}/flatpak-seed.sh" --key)
   if [ "${copied_key}" != "${flatpak_key}" ]; then
     echo "Flatpak snapshot changed during live rootfs preparation; rerun the image stage" >&2
     exit 1

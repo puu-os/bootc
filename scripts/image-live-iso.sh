@@ -14,13 +14,13 @@ set -euo pipefail
 export SOURCE_DATE_EPOCH TZ=UTC
 export PATH="${HOST_DIR}/bin:${HOST_DIR}/sbin:${PATH}"
 
-# shellcheck source=board/puu/lib.sh
-. "${BASH_SOURCE%/*}/lib.sh"
+# shellcheck source=scripts/image-lib.sh
+. "${BASH_SOURCE%/*}/image-lib.sh"
 init_puu_arch "${PUU_ARCH}"
 
 script_dir="${BASH_SOURCE%/*}"
-state_helper="${BR2_EXTERNAL_PUU_PATH}/scripts/build-state.py"
-state="${BINARIES_DIR}/.build-live-iso.state"
+state_helper="${script_dir}/state.py"
+state="${BINARIES_DIR}/.image-live-iso.state"
 puu_version="${PUU_VERSION:-1}"
 kver=$(kernel_version)
 kernel="${BINARIES_DIR}/${PUU_KERNEL_IMAGE}"
@@ -36,7 +36,7 @@ output_alias="${output_iso%.iso}-${puu_version}.iso"
 cmdline="puu.live SYSTEMD_SULOGIN_FORCE=1 root=live:LABEL=@ISO_VOLUME_ID@ puu.iso=@ISO_VOLUME_ID@ puu.boot-partuuid=@BOOT_PARTUUID@ ro rd.live.image rd.overlay systemd.gpt_auto=0${PUU_CMDLINE_EXTRA} quiet splash plymouth.ignore-serial-consoles plymouth.use-simpledrm vt.global_cursor_default=0 console=tty0"
 image_inputs=("${rootfs_squashfs}" "${oci_archive}" "${manifest}"
   "${kernel}" "${initrd}" "${osrel}" "${stub}" "${sdboot}"
-  "${BASH_SOURCE[0]}" "${script_dir}/lib.sh" "${script_dir}/generate-iso")
+  "${BASH_SOURCE[0]}" "${script_dir}/image-lib.sh" "${script_dir}/image-live-iso.py")
 inputs=(--value "arch=${PUU_ARCH}" --value "epoch=${SOURCE_DATE_EPOCH}"
   --value "version=${puu_version}" --value "kernel_version=${kver}" --value "cmdline=${cmdline}"
   --path "${state_helper}")
@@ -89,7 +89,7 @@ mkdir -p "${iso_tmp}/old" "${iso_tmp}/empty" "${iso_tmp}/root"/{LiveOS,payload,b
 ln -s "${rootfs_squashfs}" "${iso_tmp}/root/LiveOS/squashfs.img"
 ln -s "${oci_archive}" "${iso_tmp}/root/payload/image.tar"
 ln -s "${manifest}" "${iso_tmp}/root/payload/image.manifest"
-"${HOST_DIR}/bin/python3" "${script_dir}/generate-iso" \
+"${HOST_DIR}/bin/python3" "${script_dir}/image-live-iso.py" \
   --arch "${PUU_ARCH}" --epoch "${SOURCE_DATE_EPOCH}" \
   --output "${iso_tmp}/genimage.cfg" \
   --cmdline "${cmdline}" --cmdline-output "${iso_tmp}/cmdline" \

@@ -12,7 +12,7 @@ case "${1:-}" in
 esac
 [ "$#" -le 1 ] || { echo "usage: $0 [--key]" >&2; exit 1; }
 
-# shellcheck source=board/puu/flatpak-snapshot.sh
+# shellcheck source=scripts/flatpak-snapshot.sh
 . "${BASH_SOURCE%/*}/flatpak-snapshot.sh"
 flatpak_snapshot_init
 if [ "${1:-}" != --key ]; then

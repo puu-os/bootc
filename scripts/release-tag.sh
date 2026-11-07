@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-# shellcheck source=lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/release-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/release-lib.sh"
 
 committed=0
 check_tag=""
@@ -26,7 +26,7 @@ trap cleanup EXIT
 require_git_repo
 
 next_ver="${1:-}"
-[[ -n "$next_ver" ]] || die "usage: scripts/release.sh <next-version>"
+[[ -n "$next_ver" ]] || die "usage: scripts/release-tag.sh <next-version>"
 
 [[ "$next_ver" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
   || die "invalid version: $next_ver (expected N or N.N.N)"

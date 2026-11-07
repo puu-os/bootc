@@ -14,17 +14,17 @@ set -euo pipefail
 export SOURCE_DATE_EPOCH TZ=UTC
 export PATH="${HOST_DIR}/bin:${HOST_DIR}/sbin:${PATH}"
 
-# shellcheck source=board/puu/lib.sh
-. "${BASH_SOURCE%/*}/lib.sh"
+# shellcheck source=scripts/image-lib.sh
+. "${BASH_SOURCE%/*}/image-lib.sh"
 init_puu_arch "${PUU_ARCH}"
 
-state_helper="${BR2_EXTERNAL_PUU_PATH}/scripts/build-state.py"
-state="${BINARIES_DIR}/.sign-image.state"
+state_helper="${BASH_SOURCE%/*}/state.py"
+state="${BINARIES_DIR}/.image-sign.state"
 oci_source="${BINARIES_DIR}/rootfs-oci-latest-${PUU_ARCH}-linux.oci-image.tar"
 image_ref=latest
 puu_version="${PUU_VERSION:-1}"
 target_imgref="${PUU_TARGET_IMGREF:-quay.io/puu/puu:${PUU_VARIANT:-gnome}}"
-work=$(mktemp -d "${BINARIES_DIR}/sign-image.XXXXXX")
+work=$(mktemp -d "${BINARIES_DIR}/image-sign.XXXXXX")
 updated=()
 committed=0
 cleanup() {
@@ -46,7 +46,7 @@ mkdir -p "${work}/new" "${work}/old"
 
 inputs=(--value "arch=${PUU_ARCH}" --value "epoch=${SOURCE_DATE_EPOCH}"
   --value "version=${puu_version}" --value "target_imgref=${target_imgref}")
-for path in "${BASH_SOURCE[0]}" "${BASH_SOURCE%/*}/lib.sh" "${state_helper}" "${oci_source}"; do
+for path in "${BASH_SOURCE[0]}" "${BASH_SOURCE%/*}/image-lib.sh" "${state_helper}" "${oci_source}"; do
   resolved=$(realpath -e "${path}")
   inputs+=(--path "${path}")
   [ "${path}" = "${resolved}" ] || inputs+=(--path "${resolved}")

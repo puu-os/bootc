@@ -6,8 +6,8 @@
 
 set -euo pipefail
 
-# shellcheck source=lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/release-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/release-lib.sh"
 
 GLAB="${GLAB:-glab}"
 

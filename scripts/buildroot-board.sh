@@ -20,11 +20,11 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 mkdir -p "$(dirname "${BUILDROOT_PATCH_LOCK}")"
 exec 9>"${BUILDROOT_PATCH_LOCK%.patch}.build"
 flock 9
-./scripts/setup-buildroot.sh "${BUILDROOT_PATCH_LOCK}" "${BUILDROOT_TARBALL}" \
+./scripts/buildroot-setup.sh "${BUILDROOT_PATCH_LOCK}" "${BUILDROOT_TARBALL}" \
   "${BUILDROOT_HASH}" "${BOARD_DIR}" "${BUILDROOT_SRC_DIR}" \
   "${BUILDROOT_PATCH_STAMP}" "${BUILDROOT_PATCH}"
 
-state=(python3 "${PWD}/scripts/build-state.py")
+state=(python3 "${PWD}/scripts/state.py")
 state_dir="${BOARD_DIR}/stamp/orchestration"
 mkdir -p "${state_dir}"
 make_args=(
@@ -37,7 +37,7 @@ make_args=(
 
 configure_args=(key --path "configs/${BOARD}_defconfig"
   --path Config.in --path external.desc --path "${BUILDROOT_PATCH_STAMP}"
-  --path "${SDK_INSTALL_STAMP}" --path scripts/build-board.sh
+  --path "${SDK_INSTALL_STAMP}" --path scripts/buildroot-board.sh
   --value "source=${BUILDROOT_SRC_DIR}" --value "sdk=${SDK_INSTALL_DIR}"
   --value "board=${BOARD_DIR}" --value "epoch=${SOURCE_DATE_EPOCH}")
 while IFS= read -r -d '' path; do
@@ -56,8 +56,8 @@ fi
 export TARGET_DIR="${BOARD_DIR}/target" BR2_EXTERNAL_PUU_PATH="${PWD}"
 export PUU_ARCH="${BOARD#puu_}"
 
-# shellcheck source=board/puu/lib.sh
-. ./board/puu/lib.sh
+# shellcheck source=scripts/image-lib.sh
+. ./scripts/image-lib.sh
 public_keys=$(mktemp -d "${state_dir}/public-keys.XXXXXX")
 trap 'rm -rf -- "${public_keys}"' EXIT
 prepare_signing_keys() {
@@ -78,7 +78,7 @@ prepare_signing_keys
 key_identity=$(signing_identity)
 flatpak_key=disabled
 case "${PUU_FLATPAK_PRESEED:-1}" in
-  1) flatpak_key=$(./board/puu/seed-flatpaks.sh --key) ;;
+  1) flatpak_key=$(./scripts/flatpak-seed.sh --key) ;;
   0) ;;
   *) echo 'PUU_FLATPAK_PRESEED must be 0 or 1' >&2; exit 1 ;;
 esac
@@ -207,7 +207,7 @@ prepare_signing_keys
 current_key_identity=$(signing_identity)
 current_flatpak_key=disabled
 if [[ "${PUU_FLATPAK_PRESEED:-1}" == 1 ]]; then
-  current_flatpak_key=$(./board/puu/seed-flatpaks.sh --key)
+  current_flatpak_key=$(./scripts/flatpak-seed.sh --key)
 fi
 current_input_key=$("${state[@]}" "${input_args[@]}")
 if [[ "${flatpak_key}" != "${current_flatpak_key}" || "${key_identity}" != "${current_key_identity}" || \

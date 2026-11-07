@@ -69,9 +69,9 @@ sudo /usr/libexec/puu/oksa-plan-vllm-workloads --require-reconcile
 
 ### Building
 
-    make BOARD=puu_amd64 refresh-flatpaks
+    make BOARD=puu_amd64 flatpak-update
     make BOARD=puu_amd64 build PUU_COSIGN_KEYS=
-    make BOARD=puu_arm64 refresh-flatpaks
+    make BOARD=puu_arm64 flatpak-update
     make BOARD=puu_arm64 build PUU_COSIGN_KEYS=
     make BOARD=puu_amd64 burn DEVICE=/dev/sdX
     make lint

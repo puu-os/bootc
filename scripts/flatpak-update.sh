@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-# shellcheck source=board/puu/flatpak-snapshot.sh
-. "${BASH_SOURCE%/*}/../board/puu/flatpak-snapshot.sh"
+# shellcheck source=scripts/flatpak-snapshot.sh
+. "${BASH_SOURCE%/*}/flatpak-snapshot.sh"
 flatpak_snapshot_init
 if [ "${#refs[@]}" -eq 0 ]; then
   echo 'No Flatpaks configured in the build target.'

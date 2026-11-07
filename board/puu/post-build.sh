@@ -8,11 +8,12 @@ set -euo pipefail
 : "${TARGET_DIR:?TARGET_DIR must be set by Buildroot}"
 : "${HOST_DIR:?HOST_DIR must be set by Buildroot}"
 : "${BINARIES_DIR:?BINARIES_DIR must be set by Buildroot}"
+: "${BR2_EXTERNAL_PUU_PATH:?BR2_EXTERNAL_PUU_PATH must be set by Buildroot}"
 PUU_ARCH="${2:?arch argument must be set (amd64 or arm64)}"
 : "${PUU_COSIGN_KEYS?PUU_COSIGN_KEYS must be set (empty for unsigned builds)}"
 
-# shellcheck source=board/puu/lib.sh
-. "${BASH_SOURCE%/*}/lib.sh"
+# shellcheck source=scripts/image-lib.sh
+. "${BR2_EXTERNAL_PUU_PATH}/scripts/image-lib.sh"
 
 init_puu_arch "${PUU_ARCH}"
 
@@ -79,7 +80,7 @@ if split_cosign_keys; then
   done
 fi
 
-"${BASH_SOURCE%/*}/generate-container-policy" "${target_repo}" "${trusted_key_paths[@]}" \
+"${BR2_EXTERNAL_PUU_PATH}/scripts/image-policy.py" "${target_repo}" "${trusted_key_paths[@]}" \
   > "${TARGET_DIR}/etc/containers/policy.json"
 
 kver=$(kernel_version)
