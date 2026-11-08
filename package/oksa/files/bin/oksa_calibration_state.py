@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import subprocess
 import tempfile
 from typing import TYPE_CHECKING
 
@@ -146,31 +145,12 @@ def applied_result(model: str) -> dict:
 class CalibrationStore:
     @classmethod
     def hardware_identity(cls) -> dict:
-        from oksa_accelerator import AcceleratorDiscovery, AcceleratorVendor
+        from oksa_accelerator import AcceleratorDiscovery, AcceleratorManager
         from oksa_model_serving import resolve_helper, resolve_k3s_node_name
 
-        gpus = []
-        vendor = AcceleratorDiscovery.primary_vendor()
-        if vendor == AcceleratorVendor.NVIDIA:
-            value = subprocess.run(
-                ["/usr/bin/nvidia-smi", "--query-gpu=name,uuid,memory.total,driver_version",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, check=True, timeout=15,
-            )
-            gpus = sorted(line.strip() for line in value.stdout.splitlines() if line.strip())
-            if not gpus:
-                raise ValueError("NVIDIA hardware present but no usable GPU reported")
-            models = {tuple(line.split(", ")[i] for i in (0, 2)) for line in gpus}
-            if len(models) > 1:
-                raise ValueError("Calibration requires matching local GPUs")
-        elif vendor != AcceleratorVendor.UNKNOWN:
-            devices = AcceleratorDiscovery.primary_devices()
-            gpus = sorted(f"{dev.name or dev.vendor.value}, {dev.pci_id}, {dev.memory_total_bytes}, {dev.driver}"
-                          for dev in devices)
-            if not gpus:
-                raise ValueError(f"{vendor.value} hardware present but no usable device reported")
-            if len({dev.driver for dev in devices}) > 1:
-                raise ValueError("Calibration requires matching local accelerator drivers")
+        devices = AcceleratorDiscovery.scan_devices()
+        gpus = (AcceleratorManager.execution_backend(AcceleratorDiscovery.primary_vendor(devices)).hardware_identity()
+                if devices else [])
         memory_bytes = 0
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith("MemTotal:"):
@@ -185,6 +165,7 @@ class CalibrationStore:
             controller=hashlib.sha256(resolve_helper("oksa-calibrate").read_bytes()).hexdigest(),
             probe=hashlib.sha256(resolve_helper("oksa-calibration-probe").read_bytes()).hexdigest(),
             runtime=hashlib.sha256(resolve_helper("oksa_workload_manifest.py").read_bytes()).hexdigest(),
+            backend=hashlib.sha256(resolve_helper("oksa_accelerator.py").read_bytes()).hexdigest(),
         )
 
     @classmethod

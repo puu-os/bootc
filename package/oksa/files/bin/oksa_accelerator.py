@@ -10,6 +10,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
+from types import ModuleType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from oksa_model_serving import ModelSpec, NodeCapacity
 
 
 def normalize_pci_id(pci_id: str) -> str:
@@ -61,6 +66,27 @@ class AcceleratorTelemetry:
 
     def as_dict(self) -> dict:
         return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceleratorMemory:
+    index: int
+    free_bytes: int
+    total_bytes: int
+
+    @property
+    def used_bytes(self) -> int:
+        return self.total_bytes - self.free_bytes
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceleratorRuntimeManifest:
+    environment: dict[str, str]
+    device_resources: dict[str, str]
+    runtime_class_name: str
+    volumes: tuple[dict[str, object], ...]
+    volume_mounts: tuple[dict[str, object], ...]
+    init_containers: tuple[dict[str, object], ...]
 
 
 class AcceleratorDiscovery:
@@ -275,6 +301,98 @@ class AcceleratorDiscovery:
 
 class NvidiaBackend:
     SMI_PATH = Path("/usr/bin/nvidia-smi")
+    VENDOR = AcceleratorVendor.NVIDIA
+    REQUIRED_NODE_LABELS = ("cuda-ready", "cdi-ready")
+    PREFERRED_NODE_LABELS = ((100, "nvlink-present"), (75, "fast-gpu-interconnect"))
+    _MEMORY_ERRORS = re.compile(
+        r"CUDA out of memory|torch(?:\.cuda)?\.OutOfMemoryError|OutOfMemoryError|"
+        r"No available memory for the cache blocks|"
+        r"max seq len[^\n]*larger than[^\n]*KV cache|"
+        r"Free memory on device[^\n]*less than desired GPU memory utilization", re.IGNORECASE,
+    )
+
+    @staticmethod
+    def is_memory_error(text: str) -> bool:
+        return NvidiaBackend._MEMORY_ERRORS.search(text) is not None
+
+    @classmethod
+    def hardware_identity(cls) -> list[str]:
+        result = subprocess.run(
+            [str(cls.SMI_PATH), "--query-gpu=name,uuid,memory.total,driver_version",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True, timeout=15,
+        )
+        gpus = sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
+        if not gpus:
+            raise ValueError("NVIDIA hardware present but no usable GPU reported")
+        identities = [line.rsplit(",", 3) for line in gpus]
+        if any(len(parts) != 4 or any(not part.strip() or part.strip() in ("N/A", "[N/A]")
+                                     for part in parts) for parts in identities):
+            raise ValueError("Invalid NVIDIA GPU identity")
+        if len({(parts[0].strip(), parts[2].strip()) for parts in identities}) > 1:
+            raise ValueError("Calibration requires matching local GPUs")
+        return gpus
+
+    @staticmethod
+    def query_memory(torch_module: ModuleType) -> tuple[AcceleratorMemory, ...]:
+        if torch_module.version.hip is not None:
+            raise ValueError("Unsupported accelerator runtime: HIP")
+        if not torch_module.cuda.is_available():
+            raise ValueError("NVIDIA CUDA runtime is not available")
+        count = torch_module.cuda.device_count()
+        if count <= 0:
+            raise ValueError("No visible NVIDIA CUDA devices")
+        devices: list[AcceleratorMemory] = []
+        for index in range(count):
+            free, total = torch_module.cuda.mem_get_info(index)
+            if not 0 <= free <= total or total <= 0:
+                raise ValueError(f"Invalid CUDA memory capacity for device {index}")
+            devices.append(AcceleratorMemory(index, free, total))
+        return tuple(devices)
+
+    @staticmethod
+    def readiness_error(node: NodeCapacity) -> str:
+        if node.gpu_count <= 0 or not node.cuda_ready or not node.cdi_ready:
+            return "CUDA/CDI GPU capacity is not ready"
+        return ""
+
+    @staticmethod
+    def interconnect_selector(spec: ModelSpec, node: NodeCapacity) -> str:
+        if spec.requires_nvlink:
+            if not node.topology_parallel_capable:
+                raise ValueError("NVLink topology is required but not available")
+            return "topology"
+        if node.topology_parallel_capable:
+            return "topology"
+        if (spec.requires_fast_nic or spec.allow_fast_nic_fallback) and node.fast_nic_present:
+            return "fast-nic"
+        raise ValueError("neither topology NVLink nor fast NIC is available for topology-parallel serving")
+
+    @staticmethod
+    def runtime_manifest(*, assigned_devices: str, resource_gpus: int) -> AcceleratorRuntimeManifest:
+        if resource_gpus < 0:
+            raise ValueError("GPU resource count cannot be negative")
+        environment = {
+            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+            "FLASHINFER_WORKSPACE_BASE": "/var/lib/vllm/cache/flashinfer",
+        }
+        if assigned_devices:
+            environment.update(NVIDIA_VISIBLE_DEVICES=assigned_devices, CUDA_VISIBLE_DEVICES=assigned_devices)
+        mounts = ({"name": "nvidia-cdi", "mountPath": "/var/run/cdi", "readOnly": True},)
+        return AcceleratorRuntimeManifest(
+            environment=environment,
+            device_resources={"nvidia.com/gpu": str(resource_gpus)} if resource_gpus else {},
+            runtime_class_name="nvidia-cdi",
+            volumes=({"name": "nvidia-cdi", "hostPath": {"path": "/var/run/cdi", "type": "DirectoryOrCreate"}},),
+            volume_mounts=mounts,
+            init_containers=({
+                "name": "wait-for-nvidia-cdi",
+                "image": "busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0",
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["/bin/sh", "-ec", "until [ -s /var/run/cdi/nvidia.yaml ]; do sleep 10; done"],
+                "volumeMounts": list(mounts),
+            },),
+        )
 
     @classmethod
     def is_available(cls) -> bool:
@@ -426,6 +544,13 @@ class AmdSysfsBackend:
 
 
 class AcceleratorManager:
+    @staticmethod
+    def execution_backend(vendor: AcceleratorVendor | None = None) -> type[NvidiaBackend]:
+        if vendor is None:
+            vendor = AcceleratorDiscovery.primary_vendor()
+        if vendor == NvidiaBackend.VENDOR:
+            return NvidiaBackend
+        raise ValueError(f"Unsupported accelerator vendor for serving/calibration: {vendor.value}")
     @classmethod
     def collect_telemetry(cls) -> list[dict] | None:
         devices = AcceleratorDiscovery.scan_devices()

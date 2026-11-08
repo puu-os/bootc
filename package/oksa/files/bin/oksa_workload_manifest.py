@@ -8,6 +8,7 @@ from pathlib import Path
 import shlex
 
 import oksa_model_serving as ms
+from oksa_accelerator import AcceleratorManager, AcceleratorRuntimeManifest
 from oksa_model_removal import wait_for_stopped_pods
 from oksa_workload_evaluation import PlannedWorkload
 
@@ -81,18 +82,16 @@ class WorkloadManifestBuilder:
     def _affinity(self) -> dict[str, object]:
         plan = self.plan
         namespace = ms.label_namespace()
+        backend = AcceleratorManager.execution_backend(plan.accelerator_vendor)
         required_keys = [
-            f"{namespace}/model-serving-ready", f"{namespace}/cuda-ready",
-            f"{namespace}/cdi-ready", plan.model_node_label,
+            f"{namespace}/model-serving-ready", plan.model_node_label,
+            *(f"{namespace}/{label}" for label in backend.REQUIRED_NODE_LABELS),
         ]
         if plan.interconnect_selector == "topology":
             required_keys.append(f"{namespace}/topology-parallel-capable")
         elif plan.interconnect_selector == "fast-nic":
             required_keys.append(f"{namespace}/fast-nic-present")
-        preferences = [
-            (100, f"{namespace}/nvlink-present"),
-            (75, f"{namespace}/fast-gpu-interconnect"),
-        ]
+        preferences = [(weight, f"{namespace}/{label}") for weight, label in backend.PREFERRED_NODE_LABELS]
         if plan.spec.allow_fast_nic_fallback:
             preferences.append((25, f"{namespace}/fast-nic-present"))
         affinity: dict[str, object] = {
@@ -120,9 +119,17 @@ class WorkloadManifestBuilder:
             }
         return affinity
 
+    def _runtime_manifest(self) -> AcceleratorRuntimeManifest:
+        plan = self.plan
+        return AcceleratorManager.execution_backend(plan.accelerator_vendor).runtime_manifest(
+            assigned_devices=plan.assigned_gpu_devices if plan.serving_mode == "shared-gpu" else "",
+            resource_gpus=plan.resource_gpus,
+        )
+
     def container(self, *, prefix_caching: bool = True) -> dict[str, object]:
         plan = self.plan
         spec = plan.spec
+        runtime = self._runtime_manifest()
         command = [*spec.runtime_command, "serve", spec.path,
                    "--host", "0.0.0.0", "--port", "8000",
                    "--served-model-name", spec.repo_id or spec.name,
@@ -149,7 +156,7 @@ class WorkloadManifestBuilder:
             raise ValueError("Extra arguments cannot override managed runtime options")
         command.extend(extra_args)
         env = {
-            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+            **runtime.environment,
             "HF_HOME": "/var/lib/huggingface",
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
@@ -157,18 +164,13 @@ class WorkloadManifestBuilder:
             "TORCH_EXTENSIONS_DIR": "/var/lib/vllm/cache/torch_extensions",
             "TRITON_CACHE_DIR": "/var/lib/vllm/cache/triton",
             "TORCHINDUCTOR_CACHE_DIR": "/var/lib/vllm/cache/torchinductor",
-            "FLASHINFER_WORKSPACE_BASE": "/var/lib/vllm/cache/flashinfer",
         }
-        if plan.serving_mode == "shared-gpu":
-            env.update({"NVIDIA_VISIBLE_DEVICES": plan.assigned_gpu_devices,
-                        "CUDA_VISIBLE_DEVICES": plan.assigned_gpu_devices})
         requests = {"cpu": "1", "memory": str(min(4 * 1024**3, plan.memory_bytes)) if plan.memory_bytes else "4Gi"}
         limits: dict[str, str] = {}
         if plan.memory_bytes:
             limits["memory"] = str(plan.memory_bytes)
-        if plan.resource_gpus > 0:
-            requests["nvidia.com/gpu"] = str(plan.resource_gpus)
-            limits["nvidia.com/gpu"] = str(plan.resource_gpus)
+        requests.update(runtime.device_resources)
+        limits.update(runtime.device_resources)
         resources = {"requests": requests, "limits": limits}
         return {
             "name": "vllm", "image": spec.runtime_image, "imagePullPolicy": "IfNotPresent",
@@ -183,7 +185,7 @@ class WorkloadManifestBuilder:
                 {"name": "huggingface", "mountPath": "/var/lib/huggingface"},
                 {"name": "vllm-state", "mountPath": "/var/lib/vllm"},
                 {"name": "vllm-runtime", "mountPath": "/usr/share/puu/vllm/runtime", "readOnly": True},
-                {"name": "nvidia-cdi", "mountPath": "/var/run/cdi", "readOnly": True},
+                *runtime.volume_mounts,
             ],
         }
 
@@ -191,6 +193,7 @@ class WorkloadManifestBuilder:
         plan = self.plan
         spec = plan.spec
         namespace = ms.label_namespace()
+        runtime = self._runtime_manifest()
         labels = {"app.kubernetes.io/name": plan.app_name,
                   f"{namespace}/model-name": plan.model_label,
                   f"{namespace}/serving-mode": plan.serving_mode}
@@ -228,21 +231,15 @@ class WorkloadManifestBuilder:
                         },
                     },
                     "spec": {
-                        "affinity": self._affinity(), "runtimeClassName": "nvidia-cdi",
-                        "initContainers": [{
-                            "name": "wait-for-nvidia-cdi",
-                            "image": "busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0",
-                            "imagePullPolicy": "IfNotPresent",
-                            "command": ["/bin/sh", "-ec", "until [ -s /var/run/cdi/nvidia.yaml ]; do sleep 10; done"],
-                            "volumeMounts": [{"name": "nvidia-cdi", "mountPath": "/var/run/cdi", "readOnly": True}],
-                        }],
+                        "affinity": self._affinity(), "runtimeClassName": runtime.runtime_class_name,
+                        "initContainers": list(runtime.init_containers),
                         "containers": [self.container(prefix_caching=prefix_caching)],
                         "volumes": [
                             {"name": "models", "hostPath": {"path": str(self._model_root()), "type": "Directory"}},
                             {"name": "huggingface", "hostPath": {"path": "/var/lib/huggingface", "type": "DirectoryOrCreate"}},
                             {"name": "vllm-state", "hostPath": {"path": "/var/lib/vllm", "type": "DirectoryOrCreate"}},
                             {"name": "vllm-runtime", "hostPath": {"path": "/usr/share/puu/vllm/runtime", "type": "Directory"}},
-                            {"name": "nvidia-cdi", "hostPath": {"path": "/var/run/cdi", "type": "DirectoryOrCreate"}},
+                            *runtime.volumes,
                         ],
                     },
                 },

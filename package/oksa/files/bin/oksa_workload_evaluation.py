@@ -7,6 +7,8 @@ import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from oksa_accelerator import AcceleratorManager, AcceleratorVendor
+
 if TYPE_CHECKING:
     from oksa_model_serving import ModelSpec, NodeCapacity
 
@@ -63,6 +65,7 @@ class PlannedWorkload:
     app_name: str
     model_label: str
     model_node_label: str
+    accelerator_vendor: AcceleratorVendor
     max_num_batched_tokens: int = 8192
     memory_bytes: int = 0
 
@@ -142,6 +145,10 @@ class WorkloadEvaluator:
         models_dir = self.snapshot.models_dir
         if not manual_selection and not spec.autostart:
             raise PlanError("autostart is disabled")
+        try:
+            backend = AcceleratorManager.execution_backend()
+        except ValueError as error:
+            raise PlanError(str(error)) from error
 
         serving_mode = self.serving_mode_for_model(spec.serving_mode, spec.sharing_policy)
         model_label = model.model_label
@@ -175,8 +182,8 @@ class WorkloadEvaluator:
             raise PlanError(f"model path {spec.path} is missing")
         if spec.same_path_required and cached_root is None and spec.path != str(models_dir / spec.name):
             raise PlanError("model path must be identical on participants")
-        if node.gpu_count <= 0 or not node.cuda_ready or not node.cdi_ready:
-            raise PlanError("CUDA/CDI GPU capacity is not ready")
+        if readiness_error := backend.readiness_error(node):
+            raise PlanError(readiness_error)
         if spec.requires_unified_memory and not node.unified_memory:
             raise PlanError("unified memory is required but not available")
         if spec.min_gpu_memory_mib > 0 and node.gpu_memory_max_mib < spec.min_gpu_memory_mib:
@@ -215,16 +222,10 @@ class WorkloadEvaluator:
             parallel_capacity_mib = (node.gpu_memory_max_mib * parallel_gpus * 95) // 100
             if spec.gpu_memory_budget_mib > parallel_capacity_mib and not node.unified_memory:
                 raise PlanError(f"budget {spec.gpu_memory_budget_mib} MiB exceeds topology guardrail {parallel_capacity_mib} MiB")
-            if spec.requires_nvlink:
-                if not node.topology_parallel_capable:
-                    raise PlanError("NVLink topology is required but not available")
-                interconnect_selector = "topology"
-            elif node.topology_parallel_capable:
-                interconnect_selector = "topology"
-            elif (spec.requires_fast_nic or spec.allow_fast_nic_fallback) and node.fast_nic_present:
-                interconnect_selector = "fast-nic"
-            else:
-                raise PlanError("neither topology NVLink nor fast NIC is available for topology-parallel serving")
+            try:
+                interconnect_selector = backend.interconnect_selector(spec, node)
+            except ValueError as error:
+                raise PlanError(str(error)) from error
             resource_gpus = parallel_gpus
 
         if require_calibration and calibration.gpu_memory_utilization is not None:
@@ -241,6 +242,7 @@ class WorkloadEvaluator:
             app_name=app_name,
             model_label=model_label,
             model_node_label=model_node_label,
+            accelerator_vendor=backend.VENDOR,
             max_num_batched_tokens=calibration.max_num_batched_tokens if require_calibration else 8192,
             memory_bytes=calibration.memory_bytes if require_calibration else 0,
         )
