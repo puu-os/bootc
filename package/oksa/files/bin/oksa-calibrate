@@ -25,6 +25,7 @@ PROBE_PATH = Path(__file__).with_name("oksa-calibration-probe")
 POD = "vllm-calibration"
 MAX_TRIALS = 40
 MAX_SECONDS = 4 * 60 * 60
+TRIAL_SECONDS = 2100
 
 
 class CalibrationTimeout(TimeoutError):
@@ -34,6 +35,7 @@ class CalibrationTimeout(TimeoutError):
 
 
 class CalibrationController:
+    CLEANUP_SECONDS = 150
     def __init__(self, model: str = "", force: bool = False):
         self.requested_model = model
         self.model = ""
@@ -57,19 +59,24 @@ class CalibrationController:
         return values
 
     @staticmethod
-    def kubectl(*args, payload=None, request_timeout=20):
+    def kubectl(*args, payload=None, request_timeout=20, deadline=None):
+        timeout = request_timeout + 20
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise TimeoutError("Calibration Kubernetes operation deadline exhausted")
         command = ["/usr/bin/kubectl", f"--kubeconfig={ms.get_kubeconfig()}",
-                   f"--request-timeout={request_timeout}s", *args]
+                   f"--request-timeout={min(request_timeout, timeout):.3f}s", *args]
         result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                                capture_output=True, text=True, timeout=request_timeout + 20)
+                                capture_output=True, text=True, timeout=timeout)
         if result.returncode:
             raise RuntimeError(f"kubectl {' '.join(args[:3])}: {result.stderr[-2048:]}")
         return json.loads(result.stdout) if "json" in args and result.stdout.strip() else result.stdout
 
     @classmethod
-    def delete_probe(cls) -> None:
+    def delete_probe(cls, *, deadline=None) -> None:
         cls.kubectl("delete", "pod", POD, "-n", ms.OKSA_NAMESPACE, "--ignore-not-found",
-                    "--wait=true", "--timeout=120s", "-o", "name", request_timeout=130)
+                    "--wait=true", "--timeout=120s", "-o", "name", request_timeout=130, deadline=deadline)
 
     @staticmethod
     def context_ceiling(plan: PlannedWorkload) -> int:
@@ -128,7 +135,7 @@ class CalibrationController:
                   utilization: float, memory_bytes: int, reserve: int, deadline: float,
                   trial_number: int, *, prefix_caching: bool = False) -> dict:
         started = time.monotonic()
-        seconds = min(2100, int(deadline - started))
+        seconds = min(TRIAL_SECONDS, int(deadline - started - self.CLEANUP_SECONDS))
         if seconds < 1:
             raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
         trial_deadline = started + seconds
@@ -146,13 +153,14 @@ class CalibrationController:
                         sequences=sequences, utilization=utilization)
 
         try:
-            self.kubectl("create", "-f", "-", "-o", "json", payload=pod)
+            self.kubectl("create", "-f", "-", "-o", "json", payload=pod, deadline=trial_deadline)
             next_update = started + 10
             while time.monotonic() < trial_deadline:
                 if time.monotonic() >= next_update:
                     self.publish("running", f"{message} Elapsed {int(time.monotonic() - started)}s.")
                     next_update = time.monotonic() + 10
-                current = self.kubectl("get", "pod", POD, "-n", ms.OKSA_NAMESPACE, "-o", "json")
+                current = self.kubectl("get", "pod", POD, "-n", ms.OKSA_NAMESPACE, "-o", "json",
+                                       deadline=trial_deadline)
                 deadline_exceeded = current.get("status", {}).get("reason") == "DeadlineExceeded"
                 statuses = current.get("status", {}).get("containerStatuses", [])
                 for status in statuses:
@@ -203,10 +211,12 @@ class CalibrationController:
                     return timed_out("Calibration pod time budget exhausted")
                 if current.get("status", {}).get("phase") in ("Failed", "Succeeded"):
                     raise RuntimeError(f"Calibration pod ended without a probe result: {current.get('status')}")
-                time.sleep(2)
+                time.sleep(min(2, max(0, trial_deadline - time.monotonic())))
             return timed_out("Calibration candidate time budget exhausted")
+        except (subprocess.TimeoutExpired, TimeoutError):
+            return timed_out("Calibration Kubernetes operation exceeded its time budget")
         finally:
-            self.delete_probe()
+            self.delete_probe(deadline=deadline)
 
     @staticmethod
     def search_context(test, trials: list[dict], upper: int) -> int:
