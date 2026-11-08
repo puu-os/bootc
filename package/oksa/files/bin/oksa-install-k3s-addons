@@ -142,7 +142,7 @@ def read_litellm_db_password() -> str:
     return password
 
 
-def ensure_postgresql_endpoints(manifest_dst: Path) -> None:
+def ensure_postgresql_endpointslice(manifest_dst: Path) -> None:
     address = node_internal_ip()
     ms.atomic_write_text(
         manifest_dst / POSTGRESQL_MANIFEST,
@@ -157,17 +157,24 @@ spec:
       port: {POSTGRESQL_PORT}
       targetPort: {POSTGRESQL_PORT}
 ---
-apiVersion: v1
-kind: Endpoints
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
 metadata:
   name: {POSTGRESQL_SERVICE}
   namespace: {OKSA_NAMESPACE}
-subsets:
+  labels:
+    kubernetes.io/service-name: {POSTGRESQL_SERVICE}
+    endpointslice.kubernetes.io/managed-by: io.github.puu_os.oksa
+addressType: {"IPv4" if ipaddress.ip_address(address).version == 4 else "IPv6"}
+ports:
+  - name: postgresql
+    protocol: TCP
+    port: {POSTGRESQL_PORT}
+endpoints:
   - addresses:
-      - ip: {address}
-    ports:
-      - name: postgresql
-        port: {POSTGRESQL_PORT}
+      - "{address}"
+    conditions:
+      ready: true
 """,
         0o644,
     )
@@ -455,7 +462,7 @@ def main() -> None:
     master_key = ensure_litellm_auth(manifest_dst)
     copy_manifests(manifest_src, manifest_dst)
     ensure_webui_secret(manifest_dst)
-    ensure_postgresql_endpoints(manifest_dst)
+    ensure_postgresql_endpointslice(manifest_dst)
     ensure_api_route(manifest_dst)
     ensure_litellm_db(manifest_dst)
     ensure_openwebui_key(manifest_dst, master_key)
