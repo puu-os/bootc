@@ -2,6 +2,7 @@
 # Copyright (C) Opinsys Oy 2026
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timezone
 import math
 import re
@@ -137,26 +138,29 @@ class _OksaPage:
     def _unconfirmed(reply: tuple[int, dict]) -> bool:
         return reply[1].get("code") in ("Unconfirmed", "Timeout", "Interrupted", "WorkerFailed")
 
-    async def _call(self, method: str, *args, wait: bool = True) -> tuple[int, dict]:
+    async def _call(self, method: str | Callable[..., dict], *args, wait: bool = True) -> tuple[int, dict]:
         try:
-            result = await run.io_bound(self.service.call, method, *args)
+            if isinstance(method, str):
+                result = await run.io_bound(self.service.call, method, *args)
+            else:
+                result = await run.io_bound(method, *args)
             if isinstance(result, dict) and "job" in result and wait:
                 result = await run.io_bound(self.service.wait_job, result["job"], timeout=600)
         except OksaClientError as error:
-            return 0, {"ok": False, **error.payload, "error": str(error)}
+            return 0, {**error.payload, "ok": False, "code": error.code, "error": str(error)}
         except (OSError, ValueError, TimeoutError) as error:
             return 0, {"ok": False, "code": "Unconfirmed", "error": f"Service result could not be confirmed: {error}"}
         if not isinstance(result, dict):
             return 0, {"ok": False, "code": "Unconfirmed", "error": "Service result could not be confirmed."}
         return 200, result
 
-    async def _load(self, name: str, method: str) -> tuple[int, dict] | None:
+    async def _load(self, name: str, method: str | Callable[..., dict], *args) -> tuple[int, dict] | None:
         self.generations[name] += 1
         generation = self.generations[name]
         async with self.locks[name]:
             if generation != self.generations[name] or self.client.is_deleted:
                 return None
-            reply = await self._call(method)
+            reply = await self._call(method, *args)
             if generation != self.generations[name] or self.client.is_deleted:
                 return None
             return reply
@@ -731,6 +735,7 @@ class _OksaPage:
                 and job.get("state") in ("queued", "running", "succeeded", "failed", "canceled")
                 and self._number(job.get("started_at")) and isinstance(job.get("progress"), str)
                 and (job.get("ended_at") is None or self._number(job["ended_at"]))
+                and all(job.get(key) is None or isinstance(job[key], str) for key in ("repo_id", "model_name"))
                 and (job.get("error") is None or isinstance(job["error"], dict))
                 and (job.get("result") is None or isinstance(job["result"], dict)))
 
@@ -744,12 +749,33 @@ class _OksaPage:
                      isinstance(job.get("error"), dict) and isinstance(job["error"].get("code"), str)
                      and isinstance(job["error"].get("message"), str)))
 
+    def _job_snapshots(self) -> dict:
+        objects = self.service.get_managed_objects()
+        if not isinstance(objects, dict):
+            raise OksaClientError("Unconfirmed", "Invalid activity discovery response")
+        jobs = []
+        for path, interfaces in objects.items():
+            if not isinstance(interfaces, dict):
+                raise OksaClientError("Unconfirmed", "Invalid activity interfaces")
+            if Contract.JOB not in interfaces:
+                continue
+            try:
+                job = self.service.get_job(path)
+            except OksaClientError as error:
+                if error.code == "NotFound":
+                    continue
+                raise
+            if not self._valid_job(job) or job["path"] != path or job.get("ok") is not True:
+                raise OksaClientError("Unconfirmed", "Invalid activity snapshot")
+            jobs.append(job)
+        return {"ok": True, "jobs": jobs}
+
     async def _load_pull(self) -> None:
         if not self._begin("activity-refresh", []):
             return
         try:
             requested = time.monotonic()
-            reply = await self._load("pull", "ListJobs")
+            reply = await self._load("pull", self._job_snapshots)
             if reply is None:
                 return
             generation = self.generations["pull"]
@@ -772,7 +798,7 @@ class _OksaPage:
                 old = self.jobs.get(path)
                 if old and old["state"] not in ("queued", "running") and path != self.model_job:
                     continue
-                recovered = await self._call("GetJob", path, wait=False)
+                recovered = await self._call(self.service.get_job, path, wait=False)
                 if self.client.is_deleted or generation != self.generations["pull"]:
                     return
                 candidate = recovered[1]
@@ -783,7 +809,7 @@ class _OksaPage:
                     self.jobs_seen.add(path)
                     if self._valid_terminal_details(candidate, candidate):
                         self.job_details.add(path)
-                elif candidate.get("code") == "NotFound":
+                elif candidate.get("code") in ("NotFound", "UnknownObject", "UnknownMethod"):
                     self.jobs.pop(path, None)
                     self.job_details.discard(path)
                     if path == self.model_job:
@@ -815,7 +841,7 @@ class _OksaPage:
             for path, job in list(self.jobs.items()):
                 if job["state"] not in ("succeeded", "failed", "canceled") or path in self.job_details:
                     continue
-                terminal = await self._call("GetJob", path, wait=False)
+                terminal = await self._call(self.service.get_job, path, wait=False)
                 if self.client.is_deleted or generation != self.generations["pull"]:
                     return
                 if self._success(terminal) and self._valid_terminal_details(terminal[1], job):

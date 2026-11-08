@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+from dataclasses import dataclass
 import http.client
 import json
 import math
@@ -28,6 +29,85 @@ class OksaError(Exception):
         self.result = result
 
 
+@dataclass(frozen=True)
+class RecordSchema:
+    """Absent optional fields mean None; opaque JSON preserves upstream data and provenance."""
+
+    fields: "dict[str, str | type | RecordSchema | tuple[RecordSchema]]"
+    optional: frozenset[str] = frozenset()
+
+    def to_variant(self, data: dict) -> dict[str, GLib.Variant]:
+        if not isinstance(data, dict) or data.keys() - self.fields.keys():
+            raise OksaError("InvalidResult", "Unexpected response fields")
+        values = {}
+        for name, kind in self.fields.items():
+            if name not in data or data[name] is None:
+                if name in self.optional:
+                    continue
+                raise OksaError("InvalidResult", f"Missing response field: {name}")
+            value = data[name]
+            if isinstance(kind, RecordSchema):
+                values[name] = GLib.Variant("a{sv}", kind.to_variant(value))
+            elif isinstance(kind, tuple):
+                if not isinstance(value, list):
+                    raise OksaError("InvalidResult", f"{name} must be an array")
+                values[name] = GLib.Variant("aa{sv}", [kind[0].to_variant(item) for item in value])
+            elif kind in (dict, list):
+                if not isinstance(value, kind):
+                    raise OksaError("InvalidResult", f"Invalid JSON field: {name}")
+                values[name] = GLib.Variant("s", json.dumps(value, allow_nan=False, ensure_ascii=True, separators=(",", ":")))
+            else:
+                valid = ((kind in ("s", "o") and isinstance(value, str) and "\x00" not in value
+                          and not any(unicodedata.category(char) == "Cs" for char in value))
+                         or (kind == "b" and type(value) is bool)
+                         or (kind == "x" and type(value) is int and -(2**63) <= value < 2**63)
+                         or (kind == "d" and ((type(value) is float and math.isfinite(value))
+                                             or (type(value) is int and -(2**53) <= value <= 2**53))))
+                if not valid:
+                    raise OksaError("InvalidResult", f"Invalid response type for {name}")
+                if kind == "o" and not GLib.Variant.is_object_path(value):
+                    raise OksaError("InvalidResult", f"Invalid object path: {name}")
+                values[name] = GLib.Variant(kind, value)
+        return values
+
+    def from_variant(self, value: GLib.Variant) -> dict:
+        if value.get_type_string() != "a{sv}":
+            raise OksaError("InvalidResult", "Expected a response dictionary")
+        fields = {}
+        for index in range(value.n_children()):
+            entry = value.get_child_value(index)
+            name = entry.get_child_value(0).get_string()
+            if name in fields or name not in self.fields:
+                raise OksaError("InvalidResult", f"Unexpected response field: {name}")
+            fields[name] = entry.get_child_value(1).get_variant()
+        result = {}
+        for name, kind in self.fields.items():
+            if name not in fields:
+                if name in self.optional:
+                    result[name] = None
+                    continue
+                raise OksaError("InvalidResult", f"Missing response field: {name}")
+            item = fields[name]
+            if isinstance(kind, RecordSchema):
+                result[name] = kind.from_variant(item)
+            elif isinstance(kind, tuple):
+                if item.get_type_string() != "aa{sv}":
+                    raise OksaError("InvalidResult", f"Invalid array field: {name}")
+                result[name] = [kind[0].from_variant(item.get_child_value(i)) for i in range(item.n_children())]
+            else:
+                expected = "s" if kind in (dict, list) else kind
+                if item.get_type_string() != expected:
+                    raise OksaError("InvalidResult", f"Invalid wire type for {name}")
+                if kind in (dict, list):
+                    try:
+                        result[name] = json.loads(item.get_string())
+                    except (ValueError, RecursionError) as error:
+                        raise OksaError("InvalidResult", f"Invalid JSON field: {name}") from error
+                else:
+                    result[name] = item.unpack()
+        return result
+
+
 class Contract:
     BUS = "io.github.puu_os.Oksa"
     PATH = "/io/github/puu_os/Oksa"
@@ -52,13 +132,135 @@ class Contract:
         "RevokeKey": ((('token', 's'),), "a{sv}", False),
         "GetCalibration": ((), "a{sv}", False),
         "Calibrate": ((('force', 'b'),), "o", True),
-        "GetJob": ((('path', 'o'),), "a{sv}", False),
-        "ListJobs": ((), "a{sv}", False),
     }
     OPTIONAL_STRINGS = {"email", "duration", "user", "commit", "revision", "query"}
     MODEL_MUTATIONS = frozenset({"DownloadModel", "StartModel", "RestartModel", "StopServing", "RemoveModel", "Calibrate"})
     USER_MUTATIONS = frozenset({"CreateUser", "DeleteUser", "CreateKey", "RevokeKey"})
     MUTATIONS = MODEL_MUTATIONS | USER_MUTATIONS
+    ERROR = RecordSchema({"code": "s", "message": "s"})
+    MEMORY = RecordSchema({"total_mib": "x", "available_mib": "x", "used_mib": "x", "used_pct": "d"},
+                          frozenset({"total_mib", "available_mib", "used_mib", "used_pct"}))
+    GPU = RecordSchema({"index": "x", "name": "s", "vendor": "s", "memory_used_mib": "d",
+                        "memory_total_mib": "d", "gpu_util_pct": "d", "temperature_c": "d", "power_w": "d"},
+                       frozenset({"index", "name", "memory_used_mib", "memory_total_mib", "gpu_util_pct", "temperature_c", "power_w"}))
+    WORKLOAD = RecordSchema({"name": "s", "phase": "s", "ready": "b", "restarts": "x", "start_time": "s"},
+                            frozenset({"ready", "restarts"}))
+    METRICS = RecordSchema({"running_requests": "x", "waiting_requests": "x", "swapped_requests": "x", "kv_cache_usage_pct": "d"},
+                           frozenset({"running_requests", "waiting_requests", "swapped_requests", "kv_cache_usage_pct"}))
+    STATUS = RecordSchema({"serving_enabled": "b", "selected_model": "s", "active_model": "s", "host_memory": MEMORY,
+                           "gpus": (GPU,), "workloads": (WORKLOAD,), "metrics": METRICS,
+                           "model_status": "s", "gateway_status": "s"}, frozenset({"gpus", "workloads"}))
+    FRESHNESS = RecordSchema({"sampled_at": "s", "age_seconds": "d", "stale": "b", "error": "s", "max_age_seconds": "d"},
+                            frozenset({"sampled_at", "age_seconds", "error"}))
+    MODEL = RecordSchema({"name": "s", "id": "s", "repo_id": "s", "storage_mib": "x", "quantization": "s",
+                          "capabilities": "s", "active": "b", "selected": "b"})
+    SEARCH_MODEL = RecordSchema({"repo_id": "s", "name": "s", "author": "s", "downloads": "x", "gated": "b"})
+    MODEL_FILE = RecordSchema({"path": "s", "size": "x", "sha256": "s", "blob_id": "s"},
+                              frozenset({"sha256", "blob_id"}))
+    MODEL_METADATA = RecordSchema({"repo_id": "s", "revision": "s", "resolved_revision": "s", "model_name": "s",
+                                   "storage_mib": "x", "estimated_memory_mib": "x", "max_context": "x",
+                                   "quantization": "s", "architectures": list, "torch_dtype": "s", "gated": "b",
+                                   "files": (MODEL_FILE,)})
+    MESSAGE = RecordSchema({"ok": "b", "message": "s"})
+    CALIBRATION_LIMITS = RecordSchema({"max_model_len": "x", "max_num_seqs": "x", "max_num_batched_tokens": "x",
+                                      "gpu_memory_utilization": "d", "memory_bytes": "x"})
+    CALIBRATION_RESULT = RecordSchema({"schema": "x", "model": "s", "state": "s", "fingerprint": "s",
+                                      "identity": dict, "completed_at": "d", "reason": "s", "limits": CALIBRATION_LIMITS,
+                                      "trials": list, "search_complete": "b", "incomplete_reasons": list, "metrics": dict},
+                                     frozenset({"metrics"}))
+    CALIBRATION_STATUS = RecordSchema({"schema": "x", "model": "s", "boot_id": "s", "state": "s",
+                                      "message": "s", "fingerprint": "s", "updated_at": "d"})
+    CALIBRATION = RecordSchema({"ok": "b", "model": "s", "result": CALIBRATION_RESULT, "status": CALIBRATION_STATUS},
+                              frozenset({"result", "status"}))
+    RESPONSES = {
+        "GetStatus": RecordSchema({"ok": "b", "status": STATUS, "snapshot": FRESHNESS}, frozenset({"status"})),
+        "ListModels": RecordSchema({"ok": "b", "active_model": "s", "selected_model": "s", "serving_enabled": "b", "models": (MODEL,)}),
+        "SearchModels": RecordSchema({"ok": "b", "models": (SEARCH_MODEL,)}),
+        "InspectModel": RecordSchema({"ok": "b", "metadata": MODEL_METADATA, "fits": "b", "reason": "s"}),
+        "DownloadModel": MESSAGE,
+        "StartModel": MESSAGE,
+        "RestartModel": MESSAGE,
+        "StopServing": MESSAGE,
+        "RemoveModel": RecordSchema({"ok": "b", "deleted": "b", "reconciled": "b", "outcome": "s",
+                                    "message": "s", "warning": "s", "error": "s"}, frozenset({"message", "warning", "error"})),
+        "ListUsers": RecordSchema({"ok": "b", "users": list}),
+        "GetUser": RecordSchema({"ok": "b", "user": dict}),
+        "CreateUser": RecordSchema({"ok": "b", "result": dict}),
+        "DeleteUser": RecordSchema({"ok": "b", "outcome": "s", "deleted": "b", "confirmed_revoked_keys": "x",
+                                   "message": "s", "error": "s", "warning": "s"}, frozenset({"deleted", "message", "error", "warning"})),
+        "ListKeys": RecordSchema({"ok": "b", "keys": list}),
+        "CreateKey": RecordSchema({"ok": "b", "key": dict}),
+        "RevokeKey": MESSAGE,
+        "GetCalibration": CALIBRATION,
+        "Calibrate": CALIBRATION,
+    }
+
+    @classmethod
+    def validate_job_path(cls, path: str) -> None:
+        cls.text(path, "path")
+        if not re.fullmatch(re.escape(cls.PATH) + r"/jobs/[0-9a-f]{32}", path):
+            raise OksaError("InvalidInput", "Invalid job path")
+
+    @classmethod
+    def response_to_variant(cls, method: str, data: dict) -> dict[str, GLib.Variant]:
+        cls.encode(data)
+        if method not in cls.RESPONSES:
+            raise OksaError("InvalidResult", "Unknown response schema")
+        values = cls.RESPONSES[method].to_variant(data)
+        if GLib.Variant("a{sv}", values).get_size() > cls.MAX_JSON:
+            raise OksaError("InvalidResult", "Wire response exceeds 1 MiB")
+        return values
+
+    @classmethod
+    def response_from_variant(cls, method: str, data: GLib.Variant) -> dict:
+        if method not in cls.RESPONSES or data.get_size() > cls.MAX_JSON:
+            raise OksaError("InvalidResult", "Invalid response schema or size")
+        result = cls.RESPONSES[method].from_variant(data)
+        cls.validate_response(method, result)
+        return result
+
+    @classmethod
+    def validate_response(cls, method: str, data: dict) -> None:
+        cls.response_to_variant(method, data)
+
+    @classmethod
+    def snapshot_schema(cls, operation: str) -> RecordSchema:
+        if not isinstance(operation, str) or operation not in cls.RESPONSES or not cls.METHODS[operation][2]:
+            raise OksaError("InvalidResult", "Invalid job operation")
+        return RecordSchema({"ok": "b", "path": "o", "operation": "s", "state": "s", "progress": "s",
+                             "started_at": "d", "ended_at": "d", "result": cls.RESPONSES[operation],
+                             "error": cls.ERROR, "repo_id": "s", "model_name": "s"},
+                            frozenset({"ended_at", "result", "error", "repo_id", "model_name"}))
+
+    @classmethod
+    def validate_snapshot(cls, data: dict) -> None:
+        cls.encode(data)
+        values = cls.snapshot_schema(data.get("operation")).to_variant(data)
+        if GLib.Variant("a{sv}", values).get_size() > cls.MAX_JSON:
+            raise OksaError("InvalidResult", "Wire snapshot exceeds 1 MiB")
+        cls.validate_job_path(data["path"])
+        if data["state"] not in ("running", "succeeded", "failed", "canceled"):
+            raise OksaError("InvalidResult", "Invalid job state")
+        if data["state"] == "succeeded" and data.get("result") is None:
+            raise OksaError("InvalidResult", "Successful job has no result")
+        if data["state"] in ("failed", "canceled") and data.get("error") is None:
+            raise OksaError("InvalidResult", "Failed job has no error")
+
+    @classmethod
+    def snapshot_to_variant(cls, data: dict) -> dict[str, GLib.Variant]:
+        cls.validate_snapshot(data)
+        return cls.snapshot_schema(data["operation"]).to_variant(data)
+
+    @classmethod
+    def snapshot_from_variant(cls, data: GLib.Variant) -> dict:
+        if data.get_type_string() != "a{sv}" or data.get_size() > cls.MAX_JSON:
+            raise OksaError("InvalidResult", "Invalid job snapshot")
+        operation = data.lookup_value("operation", GLib.VariantType.new("s"))
+        if operation is None:
+            raise OksaError("InvalidResult", "Missing job operation")
+        result = cls.snapshot_schema(operation.get_string()).from_variant(data)
+        cls.validate_snapshot(result)
+        return result
 
     @classmethod
     def validate(cls, method: str, args: tuple) -> None:
@@ -87,8 +289,6 @@ class Contract:
                 raise OksaError("InvalidInput", "Invalid repository ID")
             if name == "commit" and not re.fullmatch(r"[0-9a-fA-F]{40}", value):
                 raise OksaError("InvalidInput", "Download requires a pinned 40-hex commit")
-            if name == "path" and not re.fullmatch(cls.PATH + r"/jobs/[0-9a-f]{32}", value):
-                raise OksaError("InvalidInput", "Invalid job path")
             if name == "duration" and value and not re.fullmatch(r"[1-9][0-9]{0,8}[smhd]", value):
                 raise OksaError("InvalidInput", "Invalid duration")
 
@@ -105,6 +305,7 @@ class Contract:
         if not isinstance(value, dict):
             raise OksaError("InvalidResult", "Expected a domain object")
         try:
+            cls.validate_json(value)
             encoded = json.dumps(value, allow_nan=False, ensure_ascii=True, separators=(",", ":"))
         except (TypeError, ValueError, RecursionError) as error:
             raise OksaError("InvalidResult", "Domain result is not finite JSON") from error
@@ -124,26 +325,17 @@ class Contract:
         return result
 
     @classmethod
-    def py_to_variant(cls, val: object) -> GLib.Variant:
-        if val is None:
-            return GLib.Variant("s", "")
-        if isinstance(val, bool):
-            return GLib.Variant("b", val)
-        if isinstance(val, int):
-            return GLib.Variant("x", val)
-        if isinstance(val, float):
-            return GLib.Variant("d", val)
-        if isinstance(val, str):
-            return GLib.Variant("s", val)
-        if isinstance(val, (list, tuple)):
-            return GLib.Variant("av", [GLib.Variant("v", cls.py_to_variant(x)) for x in val if x is not None])
-        if isinstance(val, dict):
-            return GLib.Variant("a{sv}", {str(k): GLib.Variant("v", cls.py_to_variant(v)) for k, v in val.items() if v is not None})
-        return GLib.Variant("s", str(val))
-
-    @classmethod
-    def to_variant_dict(cls, d: dict) -> dict[str, GLib.Variant]:
-        return {str(k): GLib.Variant("v", cls.py_to_variant(v)) for k, v in d.items() if v is not None}
+    def validate_json(cls, value: object) -> None:
+        if type(value) is dict:
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise OksaError("InvalidResult", "JSON object keys must be strings")
+                cls.validate_json(item)
+        elif type(value) is list:
+            for item in value:
+                cls.validate_json(item)
+        elif value is not None and type(value) not in (str, bool, int, float):
+            raise OksaError("InvalidResult", "Unsupported JSON value type")
 
 
 class OksaControl:

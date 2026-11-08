@@ -50,13 +50,13 @@ class Job:
             "Path": GLib.Variant("o", self.path),
             "Operation": GLib.Variant("s", self.operation),
             "StartedAt": GLib.Variant("d", float(self.started_at)),
-            "EndedAt": GLib.Variant("d", float(self.ended_at or 0.0)),
+            "EndedAt": GLib.Variant("ad", [] if self.ended_at is None else [float(self.ended_at)]),
             "State": GLib.Variant("s", self.state),
             "Progress": GLib.Variant("s", self.progress),
-            "Result": GLib.Variant("a{sv}", Contract.to_variant_dict(self.result or {})),
-            "Error": GLib.Variant("a{sv}", Contract.to_variant_dict(self.error or {})),
-            "RepoId": GLib.Variant("s", self.repo_id or ""),
-            "ModelName": GLib.Variant("s", self.model_name or ""),
+            "Result": GLib.Variant("a{sv}", {} if self.result is None else Contract.response_to_variant(self.operation, self.result)),
+            "Error": GLib.Variant("a{sv}", {} if self.error is None else Contract.ERROR.to_variant(self.error)),
+            "RepoId": GLib.Variant("as", [] if self.repo_id is None else [self.repo_id]),
+            "ModelName": GLib.Variant("as", [] if self.model_name is None else [self.model_name]),
         }
 
 
@@ -91,9 +91,10 @@ class JobStore:
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > Contract.MAX_JSON:
                 raise PermissionError(f"Unsafe job record: {path}")
             data = Contract.decode(path.read_text())
+            Contract.validate_snapshot(data)
             job = Job(**{key: data[key] for key in ("path", "operation", "started_at", "state", "progress",
                                                    "ended_at", "result", "error", "repo_id", "model_name")})
-            Contract.validate("GetJob", (job.path,))
+            Contract.validate_job_path(job.path)
             if job.path.rsplit("/", 1)[1] != path.stem or job.state not in ("running", "succeeded", "failed", "canceled"):
                 raise ValueError(f"Invalid job record: {path}")
             if job.state == "running":
@@ -160,6 +161,7 @@ class Worker:
         try:
             channel.send_bytes(b'{"kind":"ready"}')
             result = service_class().execute(method, args, worker.progress)
+            Contract.validate_response(method, result)
             encoded = Contract.encode(result)
             if len(encoded) > Contract.MAX_JSON - 65536:
                 raise OksaError("InvalidResult", "Result leaves insufficient space for a job snapshot")
@@ -190,21 +192,22 @@ class OksaDBusService:
     READ_LIMIT = 8
     READ_TIMEOUT = 90
     JOB_TIMEOUT = 6 * 60 * 60
+    MODEL_REVISION_INTERVAL = 2.5
     JOB_XML = f'''<node><interface name="{Contract.JOB}">
       <method name="GetSnapshot"><arg name="snapshot" type="a{{sv}}" direction="out"/></method>
       <method name="Cancel"/>
       <signal name="Progress"><arg name="progress" type="s"/></signal>
       <signal name="StateChanged"><arg name="state" type="s"/></signal>
-      <property name="Path" type="o" access="read"/>
-      <property name="Operation" type="s" access="read"/>
-      <property name="StartedAt" type="d" access="read"/>
-      <property name="EndedAt" type="d" access="read"/>
-      <property name="State" type="s" access="read"/>
-      <property name="Progress" type="s" access="read"/>
-      <property name="Result" type="a{{sv}}" access="read"/>
-      <property name="Error" type="a{{sv}}" access="read"/>
-      <property name="RepoId" type="s" access="read"/>
-      <property name="ModelName" type="s" access="read"/>
+      <property name="Path" type="o" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
+      <property name="Operation" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
+      <property name="StartedAt" type="d" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
+      <property name="EndedAt" type="ad" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+      <property name="State" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+      <property name="Progress" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+      <property name="Result" type="a{{sv}}" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+      <property name="Error" type="a{{sv}}" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+      <property name="RepoId" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
+      <property name="ModelName" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
     </interface></node>'''
 
     @classmethod
@@ -216,11 +219,11 @@ class OksaDBusService:
         return f'''<node>
           <interface name="{Contract.BUS}">
             {"".join(methods)}
-            <property name="Status" type="a{{sv}}" access="read"/>
-            <property name="ActiveModel" type="s" access="read"/>
-            <property name="ServingState" type="s" access="read"/>
-            <property name="ModelsRevision" type="s" access="read"/>
-            <property name="Jobs" type="ao" access="read"/>
+            <property name="Status" type="a{{sv}}" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+            <property name="ActiveModel" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+            <property name="ServingState" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+            <property name="ModelsRevision" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+            <property name="Jobs" type="ao" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
           </interface>
           <interface name="org.freedesktop.DBus.ObjectManager">
             <method name="GetManagedObjects">
@@ -253,6 +256,10 @@ class OksaDBusService:
         self.context = multiprocessing.get_context("spawn")
         self._last_active = None
         self._last_serving = None
+        self._last_status = None
+        self._last_models_revision = None
+        self._models_revision = None
+        self._models_revision_at = 0.0
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(36, 1, 0, 0, 0) != 0:
             self.store.close()
@@ -289,6 +296,9 @@ class OksaDBusService:
 
     def models_revision(self, status: dict) -> str:
         """Fingerprint model metadata and stable, already-sampled serving capacity."""
+        now = time.monotonic()
+        if self._models_revision is not None and now - self._models_revision_at < self.MODEL_REVISION_INTERVAL:
+            return self._models_revision
         state_dir = ms.STATE_DIR
         paths = {
             state_dir / "models.list", state_dir / "models.json",
@@ -378,15 +388,20 @@ class OksaDBusService:
             key=lambda gpu: json.dumps(gpu, sort_keys=True),
         )
         encoded = json.dumps((signatures, stable_status), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode()).hexdigest()
+        self._models_revision = hashlib.sha256(encoded.encode()).hexdigest()
+        self._models_revision_at = time.monotonic()
+        return self._models_revision
 
     def root_properties(self, prop_name: str | None = None) -> dict[str, GLib.Variant]:
+        """Keep Status stable between samples; GetStatus also reports elapsed age."""
         snapshot = self.monitoring.snapshot()
+        data = snapshot.to_json()
+        data["snapshot"].pop("age_seconds")
         status = snapshot.status if isinstance(snapshot.status, dict) else {}
         active = status.get("active_model") or ""
         serving = status.get("model_status") or ("ready" if active else "stopped")
         properties = {
-            "Status": GLib.Variant("a{sv}", Contract.to_variant_dict(snapshot.to_json())),
+            "Status": GLib.Variant("a{sv}", Contract.response_to_variant("GetStatus", data)),
             "ActiveModel": GLib.Variant("s", active),
             "ServingState": GLib.Variant("s", serving),
             "Jobs": GLib.Variant("ao", list(self.store.jobs.keys())),
@@ -462,40 +477,40 @@ class OksaDBusService:
             job.error = {"code": "Canceled", "message": "Operation was canceled by user"}
             self.store.save(job)
             self.emit(job, "StateChanged", job.state)
-            changed = {
-                "State": GLib.Variant("s", job.state),
-                "EndedAt": GLib.Variant("d", float(job.ended_at)),
-                "Error": GLib.Variant("a{sv}", Contract.to_variant_dict(job.error)),
-            }
-            try:
-                self.connection.emit_signal(
-                    None, job.path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                    GLib.Variant("(sa{sv}as)", (Contract.JOB, changed, []))
-                )
-            except Exception:
-                pass
+            self.notify_job_properties(job, ("State", "EndedAt", "Error"))
         invocation.return_value(None)
 
     def notify_status_if_changed(self) -> None:
         snapshot = self.monitoring.snapshot()
+        data = snapshot.to_json()
+        data["snapshot"].pop("age_seconds")
         status = snapshot.status if isinstance(snapshot.status, dict) else {}
         active = status.get("active_model") or ""
         serving = status.get("model_status") or ("ready" if active else "stopped")
-        if active != self._last_active or serving != self._last_serving:
-            self._last_active = active
-            self._last_serving = serving
-            changed = {
-                "ActiveModel": GLib.Variant("s", active),
-                "ServingState": GLib.Variant("s", serving),
-                "Status": GLib.Variant("a{sv}", Contract.to_variant_dict(snapshot.to_json())),
-            }
-            try:
-                self.connection.emit_signal(
-                    None, Contract.PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                    GLib.Variant("(sa{sv}as)", (Contract.BUS, changed, []))
-                )
-            except Exception:
-                pass
+        revision = self.models_revision(status)
+        changed = {}
+        if data != self._last_status:
+            changed["Status"] = GLib.Variant("a{sv}", Contract.response_to_variant("GetStatus", data))
+        if active != self._last_active:
+            changed["ActiveModel"] = GLib.Variant("s", active)
+        if serving != self._last_serving:
+            changed["ServingState"] = GLib.Variant("s", serving)
+        if revision != self._last_models_revision:
+            changed["ModelsRevision"] = GLib.Variant("s", revision)
+        if not changed:
+            return
+        try:
+            self.connection.emit_signal(
+                None, Contract.PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                GLib.Variant("(sa{sv}as)", (Contract.BUS, changed, []))
+            )
+        except GLib.Error:
+            logging.exception("Unable to emit status property changes")
+            return
+        self._last_status = data
+        self._last_active = active
+        self._last_serving = serving
+        self._last_models_revision = revision
 
     def authorize(self, sender: str) -> None:
         reply = self.connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
@@ -518,20 +533,8 @@ class OksaDBusService:
             if interface != Contract.BUS or path != Contract.PATH:
                 raise OksaError("UnknownMethod", "Unknown domain method")
             Contract.validate(method, args)
-            if method == "GetJob":
-                self.return_snapshot(args[0], sender, invocation)
-            elif method == "GetStatus":
-                invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict(self.monitoring.snapshot().to_json()),)))
-            elif method == "ListJobs":
-                snapshots = []
-                for job in self.store.jobs.values():
-                    snapshot = job.snapshot()
-                    snapshot["result"] = None
-                    snapshot["progress"] = job.progress[:512]
-                    if job.error:
-                        snapshot["error"] = {"code": job.error["code"], "message": job.error["message"][:512]}
-                    snapshots.append(snapshot)
-                invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict({"ok": True, "jobs": snapshots}),)))
+            if method == "GetStatus":
+                invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant("GetStatus", self.monitoring.snapshot().to_json()),)))
             else:
                 mutation = Contract.METHODS[method][2]
                 if method in Contract.MODEL_MUTATIONS and any(worker.operation in Contract.MODEL_MUTATIONS for worker in self.workers):
@@ -555,7 +558,7 @@ class OksaDBusService:
             raise OksaError("NotFound", "Unknown or expired job")
         if len(job.subscribers) < 128:
             job.subscribers.add(sender)
-        invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict(job.snapshot()),)))
+        invocation.return_value(GLib.Variant("(a{sv})", (Contract.snapshot_to_variant(job.snapshot()),)))
 
     def launch(self, method: str, args: tuple, sender: str, invocation, mutation: bool) -> None:
         job = None
@@ -599,6 +602,8 @@ class OksaDBusService:
                 job.ended_at = time.time()
                 job.error = {"code": "Unavailable", "message": str(error)[:4096]}
                 self.store.save(job)
+                self.emit(job, "StateChanged", job.state)
+                self.notify_job_properties(job, ("State", "EndedAt", "Error"))
             raise OksaError("Unavailable", "Could not start operation worker") from error
         finally:
             child.close()
@@ -617,6 +622,17 @@ class OksaDBusService:
                 job.subscribers.discard(sender)
                 logging.warning("Unable to deliver job signal to %s", sender)
 
+    def notify_job_properties(self, job: Job, names: tuple[str, ...]) -> None:
+        properties = job.properties()
+        changed = {name: properties[name] for name in names}
+        try:
+            self.connection.emit_signal(
+                None, job.path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                GLib.Variant("(sa{sv}as)", (Contract.JOB, changed, []))
+            )
+        except GLib.Error:
+            logging.exception("Unable to emit job property changes for %s", job.path)
+
     def finish(self, worker: Invocation, result: dict | None, error: dict | None) -> None:
         if result is not None and result.get("ok") is False and error is None:
             error = {"code": "OperationFailed", "message": str(result.get("error", "Operation failed"))[:4096]}
@@ -627,23 +643,11 @@ class OksaDBusService:
             job.ended_at = time.time()
             self.store.save(job)
             self.emit(job, "StateChanged", job.state)
-            changed = {
-                "State": GLib.Variant("s", job.state),
-                "EndedAt": GLib.Variant("d", float(job.ended_at)),
-                "Result": GLib.Variant("a{sv}", Contract.to_variant_dict(job.result or {})),
-                "Error": GLib.Variant("a{sv}", Contract.to_variant_dict(job.error or {})),
-            }
-            try:
-                self.connection.emit_signal(
-                    None, job.path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                    GLib.Variant("(sa{sv}as)", (Contract.JOB, changed, []))
-                )
-            except Exception:
-                pass
+            self.notify_job_properties(job, ("State", "EndedAt", "Result", "Error"))
         elif error:
             self.return_error(worker.invocation, OksaError(error["code"], error["message"]))
         else:
-            worker.invocation.return_value(GLib.Variant("(a{sv})", (Contract.to_variant_dict(result),)))
+            worker.invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant(worker.operation, result),)))
         self.dispose(worker)
         if worker.operation in Contract.MODEL_MUTATIONS:
             self.monitoring.invalidate()
@@ -685,16 +689,11 @@ class OksaDBusService:
                     if kind == "ready":
                         worker.ready = True
                     elif kind == "progress" and worker.job:
-                        worker.job.progress = packet["text"]
-                        self.store.save(worker.job)
-                        self.emit(worker.job, "Progress", worker.job.progress)
-                        try:
-                            self.connection.emit_signal(
-                                None, worker.job.path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                                GLib.Variant("(sa{sv}as)", (Contract.JOB, {"Progress": GLib.Variant("s", worker.job.progress)}, []))
-                            )
-                        except Exception:
-                            pass
+                        if worker.job.progress != packet["text"]:
+                            worker.job.progress = packet["text"]
+                            self.store.save(worker.job)
+                            self.emit(worker.job, "Progress", worker.job.progress)
+                            self.notify_job_properties(worker.job, ("Progress",))
                     elif kind in ("result", "error"):
                         self.finish(worker, packet.get("result"), packet.get("error"))
                         terminal = True
