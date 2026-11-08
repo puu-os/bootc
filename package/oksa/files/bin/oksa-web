@@ -3,13 +3,6 @@
 # Copyright (C) Opinsys Oy 2026
 
 import os
-import sys
-from pathlib import Path
-
-for extra_path in ("/usr/libexec/puu", "/usr/local/usr/libexec/puu"):
-    if Path(extra_path).is_dir() and extra_path not in sys.path:
-        sys.path.insert(0, extra_path)
-
 from nicegui import app, ui
 
 from oksa_client import OksaClient

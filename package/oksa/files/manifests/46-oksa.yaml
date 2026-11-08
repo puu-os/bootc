@@ -30,8 +30,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: oksa
-          image: quay.io/puu/oksa:1.0
-          imagePullPolicy: IfNotPresent
+          image: localhost/puu/oksa:1.0
+          imagePullPolicy: Never
           ports:
             - name: http
               containerPort: 8088

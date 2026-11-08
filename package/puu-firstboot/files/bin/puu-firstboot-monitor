@@ -515,7 +515,7 @@ def snapshot(progress):
     deployments = {}
     services = {}
     for name, stage in (([(model_service, "model")] if inference else [])
-                        + [("litellm", "gateway"), ("open-webui", "webui")]):
+                        + [("litellm", "gateway"), ("open-webui", "webui"), ("oksa", "webui")]):
         deployment = resource(resources, "Deployment", name)
         service = resource(resources, "Service", name)
         deployments[name] = deployment
@@ -525,6 +525,8 @@ def snapshot(progress):
                 message = "Downloading and loading AI model…"
             elif name == "litellm":
                 message = "Starting API gateway…"
+            elif name == "oksa":
+                message = "Starting OKSA dashboard…"
             else:
                 message = "Starting desktop services…"
             raise Pending(stage, message)
@@ -546,10 +548,12 @@ def snapshot(progress):
     if not isinstance(controller, str) or not controller or "envoy" in controller.lower():
         raise Pending("gateway", "Waiting for the configured agentgateway class controller.")
     gateway = resource(resources, "Gateway", "puu-gateway")
-    routes = [resource(resources, "HTTPRoute", name) for name in ("puu-gateway", "puu-api")]
+    routes = [resource(resources, "HTTPRoute", name) for name in ("puu-gateway", "puu-api", "oksa")]
     webui_host, api_host = ms.primary_gateway_hosts()
     if not route_ready(routes[0], webui_host, "open-webui", 8080, controller) or not route_ready(routes[1], api_host, "litellm", 4000, controller):
         raise Pending("gateway", "Waiting for current public routes to be accepted and their backends resolved.")
+    if not route_ready(routes[2], f"oksa.{webui_host}", "oksa", 8088, controller):
+        raise Pending("webui", "Waiting for the current OKSA dashboard route to be accepted and its backend resolved.")
     address = gateway_address(gateway, resources)
     key, key_identity = master_key()
     critical = [gateway_class, gateway, *routes, *deployments.values(), *services.values()]
@@ -619,6 +623,10 @@ def verify(progress):
     health = http_request(address, 80, "/health", webui_host)
     if not isinstance(health, dict) or health.get("status") is not True:
         raise Pending("webui", "Desktop services are starting.")
+    progress.publish("webui", "Checking OKSA dashboard.")
+    health = http_request(address, 80, "/health", f"oksa.{webui_host}")
+    if not isinstance(health, dict) or health.get("status") != "ok":
+        raise Pending("webui", "OKSA dashboard is starting.")
     progress.publish("webui", "Desktop services are ready.", "done")
     progress.publish("verification", "Verifying system response.")
     if inference:

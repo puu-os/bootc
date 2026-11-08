@@ -13,7 +13,10 @@ OKSA_LICENSE = GPL-2.0+ (native files), Apache-2.0 (CRDs)
 OKSA_LICENSE_FILES = LICENSE LICENSE.Apache-2.0
 OKSA_SETUP_TYPE = hatch
 OKSA_SUBDIR = native
-OKSA_DEPENDENCIES = dbus k3s python-gobject python-nicegui xdg-dbus-proxy
+# Python runtime dependencies are selected by Kconfig, not .mk dependency edges.
+OKSA_WEB_RUNTIME_PACKAGES := $(sort $(filter python-%,$(PACKAGES)))
+OKSA_DEPENDENCIES = dbus host-sloci-image host-skopeo k3s \
+	$(OKSA_WEB_RUNTIME_PACKAGES) xdg-dbus-proxy
 
 define OKSA_USERS
 	oksa -1 oksa -1 * /var/empty /sbin/nologin - OKSA dashboard
@@ -70,6 +73,45 @@ define OKSA_INSTALL_ASSETS
 endef
 OKSA_POST_INSTALL_TARGET_HOOKS += OKSA_INSTALL_ASSETS
 
+# Use dependency snapshots, not the OS rootfs (which contains K3s and OKSA itself).
+define OKSA_BUILD_WEB_IMAGE
+	rm -rf $(@D)/web-rootfs $(@D)/web-oci $(@D)/web-export
+	$(call per-package-rsync,$(OKSA_WEB_RUNTIME_PACKAGES),target,$(@D)/web-rootfs,copy)
+	rm -f $(@D)/web-rootfs/THIS_IS_NOT_YOUR_ROOT_FILESYSTEM
+	rm -rf $(@D)/web-rootfs/usr/include $(@D)/web-rootfs/usr/lib/pkgconfig \
+		$(@D)/web-rootfs/usr/lib/cmake $(@D)/web-rootfs/usr/share/gir-1.0 \
+		$(@D)/web-rootfs/usr/share/doc $(@D)/web-rootfs/usr/share/man \
+		$(@D)/web-rootfs/etc/init.d $(@D)/web-rootfs/etc/systemd \
+		$(@D)/web-rootfs/usr/lib/systemd $(@D)/web-rootfs/usr/lib/tmpfiles.d \
+		$(@D)/web-rootfs/usr/share/dbus-1
+	find $(@D)/web-rootfs/usr/lib -type f \( -name '*.a' -o -name '*.la' \) -delete
+	$(INSTALL) -d -m 0755 $(@D)/web-rootfs/usr/libexec/puu
+	$(INSTALL) -m 0755 $(TARGET_DIR)/usr/libexec/puu/oksa-web \
+		$(@D)/web-rootfs/usr/libexec/puu/
+	$(INSTALL) -m 0644 $(TARGET_DIR)/usr/libexec/puu/oksa_*.py \
+		$(@D)/web-rootfs/usr/libexec/puu/
+	tar -C $(@D)/web-rootfs --sort=name --mtime=@$(SOURCE_DATE_EPOCH) \
+		--owner=0 --group=0 --numeric-owner -cf $(@D)/web-rootfs.tar .
+	gzip -n -f $(@D)/web-rootfs.tar
+	$(HOST_DIR)/bin/sloci-image --arch $(GO_GOARCH) --user 1000:1000 \
+		--env PATH=/usr/bin:/bin --env HOME=/tmp --working-dir /tmp \
+		--env PYTHONDONTWRITEBYTECODE=1 --port 8088 \
+		--entrypoint /usr/bin/python3 --entrypoint /usr/libexec/puu/oksa-web \
+		--label io.github.puu_os.oksa.runtime-packages="$(OKSA_WEB_RUNTIME_PACKAGES)" \
+		$(@D)/web-rootfs.tar.gz $(@D)/web-oci:$(OKSA_VERSION)
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/share/puu/k3s/images
+	$(HOST_DIR)/bin/skopeo --insecure-policy copy --preserve-digests \
+		oci:$(@D)/web-oci:$(OKSA_VERSION) \
+		oci:$(@D)/web-export:localhost/puu/oksa:$(OKSA_VERSION)
+	tar -C $(@D)/web-export --sort=name --mtime=@$(SOURCE_DATE_EPOCH) \
+		--owner=0 --group=0 --numeric-owner \
+		-cf $(TARGET_DIR)/usr/share/puu/k3s/images/oksa.tar blobs index.json oci-layout
+	digest=$$($(HOST_DIR)/bin/skopeo inspect --format '{{.Digest}}' oci:$(@D)/web-oci:$(OKSA_VERSION)) && \
+		sed -i "s|image: localhost/puu/oksa:.*|image: localhost/puu/oksa@$$digest|" \
+			$(TARGET_DIR)/usr/share/puu/k3s/manifests/46-oksa.yaml
+endef
+OKSA_POST_INSTALL_TARGET_HOOKS += OKSA_BUILD_WEB_IMAGE
+
 define OKSA_INSTALL_INIT_SYSTEMD
 	for unit in puu-k3s-addons.service puu-model-serving-labeler.service \
 		puu-model-serving-labeler.timer puu-vllm-planner.service \
@@ -97,6 +139,7 @@ $(OKSA_TARGET_EXTRACT): $(OKSA_FILES)/LICENSE $(OKSA_PKGDIR)/LICENSE.Apache-2.0
 
 # Refresh the dependency snapshot so it cannot overwrite newer K3s support files.
 $(OKSA_TARGET_CONFIGURE): $(K3S_TARGET_INSTALL_TARGET)
+$(OKSA_TARGET_CONFIGURE): $(foreach pkg,$(OKSA_WEB_RUNTIME_PACKAGES),$($(call UPPERCASE,$(pkg))_TARGET_INSTALL_TARGET))
 
 # Reinstall when the support files change so the image gets the current copies and
 # the file accounting from the configure/install steps stays consistent.
