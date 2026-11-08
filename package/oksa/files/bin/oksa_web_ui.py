@@ -3,6 +3,7 @@
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 import re
@@ -12,6 +13,14 @@ from nicegui import run, ui
 
 from oksa_client import OksaClient, OksaClientError
 from oksa_control import Contract
+from oksa_web_views import ModelDetails, ModelsPresentation, ModelsView
+
+
+@dataclass(frozen=True)
+class _Freshness:
+    stale: bool
+    label: str
+    detail: str
 
 
 class OksaWebUI:
@@ -30,12 +39,15 @@ class _OksaPage:
     def __init__(self, service: OksaClient) -> None:
         self.service = service
         self.client = ui.context.client
+        self.disconnected = False
         self.locks = {name: asyncio.Lock() for name in ("status", "pull", "models", "calibration", "users", "search", "inspect")}
         self.generations = dict.fromkeys(self.locks, 0)
         self.busy: set[str] = set()
         self.warnings: dict[str, str] = {}
         self.models: list[dict] = []
         self.users: list[dict] = []
+        self.models_loaded = False
+        self.models_error_text = ""
         self.keys: dict[str, dict] = {}
         self.users_verified = False
         self.keys_verified = False
@@ -44,20 +56,22 @@ class _OksaPage:
         self.status: dict | None = None
         self.status_received = 0.0
         self.status_failed = False
+        self.monitoring_error_text = ""
         self.partial = False
         self.status_stale = True
         self.models_verified = False
-        self.serving_enabled = None
         self.jobs: dict[str, dict] = {}
         self.jobs_seen: set[str] = set()
         self.job_details: set[str] = set()
         self.jobs_received = 0.0
         self.jobs_failed = True
         self.model_job: str | None = None
+        self.activity_error_text = ""
         self.model_operation: str | None = None
         self.model_uncertain = False
         self.calibration: dict | None = None
         self.calibration_received = 0.0
+        self.calibration_error = ""
         self.inspection: dict | None = None
         self.inspection_generation = 0
         self.secret = ""
@@ -96,17 +110,20 @@ class _OksaPage:
         self.client.on_connect(self._poll)
         self.client.on_disconnect(self._disconnect)
         self.client.on_delete(self._clear_secret)
-        ui.timer(1, self._render_freshness)
+        self._render_page()
+        ui.timer(1, self._render_page)
         ui.timer(2.5, self._poll)
 
     @staticmethod
     def _table(title: str, fields: dict[str, str], *, selection: str | None = None, row_key: str = "id"):
-        return ui.table(
+        table = ui.table(
             title=title,
             columns=[{"name": key, "field": key, "label": label, "sortable": True}
                      for key, label in fields.items()],
             rows=[], row_key=row_key, selection=selection, pagination=10,
         ).props("color=primary dense flat bordered").classes("w-full")
+        table.add_slot("header-selection", "")
+        return table
 
     @staticmethod
     def _number(value, maximum: float = math.inf, *, integer: bool = False) -> bool:
@@ -211,6 +228,10 @@ class _OksaPage:
     async def _poll(self) -> None:
         if self.client.is_deleted or not self.client.has_socket_connection:
             return
+        if self.disconnected:
+            self.disconnected = False
+            self._render_page()
+            self._render_users({row["user_id"] for row in self.users_table.selected}, set())
         if self.tabs.value in ("Monitoring", "Models", "Activity") or self.model_uncertain or self.model_job:
             await self._refresh_model_state()
         else:
@@ -264,22 +285,27 @@ class _OksaPage:
         if reply is None:
             return
         data = reply[1]
-        if not self._success(reply) or ("status" in data and data["status"] is not None and not isinstance(data["status"], dict)):
+        if not self._success(reply):
             self.status_failed = True
-            self.monitoring_error.set_text("Monitoring update failed. " + self._error(reply))
-            self.monitoring_error.set_visibility(True)
-            self._render_freshness()
-            return
-        self.status_failed = False
-        self.status = data.get("status")
-        self.snapshot = data.get("snapshot") if isinstance(data.get("snapshot"), dict) else {}
-        self.status_received = requested
-        error_text = str(self.snapshot.get("error") or "")
-        self.monitoring_error.set_text(error_text)
-        self.monitoring_error.set_visibility(bool(error_text))
+            self.monitoring_error_text = "Monitoring update failed. " + self._error(reply)
+        else:
+            self.status_failed = False
+            self.status = data["status"]
+            self.snapshot = data["snapshot"]
+            self.status_received = requested
+            self.monitoring_error_text = str(self.snapshot.get("error") or "")
+        self._render_page()
+
+    def _render_monitoring(self, freshness: _Freshness, serving: str) -> None:
+        self.monitoring_error.set_text(self.monitoring_error_text)
+        self.monitoring_error.set_visibility(bool(self.monitoring_error_text))
         self.partial = False
         if self.status is None:
-            self._render_freshness()
+            for widget in (self.memory, self.running_requests, self.queued_requests, self.kv_cache):
+                widget.set_text("Unavailable")
+            for widget in (self.memory_percent, self.memory_progress, self.kv_progress, self.gpus_table, self.workloads_table):
+                widget.set_visibility(False)
+            self._render_monitoring_freshness(freshness, serving)
             return
         status = self.status
         model_state = status.get("model_status")
@@ -329,7 +355,7 @@ class _OksaPage:
         self._progress(self.kv_progress, kv_pct)
 
         gpus = status.get("gpus")
-        self.gpus_table.rows = []
+        gpu_rows = []
         self.gpus_label.set_text("No GPUs reported" if gpus == [] else "" if isinstance(gpus, list) else "GPU data unavailable")
         if isinstance(gpus, list):
             for index, gpu in enumerate(gpus):
@@ -337,7 +363,7 @@ class _OksaPage:
                     self.partial = True
                     continue
                 total = gpu.get("memory_total_mib")
-                self.gpus_table.rows.append({
+                gpu_rows.append({
                     "id": index, "index": self._metric(gpu.get("index"), integer=True), "name": self._text(gpu.get("name")),
                     "utilization": self._metric(gpu.get("gpu_util_pct"), "%", 100),
                     "memory": self._metric(gpu.get("memory_used_mib")) + " / "
@@ -347,13 +373,15 @@ class _OksaPage:
                 })
         else:
             self.partial = True
-        has_gpus = bool(self.gpus_table.rows)
+        has_gpus = bool(gpu_rows)
         self.gpus_table.set_visibility(has_gpus)
         self.gpus_label.set_visibility(not has_gpus)
-        self.gpus_table.update()
+        if self.gpus_table.rows != gpu_rows:
+            self.gpus_table.rows = gpu_rows
+            self.gpus_table.update()
 
         workloads = status.get("workloads")
-        self.workloads_table.rows = []
+        workload_rows = []
         self.workloads_label.set_text("No workloads reported" if workloads == [] else "" if isinstance(workloads, list) else "Workload data unavailable")
         if isinstance(workloads, list):
             for index, workload in enumerate(workloads):
@@ -363,18 +391,20 @@ class _OksaPage:
                 ready = workload.get("ready")
                 if type(ready) is not bool:
                     self.partial = True
-                self.workloads_table.rows.append({
+                workload_rows.append({
                     "id": index, "name": self._text(workload.get("name")), "phase": self._text(workload.get("phase")),
                     "ready": "Yes" if ready is True else "No" if ready is False else "Unavailable",
                     "restarts": self._metric(workload.get("restarts"), integer=True),
                 })
         else:
             self.partial = True
-        has_workloads = bool(self.workloads_table.rows)
+        has_workloads = bool(workload_rows)
         self.workloads_table.set_visibility(has_workloads)
         self.workloads_label.set_visibility(not has_workloads)
-        self.workloads_table.update()
-        self._render_freshness()
+        if self.workloads_table.rows != workload_rows:
+            self.workloads_table.rows = workload_rows
+            self.workloads_table.update()
+        self._render_monitoring_freshness(freshness, serving)
 
     def _progress(self, progress, value) -> None:
         available = self._number(value, 100)
@@ -382,9 +412,20 @@ class _OksaPage:
         if available:
             progress.set_value(value / 100)
 
-    def _render_freshness(self) -> None:
+    def _render_page(self) -> None:
         if self.client.is_deleted:
             return
+        freshness = self._monitoring_freshness()
+        self.status_stale = freshness.stale
+        serving = self._serving_state()
+        self._render_monitoring(freshness, serving)
+        self._render_models(serving)
+        rows = self._activity_rows()
+        self._render_activity(rows)
+        self._render_downloads(rows)
+        self._render_download_form()
+
+    def _monitoring_freshness(self) -> _Freshness:
         metadata = self.snapshot
         sampled = metadata.get("sampled_at")
         try:
@@ -399,20 +440,24 @@ class _OksaPage:
                  and (error is None or isinstance(error, str)))
         elapsed = age + max(0, time.monotonic() - self.status_received) if known else None
         stale = not known or self.status_failed or metadata.get("stale") or error is not None or elapsed > maximum
-        if self.status_failed:
+        if self.disconnected:
+            update_text = "Disconnected — monitoring updates paused"
+        elif self.status_failed:
             update_text = "Monitoring updates unavailable"
         elif not known:
             update_text = "Loading monitoring data…"
         elif stale:
             update_text = f"Data is out of date — updated {int(elapsed)} seconds ago"
-        elif self.partial:
-            update_text = "Some monitoring data is unavailable"
         else:
             update_text = "Updated just now" if elapsed < 5 else f"Updated {int(elapsed)} seconds ago"
-        self.freshness.set_text(update_text)
-        self.freshness_detail.set_text(f"Last update {int(elapsed)} seconds ago" if known else "Waiting for a confirmed update")
+        detail = f"Last update {int(elapsed)} seconds ago" if known else "Waiting for a confirmed update"
+        return _Freshness(stale, update_text, detail)
+
+    def _serving_state(self) -> str:
+        if self.disconnected:
+            return "Disconnected"
         inference = "Status unknown"
-        if self.status is not None and not stale:
+        if self.status is not None and not self.status_stale:
             model, gateway = self.status.get("model_status"), self.status.get("gateway_status")
             inference = {"stopped": "Stopped", "no-model": "Stopped", "not-ready": "Not ready",
                          "unavailable": "Status unknown"}.get(model, "Status unknown")
@@ -423,51 +468,29 @@ class _OksaPage:
                         and job["operation"] in ("StartModel", "RestartModel", "StopServing", "Calibrate")), None)
         if running:
             inference = "Queued" if running["state"] == "queued" else self._operation_title(running)
-        self.inference.set_text(inference)
-        self.status_stale = stale
-        self.activity_freshness.set_text("Up to date" if self._jobs_fresh() else "Waiting for activity updates")
-        self.activity_spinner.set_visibility(self._jobs_fresh() and any(job["state"] in ("queued", "running") for job in self.jobs.values()))
-        self._render_activity()
-        self._render_models()
+        return inference
+
+    def _render_monitoring_freshness(self, freshness: _Freshness, serving: str) -> None:
+        label = "Some monitoring data is unavailable" if self.partial and not freshness.stale else freshness.label
+        self.freshness.set_text(label)
+        self.freshness_detail.set_text(freshness.detail)
+        self.inference.set_text(serving)
 
     def _build_models(self) -> None:
-        with ui.row().classes("w-full items-center"):
-            ui.button("Find", icon="search", on_click=self._open_download)
-            self.start_button = ui.button("Start", on_click=lambda: self._model_action("start"))
-            self.restart_button = ui.button("Restart", on_click=lambda: self._model_action("restart")).props("outline")
-            self.stop_button = ui.button("Stop", on_click=lambda: self._model_action("stop")).props("outline")
-            self.remove_button = ui.button("Delete", color="negative", on_click=lambda: self._model_action("remove")).props("outline")
-            self.model_spinner = ui.spinner()
-            self.model_spinner.set_visibility(False)
-        self.model_controls = [self.start_button, self.restart_button, self.stop_button, self.remove_button]
-        self.models_error = ui.label("").classes("text-negative")
-        self.models_empty = ui.label("Loading installed models…")
-        self.models_table = self._table("", {
-            "name": "Model", "storage_mib": "On disk (MiB)", "quantization": "Format",
-            "capabilities": "Host capabilities", "state": "State",
-        }, selection="single").classes("flex-1 min-h-0")
-        self.models_table.set_visibility(False)
-        self.models_table.on_select(self._model_selection)
-        self._model_selection()
+        self.model_view = ModelsView(on_select=self._model_selection, on_action=self._model_action, on_find=self._open_download)
 
     def _build_activity(self) -> None:
         with ui.row().classes("w-full items-center"):
-            self.activity_cancel = ui.button("Cancel", on_click=self._cancel_selected_job).props("outline")
-            self.activity_details = ui.button("Details", on_click=self._show_job).props("outline")
+            self.activity_cancel = ui.button("Cancel operation", on_click=self._cancel_selected_job).props("outline")
+            self.activity_details = ui.button("Operation details", on_click=self._show_job).props("outline")
             self.activity_freshness = ui.badge("Loading activity…").props("outline")
             self.activity_spinner = ui.spinner()
             self.activity_spinner.set_visibility(False)
         self.pull_error = ui.label("").classes("text-negative")
-        self.activity_table = self._table("", {"action": "Action", "state": "Status", "elapsed": "Seconds"}, selection="single")
+        self.activity_table = self._table("Operation history", {"action": "Action", "target": "Target", "state": "Status", "elapsed": "Seconds"}, selection="single")
         self.activity_table.on_select(self._activity_selection)
         self.activity_table.classes("flex-1 min-h-0")
         self._activity_selection()
-        with ui.expansion("Calibration", icon="tune").classes("w-full"):
-            self.calibration_badge = ui.badge("No record").props("outline")
-            self.calibration_context = ui.label("")
-            self.calibration_message = ui.label("").classes("whitespace-pre-line break-words")
-            self.model_profile = ui.label("")
-        self._model_selection()
 
     def _build_download_manager(self) -> None:
         with ui.expansion("Downloads", icon="download").props("dense").classes("w-full shrink-0 border-t bg-gray-50") as self.download_manager:
@@ -537,10 +560,10 @@ class _OksaPage:
         return f"{value / 1024:.1f} GiB" if value >= 1024 else f"{value:g} MiB"
 
     def _selected_model(self) -> dict | None:
-        selected = self.models_table.selected
-        if not selected:
+        model_id = self.model_view.model_id
+        if model_id is None:
             return None
-        return next((model for model in self.models if model.get("id") == selected[0].get("id")), None)
+        return next((model for model in self.models if model.get("id") == model_id), None)
 
     def _jobs_fresh(self) -> bool:
         return not self.jobs_failed and time.monotonic() - self.jobs_received <= 10
@@ -556,12 +579,6 @@ class _OksaPage:
                 and not self.busy.intersection({"model", "download"})
                 and not self._active_model_jobs())
 
-    def _restart_target(self) -> dict | None:
-        model = self._selected_model()
-        if model is not None:
-            return model if (model.get("active") or model.get("selected")) and model.get("capabilities") == "ok" else None
-        return next((item for item in self.models
-                     if (item.get("active") or item.get("selected")) and item.get("capabilities") == "ok"), None)
 
     def _model_state(self, model: dict) -> str:
         status = self.status or {}
@@ -578,66 +595,90 @@ class _OksaPage:
             return "Status unknown"
         return "Installed"
 
-    def _model_selection(self) -> None:
+    async def _model_selection(self) -> None:
+        self.generations["calibration"] += 1
         model = self._selected_model()
-        available = self._model_available() and self.models_verified
-        self.start_button.set_enabled(available and model is not None and model.get("capabilities") == "ok"
-                                      and self._model_state(model) != "Serving")
-        self.restart_button.set_enabled(available and self._restart_target() is not None)
-        self.stop_button.set_enabled(available)
-        self.remove_button.set_enabled(available and model is not None and model.get("removable") is not False)
-        if hasattr(self, "download_button"):
-            self.download_button.set_enabled(self.inspection is not None and self._model_available() and "inspect" not in self.busy)
-        profile = ""
-        calibration = self.calibration or {}
-        result = calibration.get("result")
-        if (model and self.models_verified and (model.get("selected") or model.get("active"))
-                and calibration.get("model") == model["id"] and isinstance(result, dict)
-                and result.get("model") == model["id"] and result.get("state") == "complete" and result.get("reason") == "measured"):
-            limits = result.get("limits")
-            if (isinstance(limits, dict) and self._number(limits.get("max_model_len"), integer=True)
-                    and self._number(limits.get("max_num_seqs"), integer=True)
-                    and limits["max_model_len"] > 0 and limits["max_num_seqs"] > 0):
-                prefix = "Unverified measured profile" if self.status_stale or time.monotonic() - self.calibration_received > 10 else "Measured profile"
-                profile = (f"{prefix} (not live): context {limits['max_model_len']} tokens · "
-                           f"concurrency {limits['max_num_seqs']}")
-        if not hasattr(self, "model_profile"):
-            return
-        self.model_profile.set_text(profile if model else "")
-        self.model_profile.set_visibility(bool(profile) and model is not None)
-        activity = calibration.get("status")
-        valid_activity = (isinstance(activity, dict) and isinstance(calibration.get("model"), str)
-                          and bool(calibration["model"].strip()) and activity.get("model") == calibration["model"]
-                          and isinstance(activity.get("state"), str) and bool(activity["state"].strip())
-                          and isinstance(activity.get("message"), str)
-                          and self._number(activity.get("updated_at"), 253402300799))
-        verified = bool(self.calibration_received) and time.monotonic() - self.calibration_received <= 10
-        self.calibration_badge.set_text((activity["state"].replace("_", " ").capitalize() if verified else "Out of date")
-                                        if valid_activity else "No record")
-        self.calibration_context.set_text("Recorded " + datetime.fromtimestamp(activity["updated_at"], timezone.utc).strftime("%H:%M:%S UTC")
-                                          if valid_activity else "")
-        self.calibration_message.set_text(activity["message"] if valid_activity else "")
+        if model is None or not self.calibration or self.calibration.get("model") != model["id"]:
+            self.calibration = None
+            self.calibration_received = 0.0
+            self.calibration_error = ""
+        self._render_page()
+        if model is not None and self.models_verified:
+            await self._load_calibration()
 
-    def _render_models(self) -> None:
-        selected = {row["id"] for row in self.models_table.selected}
+    def _render_models(self, serving: str) -> None:
+        available = self._model_available() and self.models_verified
+        model = self._selected_model()
         rows = [{
-            "id": model["id"], "name": model["name"],
-            "storage_mib": model.get("storage_mib") if self._number(model.get("storage_mib")) else None,
-            "quantization": model.get("quantization") or "none",
-            "capabilities": "Compatible" if model.get("capabilities") == "ok" else "Insufficient or unverified",
-            "state": self._model_state(model),
-        } for model in self.models]
-        selection = [row for row in rows if row["id"] in selected]
-        if self.models_table.rows != rows or self.models_table.selected != selection:
-            self.models_table.rows = rows
-            self.models_table.selected = selection
-            self.models_table.update()
-        waiting = (self.model_job is not None or bool(self.busy.intersection({"model", "download"}))
-                   or self._active_model_jobs())
-        self.model_spinner.set_visibility(waiting and self._jobs_fresh())
-        self.models_empty.set_text("Working…" if waiting else "Loading…" if not self.models_verified else "No installed models")
-        self.models_empty.set_visibility(not self.models)
-        self._model_selection()
+            "id": item["id"], "name": item["name"],
+            "storage_mib": item.get("storage_mib") if self._number(item.get("storage_mib")) else None,
+            "quantization": item.get("quantization") or "none",
+            "capabilities": "Compatible" if item.get("capabilities") == "ok" else "Insufficient or unverified",
+            "state": self._model_state(item),
+        } for item in self.models]
+        detail = None
+        if model is not None:
+            calibration = self.calibration if self.calibration and self.calibration.get("model") == model["id"] else {}
+            result = calibration.get("result") or {}
+            activity = calibration.get("status") or {}
+            fresh = bool(self.calibration_received) and time.monotonic() - self.calibration_received <= 10
+            profile = ""
+            limits = result.get("limits") or {}
+            measured = (result.get("model") == model["id"] and result.get("state") == "complete"
+                        and result.get("reason") == "measured")
+            if measured and self._number(limits.get("max_model_len"), integer=True) and self._number(limits.get("max_num_seqs"), integer=True):
+                prefix = "Recorded profile (not live)" if fresh and self.models_verified else "Unverified recorded profile"
+                profile = f"{prefix}: context {limits['max_model_len']} tokens · concurrency {limits['max_num_seqs']}"
+            if self.calibration_error:
+                calibration_state = "Calibration unavailable"
+            elif not calibration:
+                calibration_state = "Loading calibration…" if self.models_verified else "Calibration unverified"
+            elif not fresh:
+                calibration_state = "Calibration out of date"
+            elif activity:
+                calibration_state = str(activity.get("state", "unknown")).replace("_", " ").capitalize()
+            elif result:
+                calibration_state = "Measured profile recorded" if measured else "No usable profile"
+            else:
+                calibration_state = "No calibration record"
+            timestamp = activity.get("updated_at") or result.get("completed_at")
+            context = ""
+            if self._number(timestamp, 253402300799):
+                context = "Recorded " + datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            detail = ModelDetails(
+                id=model["id"], name=model["name"], repo_id=model.get("repo_id") or model["name"],
+                storage=self._storage(model.get("storage_mib")), quantization=model.get("quantization") or "none",
+                compatibility="Compatible" if model.get("capabilities") == "ok" else "Insufficient or unverified",
+                state=self._model_state(model), calibration_state=calibration_state, calibration_context=context,
+                calibration_message=self.calibration_error or str(activity.get("message") or result.get("reason") or ""),
+                profile=profile,
+            )
+        capable = model is not None and model.get("capabilities") == "ok"
+        restartable = capable and (model.get("selected") or model.get("active"))
+        waiting = bool(self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
+        if self.models:
+            empty = ""
+        elif self.models_error_text:
+            empty = "Models unavailable — checking automatically"
+        elif not self.models_loaded:
+            empty = "Loading installed models…"
+        else:
+            empty = "No installed models. Choose Find models to install one."
+        active = (self.status or {}).get("active_model")
+        service = serving
+        if not self.status_stale and active and active != "-":
+            service += f" · {active}"
+        self.model_view.render(ModelsPresentation(
+            rows=rows, detail=detail, error=self.models_error_text, empty_message=empty,
+            service_state=service, busy=waiting and self._jobs_fresh(),
+            can_start=bool(available and capable and self._model_state(model) != "Serving"),
+            can_restart=bool(available and restartable),
+            can_remove=bool(available and model is not None and model.get("removable") is not False),
+            can_calibrate=bool(available and capable), can_stop=available,
+        ))
+
+    def _render_download_form(self) -> None:
+        self.download_button.set_enabled(self.inspection is not None and self._model_available() and "inspect" not in self.busy)
 
     async def _refresh_model_state(self) -> None:
         if not self._begin("model-state-refresh", []):
@@ -649,28 +690,38 @@ class _OksaPage:
             await self._load_calibration()
             if self.client.is_deleted:
                 return
-            if (self._jobs_fresh() and self.models_verified and not self.status_stale and not self.model_job
-                    and not self.busy.intersection({"model", "download"})
-                    and not self._active_model_jobs()):
-                self.model_uncertain = False
-            self._model_selection()
+            self._render_page()
         finally:
             self._end("model-state-refresh", [])
 
     async def _load_calibration(self) -> None:
+        target = self._selected_model()
+        if target is None:
+            self.generations["calibration"] += 1
+            self.calibration = None
+            self.calibration_received = 0.0
+            self.calibration_error = ""
+            self._render_page()
+            return
+        name = target["id"]
+        if self.calibration and self.calibration.get("model") != name:
+            self.calibration = None
+            self.calibration_received = 0.0
+            self.calibration_error = ""
         requested = time.monotonic()
-        reply = await self._load("calibration", "GetCalibration")
-        if reply is None:
+        reply = await self._load("calibration", "GetCalibration", name)
+        current = self._selected_model()
+        if reply is None or current is None or current["id"] != name:
             return
         data = reply[1]
-        if (self._success(reply) and isinstance(data.get("model"), str)
-                and (data.get("result") is None or isinstance(data["result"], dict))
-                and (data.get("status") is None or isinstance(data["status"], dict))):
+        if self._success(reply) and data["model"] == name:
             self.calibration = data
             self.calibration_received = requested
+            self.calibration_error = ""
         else:
             self.calibration_received = 0.0
-        self._model_selection()
+            self.calibration_error = self._error(reply)
+        self._render_page()
 
     async def _refresh_models(self) -> None:
         if self.locks["models"].locked() or "model" in self.busy or not self._begin("model-refresh", []):
@@ -684,7 +735,7 @@ class _OksaPage:
                     return
                 self.models_revision = None
                 self.models_verified = False
-                self.models_error.set_text("Automatic model updates unavailable. " + str(error))
+                self.models_error_text = "Automatic model updates unavailable. " + str(error)
                 return
             if self.client.is_deleted or generation != self.generations["models"]:
                 return
@@ -692,7 +743,7 @@ class _OksaPage:
             if not isinstance(revision, str) or not revision:
                 self.models_revision = None
                 self.models_verified = False
-                self.models_error.set_text("Automatic model updates unavailable: missing model revision.")
+                self.models_error_text = "Automatic model updates unavailable: missing model revision."
                 return
             mutating = bool(self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
             if (revision != self.models_revision or (not mutating and not self.models_verified)) and await self._load_models():
@@ -700,7 +751,7 @@ class _OksaPage:
         finally:
             self._end("model-refresh", [])
             if not self.client.is_deleted:
-                self._render_models()
+                self._render_page()
 
     async def _load_models(self) -> bool:
         if self.client.is_deleted:
@@ -715,17 +766,14 @@ class _OksaPage:
                            and type(model.get("active")) is bool and type(model.get("selected")) is bool for model in models)
                 or len({model["id"] for model in models}) != len(models)):
             self.models_verified = False
-            self.models_error.set_text("Unable to update models; previous list may be stale. " + self._error(reply))
-            self._render_models()
+            self.models_error_text = "Unable to update models; previous list may be stale. " + self._error(reply)
+            self._render_page()
             return False
-        self.models_error.set_text("")
+        self.models_error_text = ""
         self.models = models
         self.models_verified = not (self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
-        self.serving_enabled = reply[1].get("serving_enabled")
-        self.models_table.set_visibility(bool(models))
-        self.models_empty.set_text("No installed models. Use Find to get started.")
-        self.models_empty.set_visibility(not models)
-        self._render_models()
+        self.models_loaded = True
+        self._render_page()
         return True
 
     def _valid_job(self, job) -> bool:
@@ -782,15 +830,13 @@ class _OksaPage:
             jobs = reply[1].get("jobs")
             if not self._success(reply) or not isinstance(jobs, list) or not all(self._valid_job(job) for job in jobs):
                 self.jobs_failed = True
-                self.pull_error.set_text("Activity unavailable; previous activity is unverified. " + self._error(reply))
-                self._render_freshness()
+                self.activity_error_text = "Activity unavailable; previous activity is unverified. " + self._error(reply)
+                self._render_page()
                 return
             self.jobs_received = requested
             self.jobs_failed = False
-            self.pull_error.set_text("")
+            self.activity_error_text = ""
             self.jobs_seen = {job["path"] for job in jobs}
-            previous = self.jobs.copy()
-            previous_details = self.job_details.copy()
             missing = set(self.jobs) - self.jobs_seen
             if self.model_job and self.model_job not in self.jobs_seen:
                 missing.add(self.model_job)
@@ -814,14 +860,18 @@ class _OksaPage:
                     self.job_details.discard(path)
                     if path == self.model_job:
                         self.model_job = None
-                    self.model_uncertain = True
-                    self.models_verified = False
-                    self.status_failed = True
-                    self._warn("model-operation", "Previous operation history expired. Checking the current state automatically; the operation will not be repeated.")
+                        self.model_uncertain = True
+                        self.models_verified = False
+                        self.status_failed = True
+                        identity = path.rsplit("/", 1)[-1]
+                        self._warn("model-operation", f"Operation {identity} history expired. Further operations are blocked; review current state before reloading this page.")
             for job in jobs:
                 path = job["path"]
                 old = self.jobs.get(path)
-                if path not in self.job_details or not self._valid_terminal_details(old, job):
+                if self._valid_terminal_details(job, job):
+                    self.jobs[path] = job
+                    self.job_details.add(path)
+                elif path not in self.job_details or not self._valid_terminal_details(old, job):
                     self.job_details.discard(path)
                     self.jobs[path] = job
             latest = {}
@@ -833,11 +883,7 @@ class _OksaPage:
             self.job_details.intersection_update(self.jobs)
             if self._active_model_jobs():
                 self.models_verified = False
-            if self.jobs != previous or self.job_details != previous_details or not self.activity_table.rows:
-                self._render_activity()
-            self._render_freshness()
-            previous = self.jobs.copy()
-            previous_details = self.job_details.copy()
+            self._render_page()
             for path, job in list(self.jobs.items()):
                 if job["state"] not in ("succeeded", "failed", "canceled") or path in self.job_details:
                     continue
@@ -850,13 +896,17 @@ class _OksaPage:
             if self.model_job:
                 job = self.jobs.get(self.model_job)
                 if job is None or self.model_job not in self.jobs_seen:
-                    self.pull_error.set_text("Submitted job is unverified or missing. Do not retry the operation.")
+                    self.activity_error_text = "Submitted job is unverified or missing. Do not retry the operation."
                 elif job["state"] in ("succeeded", "failed", "canceled"):
                     if self.model_job in self.job_details and job["operation"] == self.model_operation:
                         result = job.get("result") or {}
                         message = str((job.get("error") or {}).get("message") or result.get("warning") or result.get("error") or "")
                         if self.model_operation == "RemoveModel" and not (result.get("deleted") is True and result.get("reconciled") is True):
                             message = message or "Deletion was not confirmed; files or serving may be partially changed."
+                        if self._unconfirmed((0, job.get("error") or {})):
+                            self.model_uncertain = True
+                            identity = self.model_job.rsplit("/", 1)[-1]
+                            message += f" Outcome unknown for operation {identity}. Further operations are blocked; review current state before reloading this page."
                         if job["state"] != "succeeded" or result.get("ok") is not True or message:
                             self._warn("model-operation", f"{self._operation_title(job)}: {job['state']}. " + message)
                         self.model_job = None
@@ -866,10 +916,8 @@ class _OksaPage:
                         if self.client.is_deleted or generation != self.generations["pull"]:
                             return
                     else:
-                        self.pull_error.set_text("Terminal job details are unverified (summary only). Do not retry.")
-            if self.jobs != previous or self.job_details != previous_details:
-                self._render_activity()
-            self._render_freshness()
+                        self.activity_error_text = "Terminal job details are unverified (summary only). Do not retry."
+            self._render_page()
         finally:
             self._end("activity-refresh", [])
 
@@ -881,8 +929,7 @@ class _OksaPage:
                   "DeleteUser": ("User deletion", "Deleting user")}
         return titles.get(job["operation"], ("Operation", "Working"))[job["state"] == "running"]
 
-    def _render_activity(self) -> None:
-        selected = {row["id"] for row in self.activity_table.selected}
+    def _activity_rows(self) -> list[dict]:
         rows = []
         for job in sorted(self.jobs.values(), key=lambda job: (job["state"] in ("queued", "running"), job["started_at"]), reverse=True):
             running = job["state"] in ("queued", "running")
@@ -897,13 +944,23 @@ class _OksaPage:
                 state = "Checking result"
             end = time.time() if running else job.get("ended_at")
             rows.append({"id": job["path"], "action": self._operation_title(job), "state": state,
+                         "target": job.get("model_name") or job.get("repo_id") or job["path"].rsplit("/", 1)[-1],
                          "elapsed": int(max(0, end - job["started_at"])) if end is not None else None})
+        return rows
+
+    def _render_activity(self, rows: list[dict]) -> None:
+        self.pull_error.set_text(self.activity_error_text)
+        self.pull_error.set_visibility(bool(self.activity_error_text))
+        fresh = self._jobs_fresh()
+        self.activity_freshness.set_text("Disconnected" if self.disconnected else "Up to date" if fresh else "Activity unavailable" if self.activity_error_text else "Waiting for activity updates")
+        self.activity_spinner.set_visibility(fresh and any(job["state"] in ("queued", "running") for job in self.jobs.values()))
+        self.activity_table.props["no-data-label"] = "No operations yet" if fresh else "Activity unavailable — checking automatically" if self.activity_error_text else "Loading operations…"
+        selected = {row["id"] for row in self.activity_table.selected}
         if self.activity_table.rows != rows:
             self.activity_table.rows = rows
             self.activity_table.selected = [row for row in rows if row["id"] in selected]
             self.activity_table.update()
         self._activity_selection()
-        self._render_downloads(rows)
 
     def _activity_selection(self) -> None:
         selected = self.activity_table.selected
@@ -946,7 +1003,8 @@ class _OksaPage:
         if not self._begin("cancel", []):
             return
         try:
-            if not await self._confirm("Cancel this operation? Partial changes may remain.", "Cancel", dangerous=True):
+            target = job.get("model_name") or job.get("repo_id") or path.rsplit("/", 1)[-1]
+            if not await self._confirm(f"Cancel {self._operation_title(job).lower()} for {target}? Partial changes may remain.", "Cancel operation", dangerous=True):
                 return
             try:
                 canceled = await run.io_bound(self.service.cancel_job, path)
@@ -961,27 +1019,38 @@ class _OksaPage:
             self._end("cancel", [])
 
     async def _model_action(self, action: str) -> None:
-        model = self._restart_target() if action == "restart" else self._selected_model()
+        model = self._selected_model() if action != "stop" else None
         if not self._model_available() or not self.models_verified:
             return
         if action != "stop" and (model is None or not isinstance(model.get("id"), str)):
             return
+        if action in ("start", "restart", "calibrate") and model.get("capabilities") != "ok":
+            return
         if action == "remove" and model.get("removable") is False:
             return
-        if not self._begin("model", self.model_controls):
+        if action == "restart" and not (model.get("selected") or model.get("active")):
+            return
+        if not self._begin("model", self.model_view.controls):
             return
         name = str(model.get("name")) if model else "model serving"
+        if model and model["id"] != name:
+            name += f" ({model['id']})"
         try:
             if action != "start":
                 message, label, dangerous = {
-                    "restart": (f"Restart {name}? Inference will be briefly unavailable.", "Restart", False),
-                    "stop": ("Stop all model serving? Applications will lose inference access.", "Stop", True),
-                    "remove": (f"Delete {name}? Serving will be stopped before files are deleted.", "Delete", True),
+                    "restart": (f"Restart model {name}? Inference will be briefly unavailable.", "Restart model", False),
+                    "stop": ("Stop all model serving? Applications will lose inference access.", "Stop serving", True),
+                    "remove": (f"Delete model {name} and its files? If this model is serving, it will be stopped first.", "Delete model", True),
+                    "calibrate": (f"Calibrate model {name}? Inference may be unavailable during measurement.", "Calibrate model", False),
                 }[action]
                 if not await self._confirm(message, label, dangerous=dangerous):
                     return
             if not self._jobs_fresh() or self._active_model_jobs():
                 self._warn("model-operation", "Activity changed. Checking status automatically before another operation.")
+                return
+            current = self._selected_model()
+            if action != "stop" and (current is None or current["id"] != model["id"]):
+                self._warn("model-operation", "Model changed. Review the current model before continuing.")
                 return
             for key in ("models", "status", "pull", "calibration"):
                 self.generations[key] += 1
@@ -989,9 +1058,16 @@ class _OksaPage:
             self.status_failed = True
             self.calibration_received = 0.0
             self.model_uncertain = True
-            self._render_freshness()
-            method = {"start": "StartModel", "restart": "RestartModel", "stop": "StopServing", "remove": "RemoveModel"}[action]
-            reply = await self._call(method, *(() if action == "stop" else (model["id"],)), wait=False)
+            self._render_page()
+            method = {"start": "StartModel", "restart": "RestartModel", "stop": "StopServing", "remove": "RemoveModel",
+                      "calibrate": "Calibrate"}[action]
+            if action == "stop":
+                args = ()
+            elif action == "calibrate":
+                args = (model["id"], False)
+            else:
+                args = (model["id"],)
+            reply = await self._call(method, *args, wait=False)
             if self.client.is_deleted:
                 return
             path = reply[1].get("job")
@@ -1002,7 +1078,7 @@ class _OksaPage:
                 self._warn("model-operation", "")
                 ui.notify("Operation accepted; following job state")
             elif self._unconfirmed(reply) or self._success(reply):
-                self._warn("model-operation", f"{action.title()} acceptance was not confirmed. Checking status automatically; do not retry yet. " + self._error(reply))
+                self._warn("model-operation", f"{action.title()} acceptance was not confirmed. Further operations are blocked; review Activity and current state before reloading this page. " + self._error(reply))
             else:
                 self.model_uncertain = False
                 self._warn("model-operation", self._error(reply))
@@ -1010,19 +1086,19 @@ class _OksaPage:
                 return
             await self._load_pull()
         finally:
-            self._end("model", self.model_controls)
+            self._end("model", self.model_view.controls)
             if not self.client.is_deleted:
-                self._model_selection()
+                self._render_page()
 
     def _build_download_dialog(self) -> None:
         with ui.dialog() as self.download_dialog, ui.card().classes("w-full max-w-3xl"):
-            ui.label("Find").classes("text-lg font-semibold").props("role=heading aria-level=2")
+            ui.label("Find models").classes("text-lg font-semibold").props("role=heading aria-level=2")
             ui.label("Browse downloadable AI models from Hugging Face.").classes("text-sm")
             with ui.row().classes("w-full items-start gap-2"):
                 self.model_search = ui.input("Search models", placeholder="Model name",
                                              on_change=self._search_models).props("outlined clearable debounce=500").classes("grow")
                 self.model_search.on("keydown.enter", self._search_models)
-                self.search_button = ui.button("Find", icon="search", on_click=self._search_models)
+                self.search_button = ui.button("Search models", icon="search", on_click=self._search_models)
             self.search_message = ui.label("Search by model name.").classes("text-sm")
             self.search_table = self._table("", {
                 "name": "Model", "author": "Publisher", "downloads": "Downloads", "access": "Access",
@@ -1036,10 +1112,10 @@ class _OksaPage:
                 self.download_name = ui.input("Local name (optional)", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
                 self.revision = ui.input("Version or commit", value="main", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
                 self.inspection_revision = ui.label("").classes("text-sm font-mono break-all")
-                self.inspect_button = ui.button("Review", on_click=self._inspect).props("outline")
+                self.inspect_button = ui.button("Review model", on_click=self._inspect).props("outline")
             with ui.row().classes("w-full justify-end gap-2"):
                 self.download_cancel = ui.button("Close", on_click=self.download_dialog.close).props("flat")
-                self.download_button = ui.button("Download", icon="download", on_click=self._download)
+                self.download_button = ui.button("Download model", icon="download", on_click=self._download)
         self.download_button.disable()
         self.download_dialog.on_value_change(self._download_dialog_changed)
 
@@ -1113,7 +1189,7 @@ class _OksaPage:
     def _invalidate_inspection(self) -> None:
         self.inspection_generation += 1
         self.inspection = None
-        if hasattr(self, "download_button") and not self.client.is_deleted:
+        if not self.client.is_deleted:
             self.download_button.disable()
             self.inspection_text.set_text("Choose a model to review its download size.")
             self.inspection_revision.set_text("")
@@ -1161,7 +1237,7 @@ class _OksaPage:
             finally:
                 self._end("inspect", [self.inspect_button])
                 if not self.client.is_deleted:
-                    self._model_selection()
+                    self._render_page()
 
     async def _download(self) -> None:
         inspection = self.inspection
@@ -1194,7 +1270,7 @@ class _OksaPage:
             self.models_verified = False
             self.status_failed = True
             self.model_uncertain = True
-            self._render_freshness()
+            self._render_page()
             reply = await self._call("DownloadModel", inspection["repo_id"], inspection["name"] or "",
                                      inspection["revision"], inspection["fits"] is False, wait=False)
             if self.client.is_deleted:
@@ -1210,7 +1286,7 @@ class _OksaPage:
                 ui.notify("Download accepted; following job state")
             elif self._unconfirmed(reply) or self._success(reply):
                 self.inspection = None
-                message = "Download acceptance was not confirmed. Checking status automatically; do not retry yet. " + self._error(reply)
+                message = "Download acceptance was not confirmed. Further operations are blocked; review Activity and current state before reloading this page. " + self._error(reply)
                 self.download_error.set_text(message)
                 self._warn("download", message)
             else:
@@ -1223,29 +1299,35 @@ class _OksaPage:
             self._end("download", controls)
             if not self.client.is_deleted:
                 self.download_dialog.props(remove="persistent")
-                self._model_selection()
+                self._render_page()
 
     def _build_users(self) -> None:
+        self.users_loaded = False
+        self.keys_loaded = False
+        self.users_error_text = ""
+        self.keys_error_text = ""
+        self.user_key_counts: dict[str, int] | None = None
         with ui.column().classes("w-full flex-1 min-h-0 flex-nowrap") as self.users_list:
             with ui.row().classes("w-full items-center"):
-                self.create_user_button = ui.button("Create", on_click=self._open_user)
-                self.delete_users_button = ui.button("Delete", color="negative", on_click=self._delete_selected_users).props("outline")
+                self.create_user_button = ui.button("Create user", on_click=self._open_user)
+                self.delete_users_button = ui.button("DELETE", color="negative", on_click=self._delete_selected_users).props("outline")
                 search = ui.input("Filter", placeholder="User ID or email").props("clearable")
                 self.users_state = ui.badge("Loading").props("outline")
                 with self.users_state:
                     self.users_state_detail = ui.tooltip("Loading users and API keys")
-            self.users_table = self._table("", {"user_id": "User ID", "email": "Email", "enabled": "Enabled keys"}, selection="multiple", row_key="user_id")
+            self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled API keys"}, selection="multiple", row_key="user_id")
             self.users_table.classes("flex-1 min-h-0")
             self.users_table.props('loading no-data-label="Loading users…" no-results-label="No matching users"')
             self.users_table.on_select(self._users_selection)
             self.users_table.on("rowClick", lambda event: self._show_user(event.args[1]["user_id"]), args=[[], ["user_id"]])
             search.bind_value_to(self.users_table, "filter")
         with ui.column().classes("w-full flex-1 min-h-0 flex-nowrap") as self.user_detail:
+            self.user_title = ui.label("").classes("text-xl font-semibold break-all")
             with ui.row().classes("items-center"):
-                ui.button("Back", on_click=self._show_users).props("outline")
-                self.delete_user_button = ui.button("Delete", color="negative", on_click=self._delete_user).props("outline")
-                self.create_key_button = ui.button("Create", on_click=self._open_key)
-                self.revoke_button = ui.button("Revoke", color="negative", on_click=self._revoke_key).props("outline")
+                ui.button("Back to users", on_click=self._show_users).props("outline")
+                self.delete_user_button = ui.button("Delete user", color="negative", on_click=self._delete_user).props("outline")
+                self.create_key_button = ui.button("Create API key", on_click=self._open_key)
+                self.revoke_button = ui.button("Revoke API key", color="negative", on_click=self._revoke_key).props("outline")
                 self.keys_state = ui.badge("Loading").props("outline")
                 with self.keys_state:
                     self.keys_state_detail = ui.tooltip("Loading API keys")
@@ -1253,9 +1335,8 @@ class _OksaPage:
             self.keys_table.classes("flex-1 min-h-0")
             self.keys_table.props('loading no-data-label="Loading API keys…"')
             self.keys_table.on_select(self._users_selection)
-        self.user_detail.set_visibility(False)
         self.user_controls = [self.create_user_button, self.delete_users_button, self.delete_user_button, self.create_key_button, self.revoke_button]
-        self._users_selection()
+        self._render_users(set(), set())
 
     def _users_selection(self) -> None:
         idle = "user" not in self.busy
@@ -1286,11 +1367,63 @@ class _OksaPage:
                 return "Expired"
         return "Enabled"
 
+    def _render_users(self, selected_users: set[str], selected_keys: set[str]) -> None:
+        loading = not self.users_loaded or not self.keys_loaded
+        current = self.users_verified and self.keys_verified
+        self.users_state.set_text("Loading" if loading else "Up to date" if current else "Users unavailable" if not self.users_verified else "Keys unavailable")
+        self.users_state.props("color=primary" if loading else "color=positive" if current else "color=warning")
+        self.users_state_detail.set_text(
+            "Loading users and API keys" if loading else
+            "Users and enabled-key counts are current" if current and self.user_key_counts is not None else
+            "Users and API keys are current" if current else
+            "Updates continue automatically. " + (self.users_error_text if not self.users_verified else self.keys_error_text)
+        )
+        self.users_table.props("loading" if not self.users_loaded else "", remove="" if not self.users_loaded else "loading")
+        self.users_table.props['no-data-label'] = "Loading users…" if not self.users_loaded else "No users yet" if self.users_verified else "Users unavailable — reconnecting automatically"
+        self.users_table.rows = [{
+            "user_id": user["user_id"], "email": user.get("user_email") or "—",
+            "enabled": str(self.user_key_counts.get(user["user_id"], 0)) if self.user_key_counts is not None else "Unavailable",
+        } for user in self.users]
+        self.users_table.selected = [row for row in self.users_table.rows if row["user_id"] in selected_users]
+        self.users_table.update()
+        self.user_title.set_text(f"User: {self.owner}" if self.owner is not None else "")
+        self.keys_table.props['title'] = f"API keys for {self.owner}" if self.owner is not None else "API keys"
+        self.keys_table.props("loading" if not self.keys_loaded else "", remove="" if not self.keys_loaded else "loading")
+        self.keys_table.props['no-data-label'] = "Loading API keys…" if not self.keys_loaded else "No API keys yet" if self.keys_verified else "API keys unavailable — reconnecting automatically"
+        self.keys_state.set_text("Loading" if not self.keys_loaded else "Up to date" if self.keys_verified else "Unavailable")
+        self.keys_state.props("color=primary" if not self.keys_loaded else "color=positive" if self.keys_verified else "color=warning")
+        self.keys_state_detail.set_text("Loading API keys" if not self.keys_loaded else "API keys are current" if self.keys_verified else "Updates continue automatically. " + self.keys_error_text)
+        self.keys_table.rows = [{
+            "id": identity, "name": key.get("key_alias") or key.get("key_name") or "Unnamed key",
+            "models": ", ".join(str(model) for model in key["models"]) if isinstance(key.get("models"), list) and key["models"] else "All models (including future models)",
+            "status": self._key_status(key), "expires": str(key.get("expires")) if self._expiry(key.get("expires")) else "Unknown" if key.get("expires") else "Never",
+        } for identity, key in self.keys.items()]
+        if self.owner is not None and self.users_verified and not any(user["user_id"] == self.owner for user in self.users):
+            self.keys_state.set_text("User deleted")
+            self.keys_state.props("color=warning")
+            self.keys_state_detail.set_text("This user no longer exists. Use Back to users to return to Users.")
+            self.keys_table.rows = []
+            self.keys_table.props['no-data-label'] = "User deleted"
+        self.keys_table.selected = [row for row in self.keys_table.rows if self.keys[row["id"]]["token"] in selected_keys]
+        self.keys_table.update()
+        self.users_list.set_visibility(self.owner is None)
+        self.user_detail.set_visibility(self.owner is not None)
+        if self.disconnected:
+            for state, detail, table in ((self.users_state, self.users_state_detail, self.users_table),
+                                         (self.keys_state, self.keys_state_detail, self.keys_table)):
+                state.set_text("Disconnected")
+                state.props("color=warning")
+                detail.set_text("Connection lost. Displayed data is unverified; updates resume automatically.")
+                table.props(remove="loading")
+                table.props['no-data-label'] = "Connection lost — reconnecting automatically"
+                table.update()
+        self._users_selection()
+
     async def _load_users(self) -> None:
         self.generations["users"] += 1
         generation, owner = self.generations["users"], self.owner
         async with self.locks["users"]:
-            if generation != self.generations["users"] or self.client.is_deleted:
+            if generation != self.generations["users"] or owner != self.owner or self.client.is_deleted:
                 return
             users_reply, keys_reply = await asyncio.gather(
                 self._call("ListUsers"),
@@ -1304,70 +1437,36 @@ class _OksaPage:
             users_ok = self._success(users_reply) and isinstance(users, list) and all(isinstance(user, dict) and isinstance(user.get("user_id"), str) for user in users)
             keys_ok = self._success(keys_reply) and isinstance(keys, list) and all(isinstance(key, dict) and isinstance(key.get("token"), str) for key in keys)
             self.users_verified, self.keys_verified = users_ok, keys_ok
+            self.users_loaded = self.keys_loaded = True
+            self.users_error_text = "" if users_ok else self._error(users_reply)
+            self.keys_error_text = "" if keys_ok else self._error(keys_reply)
             if users_ok:
                 self.users = [{"user_id": user["user_id"], "user_email": user.get("user_email")} for user in users]
-            self.users_state.set_text("Up to date" if users_ok and keys_ok else "Users unavailable" if not users_ok else "Keys unavailable")
-            self.users_state.props("color=positive" if users_ok and keys_ok else "color=warning")
-            self.users_state_detail.set_text("Users and enabled-key counts are current" if users_ok and keys_ok else
-                                             "Updates continue automatically. " + self._error(users_reply if not users_ok else keys_reply))
-            self.users_table.props(remove="loading")
-            self.users_table.props['no-data-label'] = "No users yet" if users_ok else "Users unavailable — reconnecting automatically"
-            counts: dict[str, int] = {}
-            if keys_ok:
+            self.user_key_counts = None
+            if keys_ok and owner is None:
+                self.user_key_counts = {}
                 for key in keys:
                     if key.get("key_alias") != "open-webui" and self._key_status(key) == "Enabled":
-                        counts[key.get("user_id")] = counts.get(key.get("user_id"), 0) + 1
-            self.users_table.rows = [{"user_id": user["user_id"], "email": user.get("user_email") or "—",
-                                      "enabled": str(counts.get(user["user_id"], 0)) if keys_ok and owner is None else "Unavailable"}
-                                     for user in self.users]
-            self.users_table.selected = [row for row in self.users_table.rows if row["user_id"] in selected_users]
-            self._users_selection()
-            self.users_table.update()
+                        user_id = key.get("user_id")
+                        if isinstance(user_id, str):
+                            self.user_key_counts[user_id] = self.user_key_counts.get(user_id, 0) + 1
             self.keys = {}
-            self.keys_table.selected = []
-            self.keys_table.rows = []
-            if owner is not None:
-                user = next((user for user in self.users if user["user_id"] == owner), None)
-                if keys_ok:
-                    self.keys = {f"{generation}:{index}": {
-                        field: key.get(field) for field in ("token", "user_id", "key_alias", "key_name", "models", "blocked", "expires")
-                    } for index, key in enumerate(keys)
-                        if key.get("user_id") == owner and key.get("key_alias") != "open-webui"}
-                    self.keys_table.rows = [{
-                        "id": identity, "name": key.get("key_alias") or key.get("key_name") or "Unnamed key",
-                        "models": ", ".join(str(model) for model in key["models"]) if isinstance(key.get("models"), list) and key["models"] else "All models (including future models)",
-                        "status": self._key_status(key), "expires": str(key.get("expires")) if self._expiry(key.get("expires")) else "Unknown" if key.get("expires") else "Never",
-                    } for identity, key in self.keys.items()]
-                self.keys_table.selected = [row for row in self.keys_table.rows if self.keys[row["id"]]["token"] in selected_keys]
-                self.keys_table.props(remove="loading")
-                self.keys_table.props['no-data-label'] = "No API keys yet" if keys_ok else "API keys unavailable — reconnecting automatically"
-                self.keys_state.set_text("Up to date" if keys_ok else "Unavailable")
-                self.keys_state.props("color=positive" if keys_ok else "color=warning")
-                self.keys_state_detail.set_text("API keys are current" if keys_ok else "Updates continue automatically. " + self._error(keys_reply))
-                if users_ok and user is None:
-                    self.keys_state.set_text("User deleted")
-                    self.keys_state.props("color=warning")
-                    self.keys_state_detail.set_text("This user no longer exists. Use Back to return to Users.")
-                    self.keys_table.rows = []
-                    self.keys_table.props['no-data-label'] = "User deleted"
-            self.keys_table.update()
-            self._users_selection()
+            if keys_ok and owner is not None:
+                self.keys = {f"{generation}:{index}": {
+                    field: key.get(field) for field in ("token", "user_id", "key_alias", "key_name", "models", "blocked", "expires")
+                } for index, key in enumerate(keys)
+                    if key.get("user_id") == owner and key.get("key_alias") != "open-webui"}
+            self._render_users(selected_users, selected_keys)
 
     def _set_owner(self, owner: str | None) -> None:
+        selected_users = {row["user_id"] for row in self.users_table.selected}
         self.owner = owner
         self.keys_verified = False
+        self.keys_loaded = False
+        self.keys_error_text = ""
         self.keys = {}
-        self.keys_table.rows = []
-        self.keys_table.selected = []
-        self.keys_table.props['title'] = f"API keys for {owner}" if owner is not None else "API keys"
-        self.keys_table.props('loading color=primary no-data-label="Loading API keys…"')
-        self.keys_state.set_text("Loading")
-        self.keys_state.props("color=primary")
-        self.keys_state_detail.set_text("Loading API keys")
-        self.keys_table.update()
-        self.users_list.set_visibility(owner is None)
-        self.user_detail.set_visibility(owner is not None)
-        self._users_selection()
+        self.user_key_counts = None
+        self._render_users(selected_users, set())
 
     async def _show_user(self, owner: str) -> None:
         if not isinstance(owner, str) or "user" in self.busy or not any(user["user_id"] == owner for user in self.users):
@@ -1390,7 +1489,7 @@ class _OksaPage:
             self.new_user_error = ui.label("").classes("text-negative")
             with ui.row():
                 self.user_cancel = ui.button("Cancel", on_click=self.user_dialog.close).props("outline")
-                self.user_submit = ui.button("Create", on_click=self._create_user)
+                self.user_submit = ui.button("Create user", on_click=self._create_user)
 
     def _open_user(self) -> None:
         if "user" in self.busy:
@@ -1453,7 +1552,7 @@ class _OksaPage:
         try:
             message = (f"Permanently delete user {owners[0]} and ALL their API keys? This cannot be undone." if len(owners) == 1 else
                        f"Permanently delete {len(owners)} users and ALL their API keys? This cannot be undone.\n\n" + "\n".join(owners))
-            if not await self._confirm(message, "Delete", dangerous=True):
+            if not await self._confirm(message, "Delete user" if len(owners) == 1 else "Delete users", dangerous=True):
                 return
             if not self.client.has_socket_connection or not all(any(user["user_id"] == owner for user in self.users) for owner in owners):
                 return
@@ -1513,7 +1612,7 @@ class _OksaPage:
             self.key_error = ui.label("").classes("text-negative")
             with ui.row():
                 self.key_cancel = ui.button("Cancel", on_click=self.key_dialog.close).props("outline")
-                self.key_submit = ui.button("Create", on_click=self._create_key)
+                self.key_submit = ui.button("Create API key", on_click=self._create_key)
         self.key_dialog.on_value_change(lambda event: self._close_key_form() if not event.value else None)
 
     def _close_key_form(self) -> None:
@@ -1652,11 +1751,12 @@ class _OksaPage:
 
     def _clear_secret(self) -> None:
         self.secret = ""
-        if hasattr(self, "secret_input") and not self.secret_input.is_deleted:
+        if not self.secret_input.is_deleted:
             self.secret_input.set_value("")
             self.secret_owner_label.set_text("")
 
     def _disconnect(self) -> None:
+        self.disconnected = True
         self._clear_secret()
         self.search_generation += 1
         self._invalidate_inspection()
@@ -1669,15 +1769,14 @@ class _OksaPage:
         self.calibration_received = 0.0
         self.users_verified = False
         self.keys_verified = False
-        for state, detail, table in ((self.users_state, self.users_state_detail, self.users_table),
-                                     (self.keys_state, self.keys_state_detail, self.keys_table)):
-            state.set_text("Disconnected")
-            state.props("color=warning")
-            detail.set_text("Connection lost. Displayed data is unverified; updates resume automatically.")
-            table.props(remove="loading")
-            table.props['no-data-label'] = "Connection lost — reconnecting automatically"
-            table.update()
-        self._users_selection()
-        self._render_freshness()
+        self.users_loaded = self.keys_loaded = True
+        self.users_error_text = self.keys_error_text = "Connection lost — reconnecting automatically"
+        self.user_key_counts = None
+        self.keys = {}
+        self.models_error_text = "Connection lost. Displayed models are unverified; updates resume automatically."
+        self.monitoring_error_text = "Connection lost. Monitoring updates resume automatically."
+        self.activity_error_text = "Connection lost. Displayed operations are unverified; do not retry."
+        self._render_users({row["user_id"] for row in self.users_table.selected}, set())
+        self._render_page()
         if not self.secret_dialog.is_deleted:
             self.secret_dialog.close()

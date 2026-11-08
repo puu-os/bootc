@@ -130,8 +130,8 @@ class Contract:
         "ListKeys": ((('user', 's'),), "a{sv}", False),
         "CreateKey": ((('user', 's'), ('alias', 's'), ('models', 'as'), ('budget', 'd'), ('duration', 's')), "a{sv}", False),
         "RevokeKey": ((('token', 's'),), "a{sv}", False),
-        "GetCalibration": ((), "a{sv}", False),
-        "Calibrate": ((('force', 'b'),), "o", True),
+        "GetCalibration": ((('name', 's'),), "a{sv}", False),
+        "Calibrate": ((('name', 's'), ('force', 'b')), "o", True),
     }
     OPTIONAL_STRINGS = {"email", "duration", "user", "commit", "revision", "query"}
     MODEL_MUTATIONS = frozenset({"DownloadModel", "StartModel", "RestartModel", "StopServing", "RemoveModel", "Calibrate"})
@@ -577,40 +577,30 @@ class OksaControl:
     def revoke_key(self, token: str) -> dict:
         return self.response(ms.litellm_key_delete(token), "message")
 
-    def get_calibration(self) -> dict:
+    def get_calibration(self, name: str) -> dict:
+        name = ms.resolve_model_name(name, self.state_dir)
         try:
-            status = calibration.read_record(calibration.STATUS_PATH)
+            result = calibration.read_record(calibration.result_path(name))
+        except FileNotFoundError:
+            result = None
+        if result is not None and not calibration.valid_result(result, model=name):
+            raise OksaError("OperationFailed", f"Invalid calibration result for {name}")
+        try:
+            status = calibration.read_record(calibration.status_path(name))
         except FileNotFoundError:
             status = None
-        selected, _ = ms.control_files(self.state_dir)
-        active = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(self.state_dir / "active-model")))
-        name = ms.read_first_line(selected) or ms.read_first_line(active)
-        if name:
-            name = ms.resolve_model_name(name, self.state_dir)
-        elif status and status.get("boot_id") == calibration.boot_id():
-            name = status.get("model", "")
-        result = None
-        if name:
-            try:
-                result = calibration.read_record(calibration.result_path(name))
-            except FileNotFoundError:
-                pass
-            if result is not None and not calibration.valid_result(result, model=name):
-                raise OksaError("OperationFailed", f"Invalid calibration result for {name}")
-            try:
-                status = calibration.read_record(calibration.status_path(name))
-            except FileNotFoundError:
+        if status is not None:
+            if status.get("model") != name:
+                raise OksaError("OperationFailed", f"Invalid calibration status for {name}")
+            if status.get("boot_id") != calibration.boot_id():
                 status = None
         return {"ok": True, "model": name, "result": result, "status": status}
 
-    def calibrate(self, force: bool) -> dict:
-        current = self.get_calibration()
-        name = current["model"]
-        if not name:
-            raise OksaError("NotFound", "Select an installed model before calibration")
+    def calibrate(self, name: str, force: bool) -> dict:
+        name = ms.resolve_model_name(name, self.state_dir)
         command = [str(ms.resolve_helper("oksa-calibrate")), "--model", name]
         if force:
             command.append("--force")
         self.run_helper(command)
         self.run_helper([str(self.planner_bin), "--require-reconcile"])
-        return self.get_calibration()
+        return self.get_calibration(name)

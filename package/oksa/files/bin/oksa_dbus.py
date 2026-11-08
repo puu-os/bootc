@@ -578,7 +578,7 @@ class OksaDBusService:
             job = Job(Contract.PATH + "/jobs/" + uuid.uuid4().hex, method, time.time(), subscribers={sender})
             if method == "DownloadModel":
                 job.repo_id, job.model_name = args[:2]
-            elif method in ("StartModel", "RestartModel", "RemoveModel"):
+            elif method in ("StartModel", "RestartModel", "RemoveModel", "Calibrate"):
                 job.model_name = args[0]
             self.store.save(job)
             self.store.jobs[job.path] = job

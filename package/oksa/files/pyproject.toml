@@ -42,6 +42,7 @@ bypass-selection = true
 "bin/oksa_dbus.py" = "usr/libexec/puu/oksa_dbus.py"
 "bin/oksa_client.py" = "usr/libexec/puu/oksa_client.py"
 "bin/oksa_web_ui.py" = "usr/libexec/puu/oksa_web_ui.py"
+"bin/oksa_web_views.py" = "usr/libexec/puu/oksa_web_views.py"
 "bin/oksa_accelerator.py" = "usr/libexec/puu/oksa_accelerator.py"
 
 [tool.hatch.envs.default]
