@@ -32,7 +32,7 @@ make_args=(
   O="${BOARD_DIR}" BR2_EXTERNAL="${PWD}" BR2_CCACHE_DIR="${CCACHE_DIR}"
   BR2_DL_DIR="${BUILDROOT_DL_DIR}" SDK_INSTALL_DIR="${SDK_INSTALL_DIR}"
   PUU_VERSION="${PUU_VERSION}" PUU_VARIANT="${PUU_VARIANT}"
-  SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}"
+  SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" BR2_CCACHE=y
 )
 
 configure_args=(key --path "configs/${BOARD}_defconfig"
@@ -96,19 +96,11 @@ while IFS= read -r name; do
   input_args+=(--value "${name}=${!name}")
 done < <(compgen -e | LC_ALL=C sort | grep -E '^(PUU_|BR2_)')
 input_key=$("${state[@]}" "${input_args[@]}")
+configuration_key=$("${state[@]}" key --path "${BOARD_DIR}/.config")
 
-# Buildroot does not invalidate cached packages and reverse dependencies for recipe edits.
-recipe_args=(key --path package --path patches --exclude package/oksa/files \
-  --exclude package/puu-firstboot/files --exclude __pycache__ --exclude '*.pyc' --exclude dist)
-recipe_key=$("${state[@]}" "${recipe_args[@]}")
-if [[ -f "${state_dir}/recipes.key" ]]; then
-  IFS= read -r previous_recipes < "${state_dir}/recipes.key"
-  if [[ "${previous_recipes}" != "${recipe_key}" ]]; then
-    echo "${BOARD}: package recipes or patches changed; cached dependency snapshots may be stale." >&2
-    echo 'Run make clean, then build again. FORCE=1 does not bypass package invalidation.' >&2
-    exit 1
-  fi
-fi
+packages=(python3 "${PWD}/scripts/package-invalidate.py")
+"${packages[@]}" prepare --root "${PWD}" --board "${BOARD_DIR}" \
+  --source "${BUILDROOT_SRC_DIR}" -- "${make_args[@]}"
 
 build_tree=$("${state[@]}" build-tree "${BOARD_DIR}")
 build_key=$("${state[@]}" key --value "inputs=${input_key}" --value "packages=${build_tree}" \
@@ -143,6 +135,7 @@ else
   echo "${BOARD}: inputs, package state or outputs changed; running incremental build"
 fi
 rm -f "${state_dir}/build.json"
+"${packages[@]}" assemble --board "${BOARD_DIR}"
 
 linux_version=$(awk -F '"' '/^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="/ { print $2; exit }' "configs/${BOARD}_defconfig")
 [[ -n "${linux_version}" ]] || { echo 'missing kernel version in board defconfig' >&2; exit 1; }
@@ -185,23 +178,7 @@ if [[ "${modules_changed}" == true ]]; then
   rm -rf -- "${BOARD_DIR}/target/usr/lib/modules"
 fi
 
-local_packages=(oksa puu-firstboot)
-local_keys=()
-for package in "${local_packages[@]}"; do
-  local_key=$("${state[@]}" key --path "package/${package}/files" \
-    --exclude __pycache__ --exclude '*.pyc' --exclude dist)
-  local_keys+=("${local_key}")
-  previous_local=
-  if [[ -f "${state_dir}/${package}.key" ]]; then
-    IFS= read -r previous_local < "${state_dir}/${package}.key"
-  fi
-  if [[ "${local_key}" != "${previous_local}" ]]; then
-    if [[ -d "${BOARD_DIR}/per-package/${package}" ]] || compgen -G "${BOARD_DIR}/build/${package}-*" >/dev/null; then
-      make "${make_args[@]}" "${package}-dirclean"
-    fi
-  fi
-done
-make "${make_args[@]}" BR2_CCACHE=y
+make "${make_args[@]}"
 
 prepare_signing_keys
 current_key_identity=$(signing_identity)
@@ -210,8 +187,9 @@ if [[ "${PUU_FLATPAK_PRESEED:-1}" == 1 ]]; then
   current_flatpak_key=$(./scripts/flatpak-seed.sh --key)
 fi
 current_input_key=$("${state[@]}" "${input_args[@]}")
+current_configuration_key=$("${state[@]}" key --path "${BOARD_DIR}/.config")
 if [[ "${flatpak_key}" != "${current_flatpak_key}" || "${key_identity}" != "${current_key_identity}" || \
-    "${input_key}" != "${current_input_key}" ]]; then
+    "${input_key}" != "${current_input_key}" || "${configuration_key}" != "${current_configuration_key}" ]]; then
   echo "${BOARD}: inputs changed during the build; not recording an up-to-date result" >&2
   exit 1
 fi
@@ -219,13 +197,8 @@ build_tree=$("${state[@]}" build-tree "${BOARD_DIR}")
 build_key=$("${state[@]}" key --value "inputs=${input_key}" --value "packages=${build_tree}" \
   --path "${BOARD_DIR}/.config")
 "${state[@]}" save "${state_dir}/configure.json" --key "${configure_key}" --path "${BOARD_DIR}/.config"
-printf '%s\n' "${recipe_key}" > "${state_dir}/recipes.key.tmp"
-mv "${state_dir}/recipes.key.tmp" "${state_dir}/recipes.key"
 printf '%s\n' "${kernel_key}" > "${state_dir}/linux.key.tmp"
 mv "${state_dir}/linux.key.tmp" "${state_dir}/linux.key"
-for i in "${!local_packages[@]}"; do
-  package=${local_packages[${i}]}
-  printf '%s\n' "${local_keys[${i}]}" > "${state_dir}/${package}.key.tmp"
-  mv "${state_dir}/${package}.key.tmp" "${state_dir}/${package}.key"
-done
+"${packages[@]}" commit --root "${PWD}" --board "${BOARD_DIR}" \
+  --source "${BUILDROOT_SRC_DIR}" -- "${make_args[@]}"
 "${state[@]}" save "${state_dir}/build.json" --key "${build_key}" "${outputs[@]}"
