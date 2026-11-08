@@ -9,6 +9,7 @@ BOOTC_DEPENDENCIES = \
 	composefs \
 	openssl \
 	libostree \
+	util-linux \
 	zstd
 
 # Skip manpages and completions to avoid host cargo invocations during install.
