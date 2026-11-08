@@ -9,10 +9,10 @@ import json
 import os
 from pathlib import Path
 import signal
-from statistics import median
 import subprocess
 import time
 
+from oksa_calibration_policy import CalibrationPolicy
 import oksa_model_serving as ms
 from oksa_calibration_state import (
     CalibrationStore, STATUS_PATH, ZERO_LIMITS, atomic_record, boot_id,
@@ -26,6 +26,8 @@ POD = "vllm-calibration"
 MAX_TRIALS = 40
 MAX_SECONDS = 4 * 60 * 60
 TRIAL_SECONDS = 2100
+FINAL_VALIDATIONS = 3
+GOODPUT_NEAR_TIE = 0.05
 
 
 class CalibrationTimeout(TimeoutError):
@@ -41,6 +43,8 @@ class CalibrationController:
         self.model = ""
         self.force = force
         self.fingerprint = ""
+        self.policy = CalibrationPolicy.from_environment()
+        self.previous_profile = None
 
     def publish(self, state: str, message: str) -> None:
         value = dict(schema=1, model=self.model, boot_id=boot_id(), state=state,
@@ -93,8 +97,7 @@ class CalibrationController:
                     ceilings.append(value)
         return min(ceilings)
 
-    @staticmethod
-    def probe_pod(plan: PlannedWorkload, node: str, context: int, sequences: int,
+    def probe_pod(self, plan: PlannedWorkload, node: str, context: int, sequences: int,
                   utilization: float, memory_bytes: int, reserve: int, seconds: int,
                   *, prefix_caching: bool = False) -> dict:
         candidate = dataclasses.replace(
@@ -120,6 +123,9 @@ class CalibrationController:
             dict(name="PUU_PROBE_UTILIZATION", value=str(utilization)),
             dict(name="PUU_PROBE_HOST_RESERVE", value=str(reserve)),
             dict(name="PUU_PROBE_SECONDS", value=str(seconds)),
+            dict(name="PUU_PROBE_POLICY", value=json.dumps(self.policy.to_dict(), allow_nan=False)),
+            dict(name="PUU_PROBE_TOKENIZER", value=plan.spec.path),
+            dict(name="PUU_PROBE_ACCELERATOR", value=plan.accelerator_vendor.value),
         ])
         container["volumeMounts"].extend([
             dict(name="calibration", mountPath="/calibration", readOnly=True),
@@ -174,35 +180,25 @@ class CalibrationController:
                     if terminated.get("reason") == "OOMKilled":
                         return dict(status="capacity", reason="Pod memory limit reached", context=context,
                                     sequences=sequences, utilization=utilization)
-                    value = json.loads(terminated.get("message") or "{}")
+                    message = terminated.get("message") or "{}"
+                    if not isinstance(message, str) or len(message.encode("utf-8")) > 4096:
+                        raise ValueError("Calibration probe result exceeds 4096 bytes")
+                    value = json.loads(message)
+                    if not isinstance(value, dict):
+                        raise ValueError("Calibration probe result must be an object")
                     if deadline_exceeded and (not value or value.get("reason") == "InterruptedError: probe interrupted by signal 15"):
                         return timed_out("Calibration pod time budget exhausted")
-                    if value.get("status") not in ("passed", "capacity", "timeout"):
-                        raise RuntimeError(f"Calibration probe failed: {value or terminated}")
+                    if value.get("status") not in ("passed", "capacity", "latency", "timeout"):
+                        raise RuntimeError(f"Calibration probe failed: {message}")
                     if terminated.get("exitCode") != 0:
                         raise RuntimeError(f"Calibration probe exited unsuccessfully: {terminated}")
-                    if (value.get("context") != context or value.get("sequences") != sequences
-                            or value.get("utilization") != utilization):
+                    if (type(value.get("context")) is not int or value["context"] != context
+                            or type(value.get("sequences")) is not int or value["sequences"] != sequences
+                            or type(value.get("utilization")) not in (int, float) or value["utilization"] != utilization):
                         raise ValueError("Calibration probe returned mismatched parameters")
-                    metrics = value.get("metrics") or {}
-                    estimated = metrics.get("estimated_max_model_len")
-                    if estimated is not None and (type(estimated) is not int or not 0 < estimated < 1e18):
-                        raise ValueError("Invalid probe estimated_max_model_len")
-                    if value["status"] == "passed":
-                        for key in ("tokens_per_second", "peak_gpu_memory_bytes", "peak_host_memory_bytes",
-                                    "minimum_host_available_bytes", "kv_cache_tokens"):
-                            number = metrics.get(key)
-                            if type(number) not in (int, float) or not 0 < number < 1e18:
-                                raise ValueError(f"Invalid probe metric: {key}")
-                        if (metrics["kv_cache_tokens"] < context * sequences
-                                or metrics["minimum_host_available_bytes"] < reserve
-                                or metrics["peak_host_memory_bytes"] > memory_bytes + 64 * 1024**2):
-                            raise ValueError("Calibration probe exceeded its memory bounds")
-                        samples = metrics.get("tokens_per_second_samples")
-                        if (not isinstance(samples, list) or len(samples) != 3
-                                or any(type(sample) not in (int, float) or not 0 < sample < 1e18 for sample in samples)
-                                or metrics["tokens_per_second"] != median(samples)):
-                            raise ValueError("Invalid probe throughput samples")
+                    if not isinstance(value.get("reason", ""), str) or len(value.get("reason", "")) > 512:
+                        raise ValueError("Invalid probe reason")
+                    self.validate_metrics(value, context, sequences, memory_bytes, reserve)
                     if time.monotonic() >= trial_deadline:
                         return timed_out("Calibration candidate time budget exhausted")
                     value["prefix_caching"] = prefix_caching
@@ -218,108 +214,150 @@ class CalibrationController:
         finally:
             self.delete_probe(deadline=deadline)
 
+    def validate_metrics(self, value, context, sequences, memory_bytes, reserve):
+        metrics = value.get("metrics", {})
+        self.policy.validate_metrics(metrics, value["status"])
+        if value["status"] not in ("passed", "latency"):
+            return
+        if (metrics["kv_cache_tokens"] < context * sequences
+                or metrics["minimum_host_available_bytes"] < reserve
+                or metrics["peak_host_memory_bytes"] > memory_bytes + 64 * 1024**2):
+            raise ValueError("Calibration probe exceeded its memory bounds")
+
     @staticmethod
-    def search_context(test, trials: list[dict], upper: int) -> int:
-        passed, failed = 512, upper // 512 * 512 + 512
-        while failed - passed > 512:
-            candidate = failed - 512 if failed > upper else (passed + failed) // 1024 * 512
-            outcome = test(candidate)
-            if outcome == "passed":
-                passed = candidate
-            elif outcome in ("capacity", "timeout"):
-                failed = candidate
-                estimated = (trials[-1].get("metrics") or {}).get("estimated_max_model_len", 0)
-                if outcome == "capacity" and type(estimated) is int and estimated > passed:
-                    failed = min(failed, estimated // 512 * 512 + 512)
-            else:
-                raise ValueError(f"Invalid context trial outcome: {outcome}")
-        return passed
+    def rank_candidates(candidates):
+        highest = max(candidate["metrics"]["goodput"] for candidate in candidates)
+        near_ties = [candidate for candidate in candidates
+                     if candidate["metrics"]["goodput"] >= highest * (1 - GOODPUT_NEAR_TIE)]
+        return max(near_ties, key=lambda candidate: (
+            candidate["context"], candidate["metrics"]["goodput"], -candidate["sequences"]))
 
     def calibrate(self, plan: PlannedWorkload, node: str, identity: dict) -> dict:
+        started = time.monotonic()
         memory = self.memory_info()
         reserve = max(2 * 1024**3, memory["MemTotal"] // 5)
         budget = max(0, memory["MemAvailable"] - reserve)
         result = dict(schema=1, model=self.model, state="complete", fingerprint=self.fingerprint,
                       identity=identity, completed_at=time.time(), reason="insufficient-memory",
-                      limits=dict(ZERO_LIMITS), trials=[], search_complete=True, incomplete_reasons=[])
-        if not budget:
+                      limits=dict(ZERO_LIMITS), trials=[], search_complete=True, incomplete_reasons=[],
+                      metrics=dict(policy=self.policy.to_dict()))
+        comparison = {}
+        if self.previous_profile is not None:
+            comparison["previous_limits"] = self.previous_profile["limits"]
+            comparison["previous_fingerprint"] = self.previous_profile["fingerprint"]
+            result["metrics"]["baseline_comparison"] = comparison
+
+        def finish():
+            result["metrics"]["search_duration_seconds"] = time.monotonic() - started
+            result["completed_at"] = time.time()
             return result
-        ceiling = self.context_ceiling(plan)
-        if ceiling < 512:
-            raise ValueError("Model context ceiling is below the minimum calibration context of 512")
-        deadline = time.monotonic() + MAX_SECONDS
+
+        if not budget:
+            return finish()
+        minimum = self.policy.minimum_context
+        ceiling = min(262144, self.context_ceiling(plan)) // 512 * 512
+        if ceiling < minimum:
+            raise ValueError("Model context ceiling cannot accommodate the calibration policy")
+        deadline = started + MAX_SECONDS
+        search_deadline = deadline - FINAL_VALIDATIONS * (TRIAL_SECONDS + 180)
         trials = result["trials"]
-        best = None
+        candidates = []
 
         def mark_incomplete(reason):
             result["search_complete"] = False
             if reason not in result["incomplete_reasons"]:
                 result["incomplete_reasons"].append(reason)
 
-        def measure(context, sequences, utilization, *, prefix_caching=False, memory_bytes=budget):
-            if time.monotonic() >= deadline:
+        def measure(context, sequences, utilization, *, final=False, memory_bytes=budget):
+            limit = MAX_TRIALS if final else MAX_TRIALS - FINAL_VALIDATIONS
+            trial_deadline = deadline if final else search_deadline
+            if time.monotonic() >= trial_deadline:
                 raise CalibrationTimeout("global-time-budget", "Calibration search time budget exhausted")
-            if len(trials) >= MAX_TRIALS - (0 if prefix_caching else 3):
+            if len(trials) >= limit:
                 raise CalibrationTimeout("trial-budget", "Calibration trial budget exhausted")
             value = self.run_trial(plan, node, context, sequences, utilization, memory_bytes,
-                                   reserve, deadline, len(trials) + 1, prefix_caching=prefix_caching)
+                                   reserve, trial_deadline, len(trials) + 1, prefix_caching=final)
             trials.append(value)
             if value["status"] == "timeout":
                 mark_incomplete("candidate-timeout")
+            if value["status"] == "passed" and not final:
+                candidates.append(value)
             return value
 
-        def test(context, sequences, utilization):
-            nonlocal best
-            value = measure(context, sequences, utilization)
-            if value["status"] == "passed":
-                best = value
-            return value["status"]
-
         try:
+            base = None
             for utilization in (0.9, 0.85, 0.7, 0.5):
-                if test(512, 1, utilization) == "passed":
+                value = measure(minimum, 1, utilization)
+                if value["status"] == "passed":
+                    base = value
                     break
-            else:
+            if base is None:
                 if not result["search_complete"]:
                     raise CalibrationTimeout("candidate-timeout", "No profile passed before candidate timeouts")
-                return result
-            upper = min(ceiling, best["metrics"]["kv_cache_tokens"])
-            context = self.search_context(lambda tokens: test(tokens, 1, utilization), trials, upper)
-            baseline = best["metrics"]["tokens_per_second"]
-            cache_tokens = best["metrics"]["kv_cache_tokens"]
-            for sequences in (2, 4, 8, 16, 32):
-                if sequences > plan.spec.max_concurrent_sequences or context * sequences > cache_tokens:
-                    break
-                value = measure(context, sequences, utilization)
-                if value["status"] == "passed":
-                    throughput = value["metrics"]["tokens_per_second"]
-                    if throughput / baseline >= 1.1 and throughput > best["metrics"]["tokens_per_second"]:
-                        best = value
+                if any(trial["status"] == "latency" for trial in trials):
+                    result["reason"] = "latency-budget"
+                return finish()
+            cache_tokens = int(base["metrics"]["kv_cache_tokens"])
+            upper = min(ceiling, cache_tokens // 512 * 512)
+            contexts = [minimum]
+            while contexts[-1] * 2 < upper:
+                contexts.append(contexts[-1] * 2)
+            if upper != minimum:
+                contexts.append(upper)
+            if len(contexts) > 5:
+                contexts = [contexts[index * (len(contexts) - 1) // 4] for index in range(5)]
+            sequence_limit = min(32, plan.spec.max_concurrent_sequences)
+            sequences_to_test = sorted({1, sequence_limit, *(count for count in (2, 4, 8, 16, 32)
+                                                            if count <= sequence_limit)})
+            for context in contexts:
+                for sequences in sequences_to_test:
+                    if (context == minimum and sequences == 1) or context * sequences > cache_tokens:
+                        continue
+                    measure(context, sequences, utilization)
+            if self.previous_profile is not None:
+                previous = self.previous_profile["limits"]
+                if (minimum <= previous["max_model_len"] <= ceiling
+                        and 1 <= previous["max_num_seqs"] <= sequence_limit
+                        and previous["max_model_len"] * previous["max_num_seqs"] <= cache_tokens):
+                    baseline = measure(previous["max_model_len"], previous["max_num_seqs"],
+                                       previous["gpu_memory_utilization"])
+                    comparison["status"] = baseline["status"]
+                    if baseline["status"] in ("passed", "latency"):
+                        comparison["goodput"] = baseline["metrics"]["goodput"]
+                        comparison["tokens_per_second"] = baseline["metrics"]["tokens_per_second"]
         except CalibrationTimeout as error:
-            if best is None:
+            if not candidates:
                 raise
             mark_incomplete(error.reason)
-            self.publish("running", f"{error}; validating the best profile with prefix caching enabled.")
+            self.publish("running", f"{error}; validating the best measured profile.")
+        best = self.rank_candidates(candidates)
         context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
-        enabled = measure(context, sequences, utilization, prefix_caching=True)
+        enabled = measure(context, sequences, utilization, final=True)
         if enabled["status"] != "passed":
-            raise RuntimeError(f"Serving profile failed prefix-cache validation: {enabled['reason']}")
-        peak = max(
-            max(trial["metrics"]["peak_host_memory_bytes"] for trial in trials if trial.get("status") == "passed"),
-            enabled["metrics"]["peak_host_memory_bytes"] + max(0, plan.spec.storage_mib) * 1024**2,
-        )
+            raise RuntimeError(f"Serving profile failed prefix-cache validation: {enabled.get('reason', enabled['status'])}")
+        peak = max(best["metrics"]["peak_host_memory_bytes"],
+                   enabled["metrics"]["peak_host_memory_bytes"] + max(0, plan.spec.storage_mib) * 1024**2)
         memory_bytes = min(budget, (int(peak * 1.2) + 512 * 1024**2 + 1024**2 - 1) // 1024**2 * 1024**2)
-        final = measure(context, sequences, utilization, prefix_caching=True, memory_bytes=memory_bytes)
-        if final["status"] == "capacity" and memory_bytes < budget:
-            memory_bytes = budget
-            final = measure(context, sequences, utilization, prefix_caching=True, memory_bytes=memory_bytes)
-        if final["status"] != "passed":
-            raise RuntimeError(f"Serving profile failed measured-memory validation: {final['reason']}")
-        result.update(reason="measured", completed_at=time.time(), metrics=final["metrics"], limits=dict(
+        validations = [enabled]
+        for _ in range(FINAL_VALIDATIONS - 1):
+            final = measure(context, sequences, utilization, final=True, memory_bytes=memory_bytes)
+            if final["status"] != "passed":
+                raise RuntimeError(f"Serving profile failed measured-memory validation: {final.get('reason', final['status'])}")
+            validations.append(final)
+        metrics = dict(final["metrics"])
+        metrics.update(policy=self.policy.to_dict(),
+                       conservative_goodput=min(trial["metrics"]["goodput"] for trial in [best, *validations]),
+                       ranking=dict(near_tie_fraction=GOODPUT_NEAR_TIE,
+                                    primary="conservative-goodput", near_tie="context"))
+        if comparison:
+            metrics["baseline_comparison"] = comparison
+            if comparison.get("goodput", 0) > 0:
+                comparison["goodput_ratio"] = metrics["conservative_goodput"] / comparison["goodput"]
+        result.update(reason="measured", metrics=metrics, limits=dict(
             max_model_len=context, max_num_seqs=sequences,
             max_num_batched_tokens=min(8192, context * sequences),
             gpu_memory_utilization=utilization, memory_bytes=memory_bytes))
-        return result
+        return finish()
 
     def run(self) -> None:
         selected = self.requested_model or os.environ.get("PUU_VLLM_SELECTED_MODEL", "") or ms.read_first_line(
@@ -346,11 +384,15 @@ class CalibrationController:
         identity = store.identity(spec)
         self.fingerprint = store.fingerprint(identity)
         cached = None
-        if not self.force:
-            try:
-                cached = read_record(result_path(self.model))
-            except (FileNotFoundError, ValueError):
-                pass
+        try:
+            previous = read_record(result_path(self.model))
+        except (FileNotFoundError, ValueError):
+            previous = None
+        if previous is not None and valid_result(previous, self.model):
+            if previous["limits"]["max_num_seqs"] > 0:
+                self.previous_profile = previous
+            if not self.force:
+                cached = previous
         if (cached is not None and valid_result(cached, self.model)
                 and cached["fingerprint"] == self.fingerprint
                 and cached["identity"] == identity
@@ -367,7 +409,8 @@ class CalibrationController:
         if not identity["gpus"]:
             result = dict(schema=1, model=self.model, state="complete", fingerprint=self.fingerprint,
                           identity=identity, completed_at=time.time(), reason="no-gpu", limits=dict(ZERO_LIMITS),
-                          trials=[], search_complete=True, incomplete_reasons=[])
+                          trials=[], search_complete=True, incomplete_reasons=[],
+                          metrics=dict(policy=self.policy.to_dict(), search_duration_seconds=0.0))
         else:
             if evaluation.plan is None:
                 raise ValueError("Cannot probe model: " + "; ".join(evaluation.reasons))
@@ -396,7 +439,7 @@ class CalibrationController:
                    "simultaneous requests; serving profile validated with prefix caching enabled.") if limits["max_num_seqs"] else (
                        f"Calibration complete with zero limits: {result['reason']}.")
         if not result["search_complete"]:
-            message += " Maximum capacity was not established; use --force to retry."
+            message += " Search did not complete; use --force to retry."
         self.publish("complete", message)
         print(message, flush=True)
 

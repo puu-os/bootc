@@ -14,6 +14,8 @@ import stat
 import tempfile
 from typing import TYPE_CHECKING
 
+from oksa_calibration_policy import CalibrationPolicy
+
 if TYPE_CHECKING:
     from oksa_model_serving import ModelSpec
 
@@ -115,18 +117,28 @@ def valid_result(value: dict, model: str) -> bool:
     utilization = limits["gpu_memory_utilization"]
     if type(utilization) not in (int, float) or not math.isfinite(utilization):
         return False
-    if limits == ZERO_LIMITS:
-        return search_complete and value.get("reason") == ("insufficient-memory" if identity["gpus"] else "no-gpu")
-    metrics = value.get("metrics", {})
+    metrics = value.get("metrics")
     if not isinstance(metrics, dict):
         return False
-    for key in ("tokens_per_second", "peak_gpu_memory_bytes", "minimum_host_available_bytes", "kv_cache_tokens"):
-        number = metrics.get(key)
-        if type(number) not in (int, float) or not 0 < number < 1e18:
+    try:
+        policy = CalibrationPolicy.from_dict(identity.get("policy"))
+        if CalibrationPolicy.from_dict(metrics.get("policy")) != policy:
             return False
-    if metrics["kv_cache_tokens"] < limits["max_model_len"] * limits["max_num_seqs"]:
+        if limits != ZERO_LIMITS:
+            policy.validate_metrics(metrics, "passed")
+    except ValueError:
         return False
-    return (512 <= limits["max_model_len"] <= 262144
+    if limits == ZERO_LIMITS:
+        reasons = ("insufficient-memory", "latency-budget") if identity["gpus"] else ("no-gpu",)
+        return search_complete and value.get("reason") in reasons
+    conservative_goodput = metrics.get("conservative_goodput")
+    if (type(conservative_goodput) not in (int, float)
+            or not 0 < conservative_goodput <= metrics["goodput"]
+            or metrics["cache"]["enabled"] is not True
+            or metrics["peak_host_memory_bytes"] > limits["memory_bytes"] + 64 * 1024**2
+            or metrics["kv_cache_tokens"] < limits["max_model_len"] * limits["max_num_seqs"]):
+        return False
+    return (policy.minimum_context <= limits["max_model_len"] <= 262144
             and 1 <= limits["max_num_seqs"] <= 32
             and 512 <= limits["max_num_batched_tokens"] <= 65536
             and 0.5 <= utilization <= 0.95 and limits["memory_bytes"] > 0
@@ -166,6 +178,8 @@ class CalibrationStore:
             probe=hashlib.sha256(resolve_helper("oksa-calibration-probe").read_bytes()).hexdigest(),
             runtime=hashlib.sha256(resolve_helper("oksa_workload_manifest.py").read_bytes()).hexdigest(),
             backend=hashlib.sha256(resolve_helper("oksa_accelerator.py").read_bytes()).hexdigest(),
+            calibration_policy=hashlib.sha256(resolve_helper("oksa_calibration_policy.py").read_bytes()).hexdigest(),
+            calibration_benchmark=hashlib.sha256(resolve_helper("oksa_calibration_benchmark.py").read_bytes()).hexdigest(),
         )
 
     @classmethod
@@ -199,6 +213,7 @@ class CalibrationStore:
         metadata = {key: value for key, value in dataclasses.asdict(spec).items()
                     if key not in ("estimated_memory_mib", "storage_mib")}
         identity["model"] = json.loads(json.dumps(metadata))
+        identity["policy"] = CalibrationPolicy.from_environment().to_dict()
         identity["metadata_sources"] = sources
         identity["config"] = hashlib.sha256(config.read_bytes()).hexdigest()
         identity["runtime_files"] = {

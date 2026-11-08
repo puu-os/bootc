@@ -11,32 +11,21 @@ import queue
 import re
 import select
 import signal
-from statistics import median
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 
+from oksa_accelerator import AcceleratorManager, AcceleratorVendor
+from oksa_calibration_benchmark import VllmBenchmark
+from oksa_calibration_policy import CalibrationPolicy
+
 LOG_LIMIT = 16 * 1024 * 1024
 RESPONSE_LIMIT = 2 * 1024 * 1024
-MEMORY_ERRORS = re.compile(
-    r"CUDA out of memory|HIP out of memory|hipErrorOutOfMemory|"
-    r"torch(?:\.(?:cuda|xpu))?\.OutOfMemoryError|"
-    r"OutOfMemoryError|ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY|"
-    r"No available memory for the cache blocks|"
-    r"max seq len[^\n]*larger than[^\n]*KV cache|"
-    r"Free memory on device[^\n]*less than desired GPU memory utilization", re.IGNORECASE
-)
 KV_CACHE = re.compile(r"GPU KV cache size:\s*([\d,]+)\s+tokens")
 ESTIMATED_CONTEXT = re.compile(r"estimated maximum model length is\s*([\d,]+)", re.IGNORECASE)
 PREEMPTIONS = re.compile(r'^vllm:num_preemptions_total(\{[^\n]*\})?\s+(\S+)', re.MULTILINE)
-def query_accelerator_memory(torch_mod):
-    if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
-        return torch_mod.cuda.mem_get_info()
-    if hasattr(torch_mod, "xpu") and torch_mod.xpu.is_available():
-        return torch_mod.xpu.mem_get_info()
-    return 0, 0
 
 
 class CapacityError(Exception):
@@ -47,6 +36,8 @@ class ProbeTimeout(TimeoutError):
     pass
 
 
+class LatencyError(Exception):
+    pass
 
 
 def http_request(path, payload=None, *, timeout):
@@ -64,11 +55,9 @@ def http_request(path, payload=None, *, timeout):
         connection.close()
 
 
-def start_request(results, path, payload=None, barrier=None, *, timeout):
+def start_request(results, path, payload=None, *, timeout):
     def request():
         try:
-            if barrier is not None:
-                barrier.wait(timeout=timeout)
             results.put((http_request(path, payload, timeout=timeout), None))
         except Exception as error:
             results.put((None, error))
@@ -104,9 +93,12 @@ def stop_child(child):
             signal.signal(sig, handler)
 
 
-def probe(command, context, sequences, utilization, reserve, metrics, log, seconds):
+def probe(command, context, sequences, utilization, reserve, metrics, log, seconds,
+          *, policy: CalibrationPolicy, tokenizer: str, accelerator: AcceleratorVendor):
     trial_deadline = time.monotonic() + seconds
     import torch
+
+    backend = AcceleratorManager.execution_backend(accelerator)
 
     child = None
     pump = None
@@ -151,17 +143,17 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
         if available < reserve:
             raise CapacityError("host MemAvailable below reserve")
         try:
-            free, total = query_accelerator_memory(torch)
+            devices = backend.query_memory(torch)
         except torch.OutOfMemoryError as error:
             raise CapacityError(str(error)) from error
-        metrics["peak_gpu_memory_bytes"] = max(metrics["peak_gpu_memory_bytes"], total - free)
+        metrics["peak_gpu_memory_bytes"] = max(metrics["peak_gpu_memory_bytes"], sum(device.used_bytes for device in devices))
         if child is not None:
             if child.poll() is not None:
                 pump.join(timeout=1)
                 if log_errors:
                     raise RuntimeError(log_errors[0])
                 text = log_text(log)
-                if child.returncode >= 0 and MEMORY_ERRORS.search(text):
+                if child.returncode >= 0 and backend.is_memory_error(text):
                     estimates = [value for raw in ESTIMATED_CONTEXT.findall(text)
                                  if (value := int(raw.replace(",", ""))) > 0]
                     if estimates:
@@ -170,7 +162,7 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
                 raise RuntimeError(f"candidate exited with code {child.returncode}")
         if check_deadline and time.monotonic() >= trial_deadline:
             raise ProbeTimeout("Trial time budget exhausted")
-        return free, total
+        return devices
 
     def receive(results, deadline):
         while True:
@@ -188,15 +180,14 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
             if time.monotonic() >= deadline:
                 raise ProbeTimeout("Startup/request deadline exceeded")
             if error is not None:
-                if (isinstance(error, TimeoutError) or
-                        isinstance(error, threading.BrokenBarrierError) and time.monotonic() >= deadline):
+                if isinstance(error, TimeoutError):
                     raise ProbeTimeout("Request deadline exceeded") from error
                 raise error
             return value
 
-    def fetch(path, deadline):
+    def fetch(path, deadline, payload=None):
         results = queue.Queue()
-        start_request(results, path, timeout=max(0.001, deadline - time.monotonic()))
+        start_request(results, path, payload, timeout=max(0.001, deadline - time.monotonic()))
         status, data = receive(results, deadline)
         if status != 200:
             raise RuntimeError(f"{path} returned HTTP {status}: {data[:256]!r}")
@@ -209,9 +200,10 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
             raise RuntimeError("missing or invalid vLLM preemption counters")
         return values
 
-    free, total = monitor()
-    if free < utilization * total + min(1024 ** 3, total * 0.1):
-        raise CapacityError("CUDA free memory cannot cover utilization and headroom")
+    devices = monitor()
+    if any(device.free_bytes < utilization * device.total_bytes + min(1024 ** 3, device.total_bytes * 0.1)
+           for device in devices):
+        raise CapacityError("Accelerator free memory cannot cover utilization and headroom")
     startup_deadline = min(trial_deadline, time.monotonic() + 1800)
     try:
         child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -248,54 +240,29 @@ def probe(command, context, sequences, utilization, reserve, metrics, log, secon
         models = json.loads(fetch("/v1/models", trial_deadline))["data"]
         if not models or not isinstance(models[0]["id"], str):
             raise RuntimeError("no served model ID")
-        samples = []
-        for round_number in range(4):
-            before = preemptions(trial_deadline)
-            inference_log_offset = os.fstat(log.fileno()).st_size
-            barrier = threading.Barrier(sequences + 1)
-            results = queue.Queue()
-            for index in range(sequences):
-                monitor()
-                if time.monotonic() >= trial_deadline:
-                    raise ProbeTimeout("Inference setup deadline exceeded")
-                payload = {"model": models[0]["id"], "prompt": [100 + index + round_number * sequences] * (context - 32),
-                           "max_tokens": 32, "ignore_eos": True, "temperature": 0}
-                start_request(results, "/v1/completions", payload, barrier,
-                              timeout=max(0.001, trial_deadline - time.monotonic()))
-            started = time.monotonic()
-            try:
-                barrier.wait(timeout=min(1, max(0.001, trial_deadline - started)))
-            except threading.BrokenBarrierError as error:
-                if time.monotonic() >= trial_deadline:
-                    raise ProbeTimeout("Inference barrier deadline exceeded") from error
-                raise
-            for _ in range(sequences):
-                status, data = receive(results, trial_deadline)
-                if status != 200:
-                    failure_log = os.pread(log.fileno(), LOG_LIMIT, inference_log_offset).decode(errors="replace")
-                    if status == 500 and MEMORY_ERRORS.search(failure_log + data.decode(errors="replace")):
-                        raise CapacityError("completion reported memory capacity exhaustion")
-                    raise RuntimeError(f"completion returned HTTP {status}: {data[:256]!r}")
-                response = json.loads(data)
-                choices = response.get("choices")
-                usage = response.get("usage", {})
-                if (not isinstance(choices, list) or len(choices) != 1 or
-                        not isinstance(choices[0], dict) or not isinstance(choices[0].get("text"), str) or
-                        usage.get("prompt_tokens") != context - 32 or usage.get("completion_tokens") != 32):
-                    raise RuntimeError("completion choices or token usage failed validation")
-            elapsed = time.monotonic() - started
-            after = preemptions(trial_deadline)
-            if any(value > before.get(labels, 0) for labels, value in after.items()):
-                raise CapacityError("vLLM preemptions increased during concurrent inference")
-            if any(labels not in after or after[labels] < value for labels, value in before.items()):
-                raise RuntimeError("vLLM preemption counters disappeared or reset")
-            monitor()
-            if time.monotonic() >= trial_deadline:
-                raise ProbeTimeout("Inference deadline exceeded")
-            if round_number:
-                samples.append(sequences * 32 / elapsed)
-        metrics["tokens_per_second_samples"] = samples
-        metrics["tokens_per_second"] = median(samples)
+        before = preemptions(trial_deadline)
+        inference_log_offset = os.fstat(log.fileno()).st_size
+        benchmark = VllmBenchmark(
+            policy, models[0]["id"], tokenizer, sequences, monitor, stop_child,
+            lambda: fetch("/reset_prefix_cache", trial_deadline, {}),
+            prefix_caching="--enable-prefix-caching" in command,
+            trust_remote_code="--trust-remote-code" in command,
+        )
+        try:
+            metrics.update(benchmark.measure(context))
+        except (RuntimeError, ValueError) as error:
+            failure_log = os.pread(log.fileno(), LOG_LIMIT, inference_log_offset).decode(errors="replace")
+            if backend.is_memory_error(failure_log + str(error)):
+                raise CapacityError("Benchmark reported memory capacity exhaustion") from error
+            raise
+        after = preemptions(trial_deadline)
+        if any(value > before.get(labels, 0) for labels, value in after.items()):
+            raise CapacityError("vLLM preemptions increased during concurrent inference")
+        if any(labels not in after or after[labels] < value for labels, value in before.items()):
+            raise RuntimeError("vLLM preemption counters disappeared or reset")
+        monitor()
+        if not benchmark.within_budget(metrics):
+            raise LatencyError("Cold-cache or warm-cache requests exceeded the configured latency budget")
     finally:
         if child is not None:
             try:
@@ -334,6 +301,11 @@ def run():
         utilization = record["utilization"] = float(os.environ["PUU_PROBE_UTILIZATION"])
         reserve = int(os.environ["PUU_PROBE_HOST_RESERVE"])
         seconds = int(os.environ["PUU_PROBE_SECONDS"])
+        policy = CalibrationPolicy.from_dict(json.loads(os.environ["PUU_PROBE_POLICY"]))
+        tokenizer = os.environ["PUU_PROBE_TOKENIZER"]
+        accelerator = AcceleratorVendor(os.environ["PUU_PROBE_ACCELERATOR"])
+        if not tokenizer or context < policy.minimum_context:
+            raise ValueError("Invalid tokenizer path or context smaller than the calibration workload")
         if (not isinstance(command, list) or not command or
                 any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)):
             raise ValueError("PUU_PROBE_COMMAND must be a nonempty JSON command list")
@@ -341,13 +313,16 @@ def run():
             raise ValueError("invalid context, sequences, utilization, host reserve, or time budget")
         with tempfile.TemporaryFile() as log:
             try:
-                probe(command, context, sequences, utilization, reserve, record["metrics"], log, seconds)
+                probe(command, context, sequences, utilization, reserve, record["metrics"], log, seconds,
+                      policy=policy, tokenizer=tokenizer, accelerator=accelerator)
             finally:
                 if sys.exc_info()[0] is not None:
                     print(log_text(log)[-8192:], file=sys.stderr)
-        record.update(status="passed", reason="warmup and three full-context inference rounds completed without preemptions")
+        record.update(status="passed", reason="Full-context capacity and repeated cold/warm workload latency budgets validated")
     except CapacityError as error:
         record.update(status="capacity", reason=str(error)[:400])
+    except LatencyError as error:
+        record.update(status="latency", reason=str(error)[:400])
     except ProbeTimeout as error:
         record.update(status="timeout", reason=str(error)[:400])
     except Exception as error:
