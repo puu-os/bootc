@@ -13,6 +13,7 @@ import logging
 import math
 import os
 from pathlib import Path, PurePosixPath
+import pwd
 import re
 import shlex
 import shutil
@@ -291,9 +292,13 @@ def label_namespace() -> str:
 
 
 def render_manifest(text: str) -> str:
-    if "@OKSA_LABEL_NAMESPACE@/" not in text:
-        return text
-    return text.replace("@OKSA_LABEL_NAMESPACE@/", label_namespace() + "/")
+    if "__OKSA_UID__" in text or "__OKSA_GID__" in text:
+        account = pwd.getpwnam("oksa")
+        text = text.replace("__OKSA_UID__", str(account.pw_uid))
+        text = text.replace("__OKSA_GID__", str(account.pw_gid))
+    if "@OKSA_LABEL_NAMESPACE@/" in text:
+        text = text.replace("@OKSA_LABEL_NAMESPACE@/", label_namespace() + "/")
+    return text
 
 
 def model_node_label(name: str) -> str:
