@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+import argparse
 import ctypes
 from dataclasses import dataclass, field
 import fcntl
@@ -15,6 +16,7 @@ import pwd
 import re
 import signal
 import stat
+import sys
 import tempfile
 import time
 import uuid
@@ -38,12 +40,19 @@ class Job:
     error: dict | None = None
     repo_id: str | None = None
     model_name: str | None = None
+    commit: str | None = None
+    user_id: str | None = None
+    request_id: str | None = None
     subscribers: set[str] = field(default_factory=set)
 
     def snapshot(self) -> dict:
-        return {"ok": True, "path": self.path, "operation": self.operation, "state": self.state,
-                "progress": self.progress, "started_at": self.started_at, "ended_at": self.ended_at,
-                "result": self.result, "error": self.error, "repo_id": self.repo_id, "model_name": self.model_name}
+        return {
+            "ok": True, "path": self.path, "operation": self.operation, "state": self.state,
+            "progress": self.progress, "started_at": self.started_at, "ended_at": self.ended_at,
+            "result": self.result, "error": self.error, "repo_id": self.repo_id,
+            "model_name": self.model_name, "commit": self.commit,
+            "user_id": self.user_id, "request_id": self.request_id,
+        }
 
     def properties(self) -> dict[str, GLib.Variant]:
         return {
@@ -57,11 +66,17 @@ class Job:
             "Error": GLib.Variant("a{sv}", {} if self.error is None else Contract.ERROR.to_variant(self.error)),
             "RepoId": GLib.Variant("as", [] if self.repo_id is None else [self.repo_id]),
             "ModelName": GLib.Variant("as", [] if self.model_name is None else [self.model_name]),
+            "Commit": GLib.Variant("as", [] if self.commit is None else [self.commit]),
+            "UserId": GLib.Variant("as", [] if self.user_id is None else [self.user_id]),
+            "RequestId": GLib.Variant("as", [] if self.request_id is None else [self.request_id]),
         }
 
 
 class JobStore:
     LIMIT = 64
+    RECEIPT_LIMIT = 128
+    TOMBSTONE_LIMIT = 2048
+    UNRESOLVED_LIMIT = 64
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
@@ -76,13 +91,35 @@ class JobStore:
             self.lock.close()
             raise
         self.jobs: dict[str, Job] = {}
+        self.namespace: str = uuid.uuid4().hex
+        self.receipts: dict[str, dict] = {}
+        self.tombstones: dict[str, str] = {}
         try:
             self.load()
         except BaseException:
             self.lock.close()
             raise
 
+    def _atomic_write_json(self, target: Path, payload: dict) -> None:
+        text = Contract.encode(payload)
+        fd, name = tempfile.mkstemp(prefix=".store-", dir=self.directory)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, target)
+            directory_fd = os.open(self.directory, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
     def load(self) -> None:
+        interrupted_jobs: list[Job] = []
         files = sorted(self.directory.glob("*.json"), key=lambda path: path.name)
         for path in files:
             if not re.fullmatch(r"[0-9a-f]{32}\.json", path.name):
@@ -92,8 +129,14 @@ class JobStore:
                 raise PermissionError(f"Unsafe job record: {path}")
             data = Contract.decode(path.read_text())
             Contract.validate_snapshot(data)
-            job = Job(**{key: data[key] for key in ("path", "operation", "started_at", "state", "progress",
-                                                   "ended_at", "result", "error", "repo_id", "model_name")})
+            job = Job(**{
+                key: data.get(key)
+                for key in (
+                    "path", "operation", "started_at", "state", "progress",
+                    "ended_at", "result", "error", "repo_id", "model_name",
+                    "commit", "user_id", "request_id",
+                )
+            })
             Contract.validate_job_path(job.path)
             if job.path.rsplit("/", 1)[1] != path.stem or job.state not in ("running", "succeeded", "failed", "canceled"):
                 raise ValueError(f"Invalid job record: {path}")
@@ -102,25 +145,272 @@ class JobStore:
                 job.ended_at = time.time()
                 job.error = {"code": "Interrupted", "message": "Daemon restarted before completion; verify operation state before retrying"}
                 self.save(job)
+                interrupted_jobs.append(job)
             self.jobs[job.path] = job
         self.prune()
+        self._load_receipts(interrupted_jobs)
+
+    def _load_receipts(self, interrupted_jobs: list[Job]) -> None:
+        receipts_path = self.directory / "receipts.json"
+        dirty = False
+        if receipts_path.exists():
+            info = receipts_path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > Contract.MAX_JSON:
+                raise PermissionError(f"Unsafe receipts record: {receipts_path}")
+            raw = Contract.decode(receipts_path.read_text())
+            ns = raw.get("namespace")
+            if not isinstance(ns, str) or not re.fullmatch(r"[0-9a-f]{32}", ns):
+                raise ValueError("Invalid receipts namespace")
+            self.namespace = ns
+            raw_receipts = raw.get("receipts")
+            raw_tombstones = raw.get("tombstones")
+            if not isinstance(raw_receipts, dict) or not isinstance(raw_tombstones, dict):
+                raise ValueError("Invalid receipts store")
+            for req_id, item in raw_receipts.items():
+                if not isinstance(item, dict) or item.get("request_id") != req_id:
+                    raise ValueError(f"Invalid receipt entry: {req_id}")
+                self.receipts[req_id] = dict(item)
+            for req_id, digest in raw_tombstones.items():
+                if not isinstance(req_id, str) or not isinstance(digest, str):
+                    raise ValueError("Invalid receipt tombstone")
+                self.tombstones[req_id] = digest
+        else:
+            dirty = True
+
+        interrupted_paths = {job.path: job for job in interrupted_jobs}
+        covered_paths = set()
+        now = time.time()
+        for receipt in self.receipts.values():
+            if receipt.get("state") == "running" or receipt.get("job_path") in interrupted_paths:
+                receipt["state"] = "unresolved"
+                receipt["updated_at"] = now
+                receipt["error_code"] = "Interrupted"
+                receipt["error_message"] = "Daemon restarted before completion; verify state and run operator reconciliation"
+                dirty = True
+            if receipt.get("job_path"):
+                covered_paths.add(receipt["job_path"])
+        for job in interrupted_jobs:
+            if job.path in covered_paths:
+                continue
+            req_id = job.request_id if (job.request_id and re.fullmatch(r"[0-9a-f]{32}:[0-9a-f]{32}", job.request_id)) else f"{self.namespace}:{job.path.rsplit('/', 1)[1]}"
+            scope = "model" if job.operation in Contract.MODEL_MUTATIONS else "user"
+            target = job.model_name or job.user_id or ("runtime" if job.operation == "StopServing" else "")
+            self.receipts[req_id] = {
+                "request_id": req_id,
+                "operation": job.operation,
+                "scope": scope,
+                "target": target,
+                "args_hash": "",
+                "state": "unresolved",
+                "created_at": job.started_at,
+                "updated_at": now,
+                "job_path": job.path,
+                "summary": "Interrupted by daemon restart",
+                "error_code": "Interrupted",
+                "error_message": "Daemon restarted before completion; verify state and run operator reconciliation",
+            }
+            dirty = True
+        if dirty:
+            self.save_receipts()
+
+    def save_receipts(self) -> None:
+        self._atomic_write_json(
+            self.directory / "receipts.json",
+            {"namespace": self.namespace, "receipts": self.receipts, "tombstones": self.tombstones},
+        )
+
+    @staticmethod
+    def public_receipt(receipt: dict) -> dict:
+        return {
+            "request_id": receipt["request_id"],
+            "operation": receipt["operation"],
+            "scope": receipt["scope"],
+            "target": receipt["target"],
+            "state": receipt["state"],
+            "created_at": float(receipt["created_at"]),
+            "updated_at": float(receipt["updated_at"]),
+            "job_path": receipt.get("job_path") or None,
+            "summary": receipt.get("summary") or None,
+            "error_code": receipt.get("error_code") or None,
+            "error_message": receipt.get("error_message") or None,
+        }
+
+    def list_receipts(self) -> list[dict]:
+        ordered = sorted(self.receipts.values(), key=lambda r: float(r.get("updated_at") or 0.0), reverse=True)
+        return [self.public_receipt(item) for item in ordered[:64]]
+
+    def list_unresolved(self, scope: str | None = None) -> list[dict]:
+        items = [
+            r for r in self.receipts.values()
+            if r.get("state") == "unresolved" and (scope is None or r.get("scope") == scope)
+        ]
+        items.sort(key=lambda r: float(r.get("updated_at") or 0.0), reverse=True)
+        return [self.public_receipt(item) for item in items]
+
+    def _prune_receipts(self, *, workers_active: bool) -> None:
+        unresolved_count = sum(1 for r in self.receipts.values() if r.get("state") == "unresolved")
+        if unresolved_count >= self.UNRESOLVED_LIMIT:
+            raise OksaError("UnresolvedState", "Unresolved operation capacity exhausted; operator reconciliation is required")
+        if len(self.receipts) < self.RECEIPT_LIMIT:
+            return
+        prunable = sorted(
+            (r for r in self.receipts.values() if r.get("state") not in ("running", "unresolved")),
+            key=lambda item: float(item.get("updated_at") or 0.0),
+        )
+        for item in prunable:
+            if len(self.receipts) < self.RECEIPT_LIMIT:
+                break
+            if len(self.tombstones) >= self.TOMBSTONE_LIMIT:
+                if workers_active:
+                    raise OksaError("Busy", "Replay history limit reached while operations are active; retry after completion")
+                self.namespace = uuid.uuid4().hex
+                self.tombstones.clear()
+                self.save_receipts()
+                raise OksaError("ExpiredNamespace", "Request ID namespace rotated; refresh state before submitting")
+            req_id = item["request_id"]
+            if req_id.startswith(self.namespace + ":"):
+                self.tombstones[req_id] = item.get("args_hash") or ""
+            del self.receipts[req_id]
+
+    def begin_mutation(
+        self,
+        request_id: str,
+        method: str,
+        args: tuple,
+        *,
+        workers_active: bool,
+        busy_error: str = "",
+    ) -> dict:
+        req_ns, _, _ = request_id.partition(":")
+        args_hash = Contract.args_digest(method, args)
+        if request_id in self.receipts:
+            existing = self.receipts[request_id]
+            if existing.get("args_hash") and existing["args_hash"] != args_hash:
+                raise OksaError("InvalidInput", "Request ID was already used with different arguments")
+            raise OksaError("ReplayRejected", f"Request {request_id} was already submitted (state: {existing['state']})")
+        if request_id in self.tombstones:
+            if self.tombstones[request_id] and self.tombstones[request_id] != args_hash:
+                raise OksaError("InvalidInput", "Request ID was already used with different arguments")
+            raise OksaError("ReplayRejected", f"Request {request_id} was already executed; receipt details were pruned")
+        if req_ns != self.namespace:
+            raise OksaError("ExpiredNamespace", "Request ID namespace is no longer active; refresh state before submitting")
+        scope = "model" if method in Contract.MODEL_MUTATIONS else "user"
+        unresolved = self.list_unresolved(scope)
+        if unresolved:
+            first = unresolved[0]
+            raise OksaError(
+                "UnresolvedState",
+                f"{scope.capitalize()} mutations are blocked by unresolved {first['operation']} on {first['target']} ({first['request_id']}). "
+                "Operator reconciliation is required.",
+            )
+        if busy_error:
+            raise OksaError("Busy", busy_error)
+        self._prune_receipts(workers_active=workers_active)
+        now = time.time()
+        is_job = Contract.METHODS[method][2]
+        target = Contract.mutation_target(method, args)
+        receipt = {
+            "request_id": request_id,
+            "operation": method,
+            "scope": scope,
+            "target": target,
+            "args_hash": args_hash,
+            "state": "running",
+            "created_at": now,
+            "updated_at": now,
+            "job_path": "",
+            "summary": "Accepted job" if is_job else "Synchronous mutation in flight",
+            "error_code": "",
+            "error_message": "",
+        }
+        self.receipts[request_id] = receipt
+        self.save_receipts()
+        return receipt
+
+    def record_unconfirmed(
+        self,
+        request_id: str,
+        operation: str,
+        target: str,
+        detail: str,
+        *,
+        active_request_ids: set[str] | None = None,
+    ) -> dict:
+        if request_id in self.receipts:
+            existing = self.receipts[request_id]
+            if existing.get("state") == "running" and not (active_request_ids and request_id in active_request_ids):
+                existing["state"] = "unresolved"
+                existing["updated_at"] = time.time()
+                existing["summary"] = "Mutation outcome was not confirmed"
+                existing["error_code"] = "Unconfirmed"
+                existing["error_message"] = detail or "Request timed out or disconnected before confirmation"
+                self.save_receipts()
+            return self.public_receipt(existing)
+        if request_id in self.tombstones:
+            now = time.time()
+            return {
+                "request_id": request_id,
+                "operation": "pruned",
+                "scope": "model" if operation in Contract.MODEL_MUTATIONS else "user",
+                "target": target or "",
+                "state": "pruned",
+                "created_at": now,
+                "updated_at": now,
+                "job_path": None,
+                "summary": "Completed receipt details were pruned; replay remains blocked",
+                "error_code": None,
+                "error_message": None,
+            }
+        unresolved_count = sum(1 for r in self.receipts.values() if r.get("state") == "unresolved")
+        if unresolved_count >= self.UNRESOLVED_LIMIT:
+            raise OksaError("UnresolvedState", "Unresolved operation capacity exhausted; operator reconciliation is required")
+        now = time.time()
+        scope = "model" if operation in Contract.MODEL_MUTATIONS else "user"
+        receipt = {
+            "request_id": request_id,
+            "operation": operation,
+            "scope": scope,
+            "target": target or ("runtime" if scope == "model" else "gateway"),
+            "args_hash": "",
+            "state": "unresolved",
+            "created_at": now,
+            "updated_at": now,
+            "job_path": "",
+            "summary": "Client request acceptance was not confirmed",
+            "error_code": "Unconfirmed",
+            "error_message": detail or "Request timed out or disconnected before confirmation",
+        }
+        self.receipts[request_id] = receipt
+        self.save_receipts()
+        return self.public_receipt(receipt)
+
+    def update_receipt(
+        self,
+        request_id: str | None,
+        *,
+        state: str,
+        job_path: str | None = None,
+        summary: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if not request_id or request_id not in self.receipts:
+            return
+        receipt = self.receipts[request_id]
+        receipt["state"] = state
+        receipt["updated_at"] = time.time()
+        if job_path is not None:
+            receipt["job_path"] = job_path
+        if summary is not None:
+            receipt["summary"] = summary[:1024]
+        if error_code is not None:
+            receipt["error_code"] = error_code
+        if error_message is not None:
+            receipt["error_message"] = error_message[:1024]
+        self.save_receipts()
 
     def save(self, job: Job) -> None:
-        text = Contract.encode(job.snapshot())
-        fd, name = tempfile.mkstemp(prefix=".job-", dir=self.directory)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                stream.write(text)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(name, self.directory / (job.path.rsplit("/", 1)[1] + ".json"))
-            directory_fd = os.open(self.directory, os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            Path(name).unlink(missing_ok=True)
+        self._atomic_write_json(self.directory / (job.path.rsplit("/", 1)[1] + ".json"), job.snapshot())
 
     def prune(self, reserve: int = 0) -> list[str]:
         removed = []
@@ -135,7 +425,6 @@ class JobStore:
 
     def close(self) -> None:
         self.lock.close()
-
 
 class Worker:
     def __init__(self, channel) -> None:
@@ -185,6 +474,7 @@ class Invocation:
     invocation: object = None
     operation: str = ""
     job: Job | None = None
+    request_id: str | None = None
     ready: bool = False
 
 
@@ -208,6 +498,9 @@ class OksaDBusService:
       <property name="Error" type="a{{sv}}" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
       <property name="RepoId" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
       <property name="ModelName" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
+      <property name="Commit" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
+      <property name="UserId" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
+      <property name="RequestId" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
     </interface></node>'''
 
     @classmethod
@@ -476,6 +769,14 @@ class OksaDBusService:
             job.ended_at = time.time()
             job.error = {"code": "Canceled", "message": "Operation was canceled by user"}
             self.store.save(job)
+            self.store.update_receipt(
+                job.request_id,
+                state="canceled",
+                job_path=job.path,
+                summary="Operation was canceled by user",
+                error_code="Canceled",
+                error_message="Operation was canceled by user",
+            )
             self.emit(job, "StateChanged", job.state)
             self.notify_job_properties(job, ("State", "EndedAt", "Error"))
         invocation.return_value(None)
@@ -512,11 +813,15 @@ class OksaDBusService:
         self._last_serving = serving
         self._last_models_revision = revision
 
-    def authorize(self, sender: str) -> None:
+    def authorize(self, sender: str, *, root_only: bool = False) -> None:
         reply = self.connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                                           "GetConnectionUnixUser", GLib.Variant("(s)", (sender,)),
                                           GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NONE, 5000, None)
         uid = reply.unpack()[0]
+        if root_only:
+            if uid != 0:
+                raise OksaError("AccessDenied", "Only root may reconcile unresolved operation state")
+            return
         if uid != 0 and (self.frontend_uid is None or uid != self.frontend_uid):
             raise OksaError("AccessDenied", "Only root or the dedicated oksa frontend may call this service")
 
@@ -524,9 +829,71 @@ class OksaDBusService:
     def return_error(invocation, error: OksaError) -> None:
         invocation.return_dbus_error(Contract.BUS + ".Error." + error.code, str(error)[:4096])
 
+    def _handle_get_receipt(self, request_id: str) -> dict:
+        if request_id in self.store.receipts:
+            return {
+                "ok": True,
+                "found": True,
+                "namespace": self.store.namespace,
+                "receipt": self.store.public_receipt(self.store.receipts[request_id]),
+            }
+        if request_id in self.store.tombstones:
+            now = time.time()
+            return {
+                "ok": True,
+                "found": True,
+                "namespace": self.store.namespace,
+                "receipt": {
+                    "request_id": request_id,
+                    "operation": "pruned",
+                    "scope": "unknown",
+                    "target": "",
+                    "state": "pruned",
+                    "created_at": now,
+                    "updated_at": now,
+                    "job_path": None,
+                    "summary": "Completed receipt details were pruned; replay remains blocked",
+                    "error_code": None,
+                    "error_message": None,
+                },
+            }
+        return {"ok": True, "found": False, "namespace": self.store.namespace, "receipt": None}
+
+    def _handle_reconcile(self, request_id: str) -> dict:
+        receipt = self.store.receipts.get(request_id)
+        if receipt is None:
+            raise OksaError("NotFound", f"Unknown request ID: {request_id}")
+        if receipt.get("state") != "unresolved":
+            return {
+                "ok": True,
+                "found": True,
+                "namespace": self.store.namespace,
+                "receipt": self.store.public_receipt(receipt),
+            }
+        scope = receipt.get("scope", "model")
+        scope_ops = Contract.MODEL_MUTATIONS if scope == "model" else Contract.USER_MUTATIONS
+        if any(worker.operation in scope_ops for worker in self.workers):
+            raise OksaError("Busy", "Wait for active operations in this scope to settle before reconciling")
+        reconcile_result = self.service_class().reconcile_scope(scope, str(receipt.get("target") or ""))
+        self.store.update_receipt(
+            request_id,
+            state="reconciled",
+            summary=str(reconcile_result.get("message") or "Reconciled by root operator"),
+            error_code="",
+            error_message="",
+        )
+        if scope == "model":
+            self.monitoring.invalidate()
+        return {
+            "ok": True,
+            "found": True,
+            "namespace": self.store.namespace,
+            "receipt": self.store.public_receipt(self.store.receipts[request_id]),
+        }
+
     def handle_call(self, connection, sender, path, interface, method, parameters, invocation) -> None:
         try:
-            self.authorize(sender)
+            self.authorize(sender, root_only=(method == "ReconcileUnresolved"))
             if self.closed:
                 raise OksaError("Unavailable", "Daemon is shutting down")
             args = parameters.unpack()
@@ -535,15 +902,48 @@ class OksaDBusService:
             Contract.validate(method, args)
             if method == "GetStatus":
                 invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant("GetStatus", self.monitoring.snapshot().to_json()),)))
+            elif method == "GetDaemonState":
+                payload = {
+                    "ok": True,
+                    "namespace": self.store.namespace,
+                    "receipts": self.store.list_receipts(),
+                    "unresolved": self.store.list_unresolved(),
+                }
+                invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant("GetDaemonState", payload),)))
+            elif method == "GetReceipt":
+                payload = self._handle_get_receipt(args[0])
+                invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant("GetReceipt", payload),)))
+            elif method == "RecordUnconfirmed":
+                active_ids = {w.request_id for w in self.workers if w.request_id}
+                receipt = self.store.record_unconfirmed(*args, active_request_ids=active_ids)
+                payload = {"ok": True, "found": True, "namespace": self.store.namespace, "receipt": receipt}
+                invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant("RecordUnconfirmed", payload),)))
+            elif method == "ReconcileUnresolved":
+                payload = self._handle_reconcile(args[0])
+                invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant("ReconcileUnresolved", payload),)))
             else:
                 mutation = Contract.METHODS[method][2]
+                busy_error = ""
                 if method in Contract.MODEL_MUTATIONS and any(worker.operation in Contract.MODEL_MUTATIONS for worker in self.workers):
-                    raise OksaError("Busy", "Another model operation is already running")
-                if method in Contract.USER_MUTATIONS and any(worker.operation in Contract.USER_MUTATIONS for worker in self.workers):
-                    raise OksaError("Busy", "Another user or API-key operation is already running")
-                if method not in Contract.MUTATIONS and sum(worker.operation not in Contract.MUTATIONS for worker in self.workers) >= self.READ_LIMIT:
+                    busy_error = "Another model operation is already running"
+                elif method in Contract.USER_MUTATIONS and any(worker.operation in Contract.USER_MUTATIONS for worker in self.workers):
+                    busy_error = "Another user or API-key operation is already running"
+                elif method not in Contract.MUTATIONS and sum(worker.operation not in Contract.MUTATIONS for worker in self.workers) >= self.READ_LIMIT:
                     raise OksaError("Busy", "All read workers are busy; retry later")
-                self.launch(method, args, sender, invocation, mutation)
+                request_id = None
+                if method in Contract.MUTATIONS:
+                    request_id = args[0]
+                    workers_active = any(worker.operation in Contract.MUTATIONS for worker in self.workers)
+                    self.store.begin_mutation(
+                        request_id,
+                        method,
+                        args,
+                        workers_active=workers_active,
+                        busy_error=busy_error,
+                    )
+                elif busy_error:
+                    raise OksaError("Busy", busy_error)
+                self.launch(method, args, sender, invocation, mutation, request_id=request_id)
         except OksaError as error:
             self.return_error(invocation, error)
         except GLib.Error as error:
@@ -560,7 +960,7 @@ class OksaDBusService:
             job.subscribers.add(sender)
         invocation.return_value(GLib.Variant("(a{sv})", (Contract.snapshot_to_variant(job.snapshot()),)))
 
-    def launch(self, method: str, args: tuple, sender: str, invocation, mutation: bool) -> None:
+    def launch(self, method: str, args: tuple, sender: str, invocation, mutation: bool, *, request_id: str | None = None) -> None:
         job = None
         if mutation:
             for path in self.store.prune(reserve=1):
@@ -575,13 +975,29 @@ class OksaDBusService:
                     None, Contract.PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
                     GLib.Variant("(sa{sv}as)", (Contract.BUS, {"Jobs": GLib.Variant("ao", list(self.store.jobs.keys()))}, []))
                 )
-            job = Job(Contract.PATH + "/jobs/" + uuid.uuid4().hex, method, time.time(), subscribers={sender})
+            job = Job(Contract.PATH + "/jobs/" + uuid.uuid4().hex, method, time.time(), request_id=request_id, subscribers={sender})
             if method == "DownloadModel":
-                job.repo_id, job.model_name = args[:2]
+                _, repo, name, commit, *_ = args
+                job.repo_id = repo
+                job.model_name = ms.normalize_storage_id(repo, name or None) or name
+                job.commit = commit
             elif method in ("StartModel", "RestartModel", "RemoveModel", "Calibrate"):
-                job.model_name = args[0]
+                raw_name = args[1]
+                try:
+                    resolved = ms.resolve_model_name(raw_name, ms.STATE_DIR)
+                except Exception:
+                    resolved = raw_name
+                job.model_name = resolved
+                installed = ms.inspect_installed_model(resolved, ms.STATE_DIR, ms.MODELS_DIR)
+                if installed is not None:
+                    job.repo_id = installed.get("repo_id") or None
+                    job.commit = installed.get("revision") or None
+            elif method == "DeleteUser":
+                job.user_id = args[1]
             self.store.save(job)
             self.store.jobs[job.path] = job
+            if request_id:
+                self.store.update_receipt(request_id, state="running", job_path=job.path, summary=f"Job {job.path.rsplit('/', 1)[1]} running")
             self.register_job(job)
             self.connection.emit_signal(
                 None, Contract.PATH, "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
@@ -604,10 +1020,15 @@ class OksaDBusService:
                 self.store.save(job)
                 self.emit(job, "StateChanged", job.state)
                 self.notify_job_properties(job, ("State", "EndedAt", "Error"))
+            if request_id:
+                self.store.update_receipt(
+                    request_id, state="failed", summary="Worker failed to start before execution",
+                    error_code="Unavailable", error_message=str(error)[:1024],
+                )
             raise OksaError("Unavailable", "Could not start operation worker") from error
         finally:
             child.close()
-        worker = Invocation(process, parent, time.monotonic(), None if mutation else invocation, method, job)
+        worker = Invocation(process, parent, time.monotonic(), None if mutation else invocation, method, job, request_id=request_id)
         if method in Contract.MODEL_MUTATIONS:
             self.monitoring.invalidate()
         self.workers.append(worker)
@@ -633,9 +1054,46 @@ class OksaDBusService:
         except GLib.Error:
             logging.exception("Unable to emit job property changes for %s", job.path)
 
+    @staticmethod
+    def _download_publication_uncertain(model_name: str | None) -> bool:
+        if not model_name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
+            return False
+        backup_dir = ms.MODELS_DIR.parent / f".{model_name}.previous"
+        dest_dir = ms.MODELS_DIR / model_name
+        if backup_dir.exists():
+            return True
+        if dest_dir.exists():
+            if not ms.verified_preseed(dest_dir):
+                return True
+            if not any(entry[0] == model_name for entry in ms.read_models_list(ms.STATE_DIR / "models.list")):
+                return True
+        return False
+
+    @staticmethod
+    def _receipt_summary(operation: str, result: dict | None, error: dict | None) -> str:
+        if isinstance(result, dict):
+            if operation == "CreateKey":
+                key_obj = result.get("key") if isinstance(result.get("key"), dict) else {}
+                alias = key_obj.get("key_alias") or "unnamed"
+                key_id = key_obj.get("key_id") or "unknown-id"
+                owner = key_obj.get("user_id") or ""
+                return f"Key {alias} (id: {key_id}) created for user {owner}; one-time secret is not retained in receipt"
+            if operation == "CreateUser":
+                user_obj = result.get("result") if isinstance(result.get("result"), dict) else {}
+                return f"User {user_obj.get('user_id') or ''} created"
+            for field_name in ("message", "warning", "error", "outcome"):
+                val = result.get(field_name)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        return operation
+
     def finish(self, worker: Invocation, result: dict | None, error: dict | None) -> None:
         if result is not None and result.get("ok") is False and error is None:
-            error = {"code": "OperationFailed", "message": str(result.get("error", "Operation failed"))[:4096]}
+            code = "ReconciliationFailed" if result.get("outcome") == "reconciliation_failed" else "OperationFailed"
+            msg = result.get("error") or result.get("warning") or result.get("message") or "Operation failed"
+            error = {"code": code, "message": str(msg)[:4096]}
         if worker.job:
             job = worker.job
             job.result, job.error = result, error
@@ -649,8 +1107,31 @@ class OksaDBusService:
         else:
             worker.invocation.return_value(GLib.Variant("(a{sv})", (Contract.response_to_variant(worker.operation, result),)))
         self.dispose(worker)
+        if worker.request_id:
+            summary = self._receipt_summary(worker.operation, result, error)
+            err_code = (error or {}).get("code", "")
+            err_msg = (error or {}).get("message", "")
+            unresolved = False
+            if err_code in ("Unconfirmed", "Timeout", "WorkerFailed", "Interrupted"):
+                unresolved = True
+            elif worker.operation == "RemoveModel" and isinstance(result, dict) and result.get("outcome") in ("reconciliation_failed", "removal_failed"):
+                unresolved = True
+            elif worker.operation == "DeleteUser" and isinstance(result, dict) and result.get("outcome") in ("key_revocation_unconfirmed", "user_deletion_unconfirmed"):
+                unresolved = True
+            elif worker.operation == "DownloadModel" and worker.job and worker.job.state in ("failed", "canceled"):
+                unresolved = self._download_publication_uncertain(worker.job.model_name)
+            receipt_state = "unresolved" if unresolved else (worker.job.state if worker.job else ("failed" if error else "succeeded"))
+            self.store.update_receipt(
+                worker.request_id,
+                state=receipt_state,
+                job_path=worker.job.path if worker.job else "",
+                summary=summary,
+                error_code=err_code or ((result or {}).get("outcome") or "" if unresolved else ""),
+                error_message=err_msg or (summary if unresolved else ""),
+            )
         if worker.operation in Contract.MODEL_MUTATIONS:
             self.monitoring.invalidate()
+
     def dispose(self, worker: Invocation) -> None:
         process = worker.process
         try:
@@ -671,7 +1152,6 @@ class OksaDBusService:
             pass
         process.close()
         self.workers.remove(worker)
-
     def poll(self) -> bool:
         try:
             for worker in tuple(self.workers):
@@ -756,6 +1236,27 @@ class OksaDBusService:
 class OksaDaemon:
     @classmethod
     def main(cls) -> None:
+        parser = argparse.ArgumentParser(description="OKSA D-Bus administration daemon")
+        parser.add_argument("--reconcile", metavar="REQUEST_ID", help="Verify system state and clear an unresolved write guard (root only)")
+        parser.add_argument("--list-unresolved", action="store_true", help="List active unresolved write guards")
+        args = parser.parse_args()
+        if args.reconcile or args.list_unresolved:
+            if os.geteuid() != 0:
+                sys.exit("error: operator reconciliation requires root")
+            from oksa_client import OksaClient, OksaClientError
+
+            client = OksaClient()
+            try:
+                if args.reconcile:
+                    result = client.call("ReconcileUnresolved", args.reconcile.strip())
+                else:
+                    result = client.call("GetDaemonState")
+                print(json.dumps(result, indent=2))
+            except OksaClientError as exc:
+                sys.exit(f"error ({exc.code}): {exc}")
+            finally:
+                client.close()
+            return
         logging.basicConfig(level=logging.INFO)
         service = OksaDBusService()
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, cls.stop, service)

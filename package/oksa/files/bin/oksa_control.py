@@ -2,6 +2,9 @@
 # Copyright (C) Opinsys Oy 2026
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import fcntl
+import hashlib
 import http.client
 import json
 import math
@@ -15,7 +18,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from gi.repository import GLib
-
 import oksa_calibration_state as calibration
 import oksa_model_removal as removal
 import oksa_model_serving as ms
@@ -115,25 +117,36 @@ class Contract:
     MAX_JSON = 1024 * 1024
     METHODS = {
         "GetStatus": ((), "a{sv}", False),
+        "GetDaemonState": ((), "a{sv}", False),
+        "GetReceipt": ((('request_id', 's'),), "a{sv}", False),
+        "RecordUnconfirmed": ((('request_id', 's'), ('operation', 's'), ('target', 's'), ('detail', 's')), "a{sv}", False),
+        "ReconcileUnresolved": ((('request_id', 's'),), "a{sv}", False),
         "ListModels": ((), "a{sv}", False),
         "SearchModels": ((('query', 's'),), "a{sv}", False),
         "InspectModel": ((('repo', 's'), ('revision', 's')), "a{sv}", False),
-        "DownloadModel": ((('repo', 's'), ('name', 's'), ('commit', 's'), ('force', 'b')), "o", True),
-        "StartModel": ((('name', 's'),), "o", True),
-        "RestartModel": ((('name', 's'),), "o", True),
-        "StopServing": ((), "o", True),
-        "RemoveModel": ((('name', 's'),), "o", True),
+        "DownloadModel": (
+            (('request_id', 's'), ('repo', 's'), ('name', 's'), ('commit', 's'), ('force', 'b'),
+             ('replace_existing', 'b'), ('expected_repo', 's'), ('expected_revision', 's')),
+            "o", True,
+        ),
+        "StartModel": ((('request_id', 's'), ('name', 's'), ('expected_selected', 's'), ('expected_active', 's')), "o", True),
+        "RestartModel": ((('request_id', 's'), ('name', 's'), ('expected_selected', 's'), ('expected_active', 's')), "o", True),
+        "StopServing": ((('request_id', 's'), ('expected_selected', 's'), ('expected_active', 's')), "o", True),
+        "RemoveModel": ((('request_id', 's'), ('name', 's'), ('expected_revision', 's'), ('expected_selected', 's'), ('expected_active', 's')), "o", True),
         "ListUsers": ((), "a{sv}", False),
         "GetUser": ((('id', 's'),), "a{sv}", False),
-        "CreateUser": ((('id', 's'), ('email', 's'), ('budget', 'd')), "a{sv}", False),
-        "DeleteUser": ((('id', 's'),), "o", True),
+        "CreateUser": ((('request_id', 's'), ('id', 's'), ('email', 's'), ('budget', 'd')), "a{sv}", False),
+        "DeleteUser": ((('request_id', 's'), ('id', 's')), "o", True),
         "ListKeys": ((('user', 's'),), "a{sv}", False),
-        "CreateKey": ((('user', 's'), ('alias', 's'), ('models', 'as'), ('budget', 'd'), ('duration', 's')), "a{sv}", False),
-        "RevokeKey": ((('token', 's'),), "a{sv}", False),
+        "CreateKey": ((('request_id', 's'), ('user', 's'), ('alias', 's'), ('models', 'as'), ('budget', 'd'), ('duration', 's')), "a{sv}", False),
+        "RevokeKey": ((('request_id', 's'), ('user', 's'), ('key_id', 's')), "a{sv}", False),
         "GetCalibration": ((('name', 's'),), "a{sv}", False),
-        "Calibrate": ((('name', 's'), ('force', 'b')), "o", True),
+        "Calibrate": ((('request_id', 's'), ('name', 's'), ('force', 'b'), ('expected_selected', 's'), ('expected_active', 's')), "o", True),
     }
-    OPTIONAL_STRINGS = {"email", "duration", "user", "commit", "revision", "query"}
+    OPTIONAL_STRINGS = {
+        "email", "duration", "user", "commit", "revision", "query",
+        "expected_repo", "expected_revision", "expected_selected", "expected_active", "target", "detail",
+    }
     MODEL_MUTATIONS = frozenset({"DownloadModel", "StartModel", "RestartModel", "StopServing", "RemoveModel", "Calibrate"})
     USER_MUTATIONS = frozenset({"CreateUser", "DeleteUser", "CreateKey", "RevokeKey"})
     MUTATIONS = MODEL_MUTATIONS | USER_MUTATIONS
@@ -147,13 +160,29 @@ class Contract:
                             frozenset({"ready", "restarts"}))
     METRICS = RecordSchema({"running_requests": "x", "waiting_requests": "x", "swapped_requests": "x", "kv_cache_usage_pct": "d"},
                            frozenset({"running_requests", "waiting_requests", "swapped_requests", "kv_cache_usage_pct"}))
-    STATUS = RecordSchema({"serving_enabled": "b", "selected_model": "s", "active_model": "s", "host_memory": MEMORY,
-                           "gpus": (GPU,), "workloads": (WORKLOAD,), "metrics": METRICS,
-                           "model_status": "s", "gateway_status": "s"}, frozenset({"gpus", "workloads"}))
+    PREPARATION = RecordSchema(
+        {"model": "s", "state": "s", "message": "s", "updated_at": "d"},
+        frozenset({"message", "updated_at"}),
+    )
+    STATUS = RecordSchema(
+        {
+            "host": "s", "api_base_url": "s", "auth_enforcement": "s",
+            "serving_enabled": "b", "selected_model": "s", "active_model": "s",
+            "selected_model_id": "s", "active_model_id": "s", "host_memory": MEMORY,
+            "gpus": (GPU,), "workloads": (WORKLOAD,), "metrics": METRICS,
+            "model_status": "s", "gateway_status": "s", "preparation": PREPARATION,
+        },
+        frozenset({"host", "api_base_url", "auth_enforcement", "selected_model_id", "active_model_id", "gpus", "workloads", "preparation"}),
+    )
     FRESHNESS = RecordSchema({"sampled_at": "s", "age_seconds": "d", "stale": "b", "error": "s", "max_age_seconds": "d"},
                             frozenset({"sampled_at", "age_seconds", "error"}))
-    MODEL = RecordSchema({"name": "s", "id": "s", "repo_id": "s", "storage_mib": "x", "quantization": "s",
-                          "capabilities": "s", "active": "b", "selected": "b"})
+    MODEL = RecordSchema(
+        {
+            "name": "s", "id": "s", "repo_id": "s", "revision": "s", "provenance": "s", "path": "s",
+            "storage_mib": "x", "quantization": "s", "capabilities": "s", "active": "b", "selected": "b",
+        },
+        frozenset({"revision", "provenance", "path"}),
+    )
     SEARCH_MODEL = RecordSchema({"repo_id": "s", "name": "s", "author": "s", "downloads": "x", "gated": "b"})
     MODEL_FILE = RecordSchema({"path": "s", "size": "x", "sha256": "s", "blob_id": "s"},
                               frozenset({"sha256", "blob_id"}))
@@ -172,9 +201,37 @@ class Contract:
                                       "message": "s", "fingerprint": "s", "updated_at": "d"})
     CALIBRATION = RecordSchema({"ok": "b", "model": "s", "result": CALIBRATION_RESULT, "status": CALIBRATION_STATUS},
                               frozenset({"result", "status"}))
+    KEY_RECORD = RecordSchema(
+        {
+            "key_id": "s", "user_id": "s", "key_alias": "s", "key_prefix": "s",
+            "models": list, "expires": "s", "created_at": "s",
+        },
+        frozenset({"expires", "created_at"}),
+    )
+    RECEIPT = RecordSchema(
+        {
+            "request_id": "s", "operation": "s", "scope": "s", "target": "s", "state": "s",
+            "created_at": "d", "updated_at": "d", "job_path": "s", "summary": "s",
+            "error_code": "s", "error_message": "s",
+        },
+        frozenset({"job_path", "summary", "error_code", "error_message"}),
+    )
+    DAEMON_STATE = RecordSchema({"ok": "b", "namespace": "s", "receipts": (RECEIPT,), "unresolved": (RECEIPT,)})
+    RECEIPT_RESPONSE = RecordSchema({"ok": "b", "found": "b", "namespace": "s", "receipt": RECEIPT}, frozenset({"receipt"}))
     RESPONSES = {
         "GetStatus": RecordSchema({"ok": "b", "status": STATUS, "snapshot": FRESHNESS}, frozenset({"status"})),
-        "ListModels": RecordSchema({"ok": "b", "active_model": "s", "selected_model": "s", "serving_enabled": "b", "models": (MODEL,)}),
+        "GetDaemonState": DAEMON_STATE,
+        "GetReceipt": RECEIPT_RESPONSE,
+        "RecordUnconfirmed": RECEIPT_RESPONSE,
+        "ReconcileUnresolved": RECEIPT_RESPONSE,
+        "ListModels": RecordSchema(
+            {
+                "ok": "b", "active_model": "s", "selected_model": "s",
+                "active_model_id": "s", "selected_model_id": "s",
+                "serving_enabled": "b", "models": (MODEL,),
+            },
+            frozenset({"active_model_id", "selected_model_id"}),
+        ),
         "SearchModels": RecordSchema({"ok": "b", "models": (SEARCH_MODEL,)}),
         "InspectModel": RecordSchema({"ok": "b", "metadata": MODEL_METADATA, "fits": "b", "reason": "s"}),
         "DownloadModel": MESSAGE,
@@ -188,7 +245,10 @@ class Contract:
         "CreateUser": RecordSchema({"ok": "b", "result": dict}),
         "DeleteUser": RecordSchema({"ok": "b", "outcome": "s", "deleted": "b", "confirmed_revoked_keys": "x",
                                    "message": "s", "error": "s", "warning": "s"}, frozenset({"deleted", "message", "error", "warning"})),
-        "ListKeys": RecordSchema({"ok": "b", "keys": list}),
+        "ListKeys": RecordSchema(
+            {"ok": "b", "keys": (KEY_RECORD,), "complete": "b", "sampled_at": "s", "protected_users": list},
+            frozenset({"complete", "sampled_at", "protected_users"}),
+        ),
         "CreateKey": RecordSchema({"ok": "b", "key": dict}),
         "RevokeKey": MESSAGE,
         "GetCalibration": CALIBRATION,
@@ -227,11 +287,15 @@ class Contract:
     def snapshot_schema(cls, operation: str) -> RecordSchema:
         if not isinstance(operation, str) or operation not in cls.RESPONSES or not cls.METHODS[operation][2]:
             raise OksaError("InvalidResult", "Invalid job operation")
-        return RecordSchema({"ok": "b", "path": "o", "operation": "s", "state": "s", "progress": "s",
-                             "started_at": "d", "ended_at": "d", "result": cls.RESPONSES[operation],
-                             "error": cls.ERROR, "repo_id": "s", "model_name": "s"},
-                            frozenset({"ended_at", "result", "error", "repo_id", "model_name"}))
-
+        return RecordSchema(
+            {
+                "ok": "b", "path": "o", "operation": "s", "state": "s", "progress": "s",
+                "started_at": "d", "ended_at": "d", "result": cls.RESPONSES[operation],
+                "error": cls.ERROR, "repo_id": "s", "model_name": "s",
+                "commit": "s", "user_id": "s", "request_id": "s",
+            },
+            frozenset({"ended_at", "result", "error", "repo_id", "model_name", "commit", "user_id", "request_id"}),
+        )
     @classmethod
     def validate_snapshot(cls, data: dict) -> None:
         cls.encode(data)
@@ -285,6 +349,10 @@ class Contract:
                     raise OksaError("InvalidInput", "At most 128 models are allowed")
                 for model in value:
                     cls.text(model, "model")
+            if name == "request_id" and not re.fullmatch(r"[0-9a-f]{32}:[0-9a-f]{32}", value):
+                raise OksaError("InvalidInput", "Invalid request ID")
+            if method == "RecordUnconfirmed" and name == "operation" and value not in cls.MUTATIONS:
+                raise OksaError("InvalidInput", "Invalid mutation operation")
             if name == "repo" and not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,95}/)?[A-Za-z0-9][A-Za-z0-9._-]{0,95}", value):
                 raise OksaError("InvalidInput", "Invalid repository ID")
             if name == "commit" and not re.fullmatch(r"[0-9a-fA-F]{40}", value):
@@ -292,6 +360,30 @@ class Contract:
             if name == "duration" and value and not re.fullmatch(r"[1-9][0-9]{0,8}[smhd]", value):
                 raise OksaError("InvalidInput", "Invalid duration")
 
+    @classmethod
+    def args_digest(cls, method: str, args: tuple) -> str:
+        payload = list(args[1:] if method in cls.MUTATIONS else args)
+        encoded = json.dumps({"method": method, "args": payload}, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def mutation_target(cls, method: str, args: tuple, state_dir: Path | None = None) -> str:
+        if method == "DownloadModel":
+            _, repo, name, *_ = args
+            return ms.normalize_storage_id(repo, name or None) or name or repo
+        if method in ("StartModel", "RestartModel", "RemoveModel", "Calibrate"):
+            raw = args[1]
+            try:
+                return ms.resolve_model_name(raw, state_dir or ms.STATE_DIR)
+            except Exception:
+                return raw
+        if method == "StopServing":
+            return "runtime"
+        if method in ("CreateUser", "DeleteUser", "CreateKey"):
+            return args[1]
+        if method == "RevokeKey":
+            return f"{args[1]}:{args[2]}"
+        return ""
     @staticmethod
     def text(value: str, name: str, optional: bool = False) -> None:
         limit = 4096 if name == "token" else 256
@@ -345,6 +437,7 @@ class OksaControl:
         self.labeler_bin = ms.resolve_helper("oksa-label-model-serving-node")
         self.planner_bin = ms.resolve_helper("oksa-plan-vllm-workloads")
         self.preseed_bin = ms.resolve_helper("oksa-preseed-vllm-models")
+        self.progress = lambda text: None
 
     def execute(self, method: str, args: tuple, progress) -> dict:
         Contract.validate(method, args)
@@ -361,8 +454,8 @@ class OksaControl:
             "GetCalibration": self.get_calibration, "Calibrate": self.calibrate,
         }
         self.progress = progress
-        return operations[method](*args)
-
+        call_args = args[1:] if method in Contract.MUTATIONS else args
+        return operations[method](*call_args)
     def list_models(self) -> dict:
         return ms.collect_models_list(self.state_dir, self.discover_bin, self.planner_bin)
 
@@ -488,54 +581,171 @@ class OksaControl:
             detail = f": {last_line}" if last_line else ""
             raise OksaError("OperationFailed", f"{Path(command[0]).name} failed (exit {code}){detail}")
 
-    def download_model(self, repo: str, name: str, commit: str, force: bool) -> dict:
+    def _current_serving_ids(self) -> tuple[str, str]:
+        selected_file, disabled_file = ms.control_files(self.state_dir)
+        active_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(self.state_dir / "active-model")))
+        serving_enabled = not disabled_file.exists()
+        selected = ms.read_first_line(selected_file) if serving_enabled else ""
+        if selected:
+            try:
+                selected = ms.resolve_model_name(selected, self.state_dir)
+            except ValueError:
+                pass
+        active = ms.read_first_line(active_file)
+        if active:
+            try:
+                active = ms.resolve_model_name(active, self.state_dir)
+            except ValueError:
+                pass
+        return selected or "-", active or "-"
+
+    def _verify_serving_preconditions(self, expected_selected: str, expected_active: str) -> None:
+        cur_selected, cur_active = self._current_serving_ids()
+        if expected_selected and cur_selected != expected_selected:
+            raise OksaError("StateChanged", "State changed; review again")
+        if expected_active and cur_active != expected_active:
+            raise OksaError("StateChanged", "State changed; review again")
+
+    def download_model(
+        self,
+        repo: str,
+        name: str,
+        commit: str,
+        force: bool,
+        replace_existing: bool = False,
+        expected_repo: str = "",
+        expected_revision: str = "",
+    ) -> dict:
         effective_name = ms.normalize_storage_id(repo, name or None)
         if not effective_name:
             raise OksaError("InvalidInput", "Invalid model name")
-        command = [str(self.preseed_bin), "--repo-id", repo, "--name", effective_name, "--revision", commit]
-        if force:
-            command.append("--force")
-        self.run_helper(command)
+        ms.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path = ms.MODELS_DIR.parent / f".{effective_name}.preseed.lock"
+        with lock_path.open("a") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise OksaError("Busy", f"Model {effective_name} is busy; wait for current work to finish") from exc
+            with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=False):
+                installed = ms.inspect_installed_model(effective_name, self.state_dir, ms.MODELS_DIR)
+                if installed is None:
+                    if replace_existing or expected_repo or expected_revision:
+                        raise OksaError("StateChanged", "State changed; review again")
+                else:
+                    if installed["provenance"] == "unknown":
+                        raise OksaError(
+                            "InvalidState",
+                            f"Existing installation {effective_name} has unknown provenance; inspect storage before replacing",
+                        )
+                    if not replace_existing:
+                        raise OksaError("StateChanged", "State changed; review again")
+                    if installed["repo_id"] != expected_repo or installed["revision"] != expected_revision:
+                        raise OksaError("StateChanged", "State changed; review again")
+            command = [str(self.preseed_bin), "--repo-id", repo, "--name", effective_name, "--revision", commit]
+            if force:
+                command.append("--force")
+            env = dict(os.environ, PUU_PRESEED_LOCK_HELD=f"1:{effective_name}")
+            self.run_helper(command, env)
         self.run_helper([str(self.discover_bin)])
         self.run_helper([str(self.labeler_bin)])
         return {"ok": True, "message": "Model download completed successfully."}
 
-    def start_model(self, name: str) -> dict:
-        model_name = ms.resolve_model_name(name, self.state_dir)
-        if not ms.check_capabilities(self.planner_bin, model_name):
-            raise OksaError("InvalidInput", "Model has insufficient host capabilities")
+    def start_model(self, name: str, expected_selected: str = "", expected_active: str = "") -> dict:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        selected, disabled = ms.control_files(self.state_dir)
-        ms.atomic_write_text(selected, f"{model_name}\n")
-        disabled.unlink(missing_ok=True)
-        env = dict(os.environ, PUU_VLLM_SELECTED_MODEL=model_name, PUU_VLLM_REQUIRE_SELECTED_MODEL="true")
-        self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
+        with (self.state_dir / "planner.lock").open("a") as planner_lock:
+            fcntl.flock(planner_lock, fcntl.LOCK_EX)
+            with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=False):
+                try:
+                    model_name = ms.resolve_model_name(name, self.state_dir)
+                except ValueError as exc:
+                    raise OksaError("NotFound", str(exc)) from exc
+                self._verify_serving_preconditions(expected_selected, expected_active)
+                if not ms.check_capabilities(self.planner_bin, model_name):
+                    raise OksaError("InvalidInput", "Model has insufficient host capabilities")
+                selected, disabled = ms.control_files(self.state_dir)
+                ms.atomic_write_text(selected, f"{model_name}\n")
+                disabled.unlink(missing_ok=True)
+            env = dict(
+                os.environ,
+                PUU_VLLM_SELECTED_MODEL=model_name,
+                PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
+                PUU_PLANNER_LOCK_HELD="1",
+            )
+            self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
         return {"ok": True, "message": f"Model {ms.public_model_name(model_name, self.state_dir)} activated"}
 
-    def restart_model(self, name: str) -> dict:
-        model_name = ms.resolve_model_name(name, self.state_dir)
-        if not ms.check_capabilities(self.planner_bin, model_name):
-            raise OksaError("InvalidInput", "Model has insufficient host capabilities")
+    def restart_model(self, name: str, expected_selected: str = "", expected_active: str = "") -> dict:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        selected, disabled = ms.control_files(self.state_dir)
-        ms.atomic_write_text(selected, f"{model_name}\n")
-        disabled.unlink(missing_ok=True)
-        env = dict(os.environ, PUU_VLLM_SELECTED_MODEL=model_name, PUU_VLLM_REQUIRE_SELECTED_MODEL="true")
-        self.run_helper([str(self.planner_bin), "--require-reconcile", "--restart"], env)
+        with (self.state_dir / "planner.lock").open("a") as planner_lock:
+            fcntl.flock(planner_lock, fcntl.LOCK_EX)
+            with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=False):
+                try:
+                    model_name = ms.resolve_model_name(name, self.state_dir)
+                except ValueError as exc:
+                    raise OksaError("NotFound", str(exc)) from exc
+                self._verify_serving_preconditions(expected_selected, expected_active)
+                if not ms.check_capabilities(self.planner_bin, model_name):
+                    raise OksaError("InvalidInput", "Model has insufficient host capabilities")
+                selected, disabled = ms.control_files(self.state_dir)
+                ms.atomic_write_text(selected, f"{model_name}\n")
+                disabled.unlink(missing_ok=True)
+            env = dict(
+                os.environ,
+                PUU_VLLM_SELECTED_MODEL=model_name,
+                PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
+                PUU_PLANNER_LOCK_HELD="1",
+            )
+            self.run_helper([str(self.planner_bin), "--require-reconcile", "--restart"], env)
         return {"ok": True, "message": f"Model {ms.public_model_name(model_name, self.state_dir)} restarted"}
-    def stop_serving(self) -> dict:
+
+    def stop_serving(self, expected_selected: str = "", expected_active: str = "") -> dict:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        selected, disabled = ms.control_files(self.state_dir)
-        selected.unlink(missing_ok=True)
-        ms.atomic_write_text(disabled, "")
-        self.run_helper([str(self.planner_bin), "--require-reconcile"])
+        with (self.state_dir / "planner.lock").open("a") as planner_lock:
+            fcntl.flock(planner_lock, fcntl.LOCK_EX)
+            self._verify_serving_preconditions(expected_selected, expected_active)
+            selected, disabled = ms.control_files(self.state_dir)
+            selected.unlink(missing_ok=True)
+            ms.atomic_write_text(disabled, "")
+            env = dict(os.environ, PUU_PLANNER_LOCK_HELD="1")
+            self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
         return {"ok": True, "message": "Model serving stopped"}
 
-    def remove_model(self, name: str) -> dict:
-        result = removal.ModelRemovalService(self.state_dir, self.discover_bin, self.planner_bin).remove(name)
-        data = {"ok": result.deleted, "deleted": result.deleted, "reconciled": result.reconciled,
-                "outcome": result.outcome.name.lower()}
-        data["message" if result.reconciled else "warning" if result.deleted else "error"] = result.message
+    def remove_model(
+        self,
+        name: str,
+        expected_revision: str = "",
+        expected_selected: str = "",
+        expected_active: str = "",
+    ) -> dict:
+        try:
+            resolved = ms.resolve_model_name(name, self.state_dir)
+        except ValueError:
+            resolved = name
+
+        def _prevalidate(target_name: str) -> None:
+            installed = ms.inspect_installed_model(target_name, self.state_dir, ms.MODELS_DIR)
+            if installed is None:
+                raise OksaError("NotFound", f"Unknown model: {name}")
+            if expected_revision and (installed.get("revision") or "-") != expected_revision:
+                raise OksaError("StateChanged", "State changed; review again")
+            self._verify_serving_preconditions(expected_selected, expected_active)
+
+        result = removal.ModelRemovalService(self.state_dir, self.discover_bin, self.planner_bin).remove(
+            resolved, prevalidate=_prevalidate
+        )
+        data = {
+            "ok": result.deleted and result.reconciled,
+            "deleted": result.deleted,
+            "reconciled": result.reconciled,
+            "outcome": result.outcome.name.lower(),
+        }
+        if result.reconciled:
+            data["message"] = result.message
+        elif result.deleted:
+            data["warning"] = result.message
+            data["error"] = result.message
+        else:
+            data["error"] = result.message
         return data
 
     @staticmethod
@@ -566,16 +776,48 @@ class OksaControl:
         return data
 
     def list_keys(self, user: str) -> dict:
-        return self.response(ms.litellm_key_list(user_id=user or None), "keys")
+        ok, raw_keys = ms.litellm_key_list(user_id=user or None, include_service=True)
+        if not ok:
+            code = "Unconfirmed" if isinstance(raw_keys, ms.UnconfirmedMessage) else "OperationFailed"
+            raise OksaError(code, str(raw_keys))
+        protected_users = sorted({
+            str(k.get("user_id") or "")
+            for k in raw_keys
+            if isinstance(k, dict) and k.get("key_alias") == "open-webui" and k.get("user_id")
+        })
+        sanitized = [
+            ms.sanitize_key_record(k)
+            for k in raw_keys
+            if isinstance(k, dict) and k.get("key_alias") != "open-webui"
+        ]
+        sampled_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return {
+            "ok": True,
+            "keys": sanitized,
+            "complete": True,
+            "sampled_at": sampled_at,
+            "protected_users": protected_users,
+        }
 
     def create_key(self, user: str, alias: str, models: list[str], budget: float, duration: str) -> dict:
         if not user:
             raise OksaError("InvalidInput", "User is required")
-        return self.response(ms.litellm_key_create(user, alias=alias, models=models or None,
-                             max_budget=None if budget == -1 else budget, duration=duration or None), "key")
+        ok, result = ms.litellm_key_create(
+            user, alias=alias, models=models or None,
+            max_budget=None if budget == -1 else budget, duration=duration or None,
+        )
+        if not ok:
+            code = "Unconfirmed" if isinstance(result, ms.UnconfirmedMessage) else "OperationFailed"
+            raise OksaError(code, str(result))
+        key_data = dict(result)
+        raw_token = str(key_data.pop("token", "") or "")
+        if raw_token:
+            key_data["key_id"] = ms.key_ref(raw_token)
+        key_data["key_prefix"] = ms.mask_key_prefix(str(key_data.get("key_name") or key_data.get("key") or ""))
+        return {"ok": True, "key": key_data}
 
-    def revoke_key(self, token: str) -> dict:
-        return self.response(ms.litellm_key_delete(token), "message")
+    def revoke_key(self, user: str, key_id: str) -> dict:
+        return self.response(ms.litellm_key_delete(key_id, user_id=user), "message")
 
     def get_calibration(self, name: str) -> dict:
         name = ms.resolve_model_name(name, self.state_dir)
@@ -596,11 +838,51 @@ class OksaControl:
                 status = None
         return {"ok": True, "model": name, "result": result, "status": status}
 
-    def calibrate(self, name: str, force: bool) -> dict:
-        name = ms.resolve_model_name(name, self.state_dir)
-        command = [str(ms.resolve_helper("oksa-calibrate")), "--model", name]
-        if force:
-            command.append("--force")
-        self.run_helper(command)
-        self.run_helper([str(self.planner_bin), "--require-reconcile"])
+    def calibrate(self, name: str, force: bool, expected_selected: str = "", expected_active: str = "") -> dict:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        with (self.state_dir / "planner.lock").open("a") as planner_lock:
+            fcntl.flock(planner_lock, fcntl.LOCK_EX)
+            try:
+                name = ms.resolve_model_name(name, self.state_dir)
+            except ValueError as exc:
+                raise OksaError("NotFound", str(exc)) from exc
+            self._verify_serving_preconditions(expected_selected, expected_active)
+            command = [str(ms.resolve_helper("oksa-calibrate")), "--model", name]
+            if force:
+                command.append("--force")
+            self.run_helper(command)
+            self.run_helper([str(self.planner_bin), "--require-reconcile"], dict(os.environ, PUU_PLANNER_LOCK_HELD="1"))
         return self.get_calibration(name)
+
+    def reconcile_scope(self, scope: str, target: str) -> dict:
+        if scope == "model":
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            with (self.state_dir / "planner.lock").open("a") as planner_lock:
+                fcntl.flock(planner_lock, fcntl.LOCK_EX)
+                with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=False):
+                    if target and target != "runtime" and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", target):
+                        backup = ms.MODELS_DIR.parent / f".{target}.previous"
+                        if backup.exists():
+                            raise OksaError(
+                                "ReconciliationFailed",
+                                f"Unpublished backup directory {backup} still exists; inspect model storage before clearing guard",
+                            )
+                        dest = ms.MODELS_DIR / target
+                        if dest.exists() and not (dest / "config.json").is_file():
+                            raise OksaError(
+                                "ReconciliationFailed",
+                                f"Model directory {dest} is incomplete (missing config.json); repair or remove it before clearing guard",
+                            )
+                self.run_helper([str(self.discover_bin)])
+                env = dict(os.environ, PUU_PLANNER_LOCK_HELD="1")
+                self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
+            return {"ok": True, "message": f"Model scope reconciled ({target or 'runtime'})"}
+        if scope == "user":
+            ok_u, users = ms.litellm_user_list()
+            if not ok_u:
+                raise OksaError("ReconciliationFailed", f"Gateway user list unavailable: {users}")
+            ok_k, keys = ms.litellm_key_list(include_service=True)
+            if not ok_k:
+                raise OksaError("ReconciliationFailed", f"Gateway key index unavailable: {keys}")
+            return {"ok": True, "message": f"API access scope reconciled ({target or 'gateway'})"}
+        raise OksaError("InvalidInput", f"Unknown reconciliation scope: {scope}")
