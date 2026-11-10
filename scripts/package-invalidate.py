@@ -75,18 +75,12 @@ def include_layout(text):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("include "):
-            expression = line.removeprefix("include ")
-            includes += 1
-        elif line.startswith("PUU_PYTHON_PACKAGE_MKS := "):
-            expression = line.removeprefix("PUU_PYTHON_PACKAGE_MKS := ")
-        else:
+        if not line.startswith("include "):
             return False
-        for wildcard in ("*", "python-*"):
-            expression = expression.replace(
-                f"$(BR2_EXTERNAL_PUU_PATH)/package/{wildcard}/*.mk", "\0")
-        expression = expression.replace("$(PUU_PYTHON_PACKAGE_MKS)", "\0")
-        expression = re.sub(r"\$\((?:sort|wildcard|filter-out)\s+", "(", expression)
+        expression = line.removeprefix("include ")
+        includes += 1
+        expression = expression.replace("$(BR2_EXTERNAL_PUU_PATH)/package/*/*.mk", "\0")
+        expression = re.sub(r"\$\((?:sort|wildcard)\s+", "(", expression)
         if "\0" not in expression or not re.fullmatch(r"[\x00(),\s]+", expression):
             return False
     return includes > 0

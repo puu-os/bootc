@@ -8,7 +8,6 @@ source "$BR2_EXTERNAL_PUU_PATH/package/k3s/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/python-httptools/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/python-watchfiles/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/python-nicegui/Config.in"
-source "$BR2_EXTERNAL_PUU_PATH/package/oksa/Config.in"
 source "$BR2_EXTERNAL_PUU_PATH/package/puu-firstboot/Config.in"
 
 source "$BR2_EXTERNAL_PUU_PATH/package/libfyaml/Config.in"
