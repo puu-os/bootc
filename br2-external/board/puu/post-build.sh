@@ -12,12 +12,59 @@ set -euo pipefail
 PUU_ARCH="${2:?arch argument must be set (amd64 or arm64)}"
 : "${PUU_COSIGN_KEYS?PUU_COSIGN_KEYS must be set (empty for unsigned builds)}"
 
-# shellcheck source=scripts/image-lib.sh
-. "${BR2_EXTERNAL_PUU_PATH}/scripts/image-lib.sh"
+cosign_key_paths=()
 
-init_puu_arch "${PUU_ARCH}"
+kernel_version() {
+  local kver
+  kver=$(find "${TARGET_DIR}/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d \
+    | sort -V | tail -n1)
+  test -n "$kver"
+  basename "$kver"
+}
 
-install -Dm644 "${BASH_SOURCE%/*}/../../artwork/splash.png" \
+split_cosign_keys() {
+  cosign_key_paths=()
+  local keys="${PUU_COSIGN_KEYS:-}"
+  if [ -z "${keys}" ]; then
+    return 1
+  fi
+  if [[ "${keys}" == :* || "${keys}" == *: || "${keys}" == *::* ]]; then
+    echo "PUU_COSIGN_KEYS contains an empty entry" >&2
+    exit 1
+  fi
+  IFS=: read -r -a cosign_key_paths <<< "${keys}"
+}
+
+write_cosign_public_key() {
+  local key=$1 output=$2
+  test -f "${key}" \
+    || { echo "cosign key not found: ${key}" >&2; exit 1; }
+
+  COSIGN_PASSWORD="${PUU_COSIGN_PASSWORD:-}" \
+    cosign public-key --key "${key}" > "${output}"
+  chmod 0644 "${output}"
+}
+
+case "${PUU_ARCH}" in
+  amd64)
+    PUU_TARGET_ARCH=x86_64
+    PUU_KERNEL_IMAGE=bzImage
+    PUU_SERIAL_TTY=ttyS0
+    PUU_LDSO_NAME=ld-linux-x86-64.so.2
+    ;;
+  arm64)
+    PUU_TARGET_ARCH=aarch64
+    PUU_KERNEL_IMAGE=Image
+    PUU_SERIAL_TTY=
+    PUU_LDSO_NAME=ld-linux-aarch64.so.1
+    ;;
+  *)
+    echo "unknown PUU_ARCH: ${PUU_ARCH}" >&2
+    exit 1
+    ;;
+esac
+
+install -Dm644 "${BASH_SOURCE%/*}/splash.png" \
   "${TARGET_DIR}/usr/share/plymouth/themes/puu/splash.png"
 
 # Buildroot generates mime.cache when shared-mime-info is installed, before
@@ -80,7 +127,7 @@ if split_cosign_keys; then
   done
 fi
 
-"${BR2_EXTERNAL_PUU_PATH}/scripts/image-policy.py" "${target_repo}" "${trusted_key_paths[@]}" \
+"${BASH_SOURCE%/*}/image-policy.py" "${target_repo}" "${trusted_key_paths[@]}" \
   > "${TARGET_DIR}/etc/containers/policy.json"
 
 kver=$(kernel_version)
@@ -281,3 +328,34 @@ fi
 
 find "${TARGET_DIR}/etc/systemd/system" -type l -regextype posix-extended \
   -regex '.*/Cu[[:alnum:]]{6}' -delete
+
+# Replace bootc 1.16's OSTree baseimage checks with native Composefs checks.
+python3 - "${TARGET_DIR}" <<'PY'
+from pathlib import Path
+import sys
+import tomllib
+
+root = Path(sys.argv[1])
+for name in ("sysroot", "etc", "var"):
+    path = root / name
+    if path.is_symlink() or not path.is_dir():
+        sys.exit(f"Composefs lint: /{name} must be a directory")
+
+with (root / "usr/lib/composefs/setup-root-conf.toml").open("rb") as source:
+    config = tomllib.load(source)
+for name in ("etc", "var"):
+    if config.get(name, {}).get("mount") != "bind":
+        sys.exit(f"Composefs lint: /{name} must use a persistent bind mount")
+PY
+bootc_bin="${TARGET_DIR}/usr/bin/bootc"
+bootc_ldso="${TARGET_DIR}/lib/${PUU_LDSO_NAME}"
+bootc_libpath="${TARGET_DIR}/lib:${TARGET_DIR}/usr/lib"
+if [ ! -x "${bootc_bin}" ]; then
+  echo "warning: skipping bootc container lint: ${bootc_bin} missing" >&2
+elif [ "$(uname -m)" = "${PUU_TARGET_ARCH}" ] && [ -x "${bootc_ldso}" ]; then
+  "${bootc_ldso}" --library-path "${bootc_libpath}" "${bootc_bin}" \
+    container lint --rootfs "${TARGET_DIR}" \
+      --skip baseimage-root --skip baseimage-composefs
+else
+  echo "warning: skipping bootc container lint: cannot run target bootc on host" >&2
+fi

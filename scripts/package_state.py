@@ -264,7 +264,7 @@ def _global_config(config):
 
 
 def _normalizer(root, board, source, download=None):
-    items = [(root, "<external>"), (board, "<output>"), (source, "<buildroot>")]
+    items = [(root, "<external>"), (root.parent, "<workspace>"), (board, "<output>"), (source, "<buildroot>")]
     if download is not None:
         items.append((download, "<download>"))
     prefixes = sorted(
@@ -527,7 +527,7 @@ def collect(root: Path, board: Path, source: Path, make_args: list[str]) -> dict
         "toolchain", "support", "system", "package/Makefile.in",
     )]
     common.extend(sorted((source / "package").glob("pkg-*.mk")))
-    common.extend(root / name for name in ("sdk", "Config.in", "external.desc"))
+    common.extend([root.parent / "sdk", root / "Config.in", root / "external.desc"])
     infrastructure = normalize({
         "files": [content(path) for path in common],
         "globals": {name: value for name, value in globals_data.items()

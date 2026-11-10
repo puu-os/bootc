@@ -37,16 +37,16 @@ SDK_BUILD_DIR         := $(SDK_BUILD_ROOT)/$(SDK_STAMP_KEY)
 SDK_INSTALL_ROOT      := $(SDK_CACHE_DIR)/$(SDK_STAMP_KEY)
 SDK_LOCK              := $(SDK_CACHE_DIR)/.locks/$(SDK_STAMP_KEY)
 SDK_ARCHS             := $(patsubst sdk/%_defconfig,%,$(wildcard sdk/*_defconfig))
-BOARDS                := $(patsubst configs/%_defconfig,%,$(wildcard configs/*_defconfig))
+BOARDS                := $(patsubst br2-external/configs/%_defconfig,%,$(wildcard br2-external/configs/*_defconfig))
 
 ifdef BOARD
-ifeq ($(wildcard configs/$(BOARD)_defconfig),)
+ifeq ($(wildcard br2-external/configs/$(BOARD)_defconfig),)
 $(error unknown BOARD=$(BOARD); see `make list`)
 endif
 SDK_ARCH := $(shell awk -F= '/^BR2_(x86_64|aarch64)=y$$/ { sub(/^BR2_/, "", $$1); print $$1; exit }' \
-	configs/$(BOARD)_defconfig)
+	br2-external/configs/$(BOARD)_defconfig)
 ifeq ($(SDK_ARCH),)
-$(error configs/$(BOARD)_defconfig must select BR2_x86_64 or BR2_aarch64)
+$(error br2-external/configs/$(BOARD)_defconfig must select BR2_x86_64 or BR2_aarch64)
 endif
 PUU_ARCH := $(if $(filter x86_64,$(SDK_ARCH)),amd64,arm64)
 else
@@ -106,7 +106,7 @@ build: $(BUILDROOT_TARBALL) $(SDK_INSTALL_STAMP) ## Incrementally build <BOARD> 
 	./scripts/buildroot-board.sh build
 
 flatpak-update: ## Update the pinned Flatpak snapshot for <BOARD>
-	PUU_ARCH="$(PUU_ARCH)" BR2_EXTERNAL_PUU_PATH="$(CURDIR)" ./scripts/flatpak-update.sh
+	PUU_ARCH="$(PUU_ARCH)" BR2_EXTERNAL_PUU_PATH="$(CURDIR)/br2-external" ./scripts/flatpak-update.sh
 
 burn: ## Write <BOARD>.iso to DEVICE
 	./scripts/burn.sh "$(BOARD_DIR)/images/$(BOARD).iso" "$(DEVICE)"

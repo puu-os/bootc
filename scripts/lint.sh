@@ -4,11 +4,17 @@
 
 set -euo pipefail
 
-git ls-files -z | (
+git ls-files --cached --others --exclude-standard -z | (
   sh_files=()
   py_files=()
+  br2_files=()
+  oksa_files=()
   while IFS= read -r -d '' file; do
-    [ -f "$file" ] || continue
+    [[ -f "$file" && ! -L "$file" ]] || continue
+    case "$file" in
+      br2-external/*) br2_files+=("$file") ;;
+      oksa/*) oksa_files+=("$file") ;;
+    esac
     shebang=
     IFS= read -r shebang < "$file" || true
     if printf '%s\n' "$shebang" | grep -Eq '^#!([^[:space:]]*/)?(env([[:space:]]+-S)?[[:space:]]+)?(a|ba|da|k)?sh([[:space:]]|$)'; then
@@ -38,6 +44,16 @@ for path in sys.argv[1:]:
 sys.exit(status)
 ' "${py_files[@]}"
   fi
+
+  if ((${#br2_files[@]} > 0)) && grep -InE '(\$\{BASH_SOURCE%\*/\}/\.\.|\$\(BR2_EXTERNAL_PUU_PATH\)/(\.\.|scripts|oksa)|\b(\.\./)+(scripts|oksa)\b)' "${br2_files[@]}" >&2; then
+    echo "error: br2-external must not reference files outside br2-external/" >&2
+    exit 1
+  fi
+
+  if ((${#oksa_files[@]} > 0)) && grep -InE '(\$\{BASH_SOURCE%\*/\}/\.\.|\b(\.\./)+(br2-external|scripts)\b)' "${oksa_files[@]}" >&2; then
+    echo "error: oksa must not reference files outside oksa/" >&2
+    exit 1
+  fi
 )
 
 awk '
@@ -47,4 +63,4 @@ awk '
     invalid = 1
   }
   END { if (invalid) exit 1 }
-' package/oksa/files/manifests/*.yaml
+' oksa/manifests/*.yaml

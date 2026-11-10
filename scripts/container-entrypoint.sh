@@ -37,9 +37,9 @@ fi
 cd "${workspace}"
 shopt -s nullglob
 
-defconfigs=(configs/*_defconfig)
+defconfigs=(br2-external/configs/*_defconfig)
 if ((${#defconfigs[@]} == 0)); then
-  echo "error: no defconfigs found in ${workspace}/configs" >&2
+  echo "error: no defconfigs found in ${workspace}/br2-external/configs" >&2
   exit 1
 fi
 

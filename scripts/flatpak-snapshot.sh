@@ -29,12 +29,14 @@ flatpak_snapshot_input_key() (
 flatpak_snapshot_init() {
   : "${PUU_ARCH:?PUU_ARCH must be set (amd64 or arm64)}"
   init_puu_arch "${PUU_ARCH}"
-  local project manifest_refs
-  project="${BR2_EXTERNAL_PUU_PATH:-${BASH_SOURCE%/*}/..}"
-  project=$(cd "${project}" && pwd)
-  snapshot_project="${project}"
-  snapshot_state_tool="${project}/scripts/state.py"
-  snapshot_source="${PUU_FLATPAK_SOURCE_DIR:-${project}/overlay}"
+  local repo_root external_dir manifest_refs
+  repo_root=$(cd "${BASH_SOURCE%/*}/.." && pwd)
+  external_dir="${BR2_EXTERNAL_PUU_PATH:-${repo_root}/br2-external}"
+  external_dir=$(cd "${external_dir}" && pwd)
+  snapshot_project="${repo_root}"
+  snapshot_external="${external_dir}"
+  snapshot_state_tool="${repo_root}/scripts/state.py"
+  snapshot_source="${PUU_FLATPAK_SOURCE_DIR:-${external_dir}/overlay}"
   [ -d "${snapshot_source}" ] || flatpak_snapshot_error "missing Flatpak source: ${snapshot_source}"
   snapshot_source=$(cd "${snapshot_source}" && pwd)
   manifest="${snapshot_source}/usr/share/puu/flatpaks.list"
@@ -106,7 +108,7 @@ flatpak_snapshot_ensure() {
     if [ -n "${FAKEROOTKEY:-}" ]; then
       flatpak_snapshot_error "missing Flatpak snapshot for ${PUU_TARGET_ARCH}"
     fi
-    PUU_ARCH="${PUU_ARCH}" BR2_EXTERNAL_PUU_PATH="${snapshot_project}" \
+    PUU_ARCH="${PUU_ARCH}" BR2_EXTERNAL_PUU_PATH="${snapshot_external}" \
       PUU_FLATPAK_SOURCE_DIR="${snapshot_source}" \
       PUU_FLATPAK_CACHE_DIR="${cache_root}" \
       "${snapshot_project}/scripts/flatpak-update.sh" >&2

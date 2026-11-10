@@ -8,7 +8,7 @@ your own images and the supply chain for OS updates using any standard OCI
 container repository.
 
 **NOTE:** This is a pre-release project i.e., backwards compatibility breaking
-updates this happen commonly.
+updates still happen commonly.
 
 ## Development
 
@@ -57,7 +57,7 @@ sudo systemctl restart puu-k3s-addons.service
 Puu OS bootc container is licensed under the GNU General Public License 2.0 or a
 later version. Refer to [`LICENSE`](LICENSE) for details.
 
-Artwork in [`artwork/`](artwork/) is licensed under the
+Artwork in [`br2-external/board/puu/splash.png`](br2-external/board/puu/splash.png) is licensed under the
 [Creative Commons Attribution-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-sa/4.0/).
 
 The Puu OS logo uses [IBM Plex Mono](https://github.com/IBM/plex), which
