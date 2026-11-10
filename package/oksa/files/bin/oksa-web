@@ -22,7 +22,7 @@ class OksaWebApplication:
             return {"status": "ok"}
 
         OksaWebUI(client).mount()
-        ui.run(host=host, port=port, title="OKSA", show=False, reload=False)
+        ui.run(host=host, port=port, title="OKSA", language="en-US", show=False, reload=False)
 
 
 if __name__ == "__main__":

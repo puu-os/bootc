@@ -3,24 +3,18 @@
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime, timezone
-import math
+import json
 import re
 import time
+from urllib.parse import urlencode
+import uuid
 
-from nicegui import run, ui
+from nicegui import core, run, ui
 
 from oksa_client import OksaClient, OksaClientError
 from oksa_control import Contract
-from oksa_web_views import ModelDetails, ModelsPresentation, ModelsView
-
-
-@dataclass(frozen=True)
-class _Freshness:
-    stale: bool
-    label: str
-    detail: str
+import oksa_model_serving as ms
+import oksa_web_views as views
 
 
 class OksaWebUI:
@@ -28,141 +22,300 @@ class OksaWebUI:
         self.service = service
 
     def mount(self) -> None:
+        self._configure_root()
+        core.app.on_startup(self._configure_root)
         for path in ("/", "/index.html"):
-            ui.page(path)(self._page)
+            ui.page(path, title="OKSA", language="en-US")(self._page)
+
+    def _configure_root(self) -> None:
+        core.app.config.language = "en-US"
+        core.root = self._page
 
     def _page(self) -> None:
         _OksaPage(self.service).build()
-
 
 class _OksaPage:
     def __init__(self, service: OksaClient) -> None:
         self.service = service
         self.client = ui.context.client
         self.disconnected = False
-        self.locks = {name: asyncio.Lock() for name in ("status", "pull", "models", "calibration", "users", "search", "inspect")}
+        self.locks = {
+            name: asyncio.Lock()
+            for name in ("status", "daemon", "models", "calibration", "users", "search", "inspect", "jobs")
+        }
         self.generations = dict.fromkeys(self.locks, 0)
         self.busy: set[str] = set()
-        self.warnings: dict[str, str] = {}
-        self.models: list[dict] = []
-        self.users: list[dict] = []
-        self.models_loaded = False
-        self.models_error_text = ""
-        self.keys: dict[str, dict] = {}
-        self.users_verified = False
-        self.keys_verified = False
-        self.owner: str | None = None
+
+        self.daemon_namespace: str = ""
+        self.receipts: list[dict] = []
+        self.unresolved: list[dict] = []
+
         self.snapshot: dict = {}
         self.status: dict | None = None
         self.status_received = 0.0
         self.status_failed = False
-        self.monitoring_error_text = ""
-        self.partial = False
         self.status_stale = True
+        self.monitoring_error_text = ""
+
+        self.models: list[dict] = []
+        self.models_loaded = False
         self.models_verified = False
-        self.jobs: dict[str, dict] = {}
-        self.jobs_seen: set[str] = set()
-        self.job_details: set[str] = set()
-        self.jobs_received = 0.0
-        self.jobs_failed = True
-        self.model_job: str | None = None
-        self.activity_error_text = ""
-        self.model_operation: str | None = None
-        self.model_uncertain = False
-        self.calibration: dict | None = None
-        self.calibration_received = 0.0
-        self.calibration_error = ""
-        self.inspection: dict | None = None
-        self.inspection_generation = 0
-        self.secret = ""
+        self.models_error_text = ""
         self.models_revision: str | None = None
-        self.search_generation = 0
-        self.downloads_seen: set[str] = set()
+
+        self.jobs: dict[str, dict] = {}
+        self.jobs_loaded = False
+        self.jobs_failed = False
+        self.activity_error_text = ""
+
+        self.users: list[dict] = []
+        self.users_verified = False
+        self.users_error_text = ""
+        self.all_keys: list[dict] = []
+        self.all_keys_verified = False
+        self.all_keys_sampled_at = ""
+        self.all_keys_error_text = ""
+        self.protected_users: set[str] = set()
+
+        self.user_detail_id: str = ""
+        self.user_detail_keys: list[dict] = []
+        self.user_detail_keys_verified = False
+        self.user_detail_error = ""
+
+        self.calibration_model: str = ""
+        self.calibration_data: dict | None = None
+        self.calibration_error: str = ""
+
+        self.search_query: str = ""
+        self.search_results: list[dict] = []
+        self.search_done: bool = False
+        self.search_error: str = ""
+
+        self.inspect_key: tuple[str, str] = ("", "")
+        self.inspection: dict | None = None
+        self.inspect_error: str = ""
+        self.inspect_loading: bool = False
+
+        self.secret: str = ""
+        self.secret_meta: dict = {}
+
+        self._active_updater: Callable[[], None] | None = None
+        self._current_nav_section: str = "serving"
+
+        # Pending modal state
+        self._modal_action: dict = {}
+        self._pending_request_id: str = ""
+        self._review_request_id: str = ""
+        self._cal_request_id: str = ""
+        self._cal_force: bool = False
+
+        # Form inputs tracked by server handlers
+        self._create_user_id: str = ""
+        self._create_user_email: str = ""
+        self._create_key_alias: str = ""
+        self._create_key_scope_mode: str = "selected"
+        self._create_key_selected_models: set[str] = set()
+        self._create_key_duration: str = "30d"
+        self._revoke_key_target: dict = {}
+        self._cancel_job_path: str = ""
 
     def build(self) -> None:
         ui.dark_mode(False)
+        ui.add_head_html(f"<style>{views.OKSA_CSS}</style>")
         self.client.content.classes("p-0 gap-0 h-screen overflow-hidden")
-        with ui.row().classes("w-full h-full flex-nowrap items-stretch gap-0"):
-            with ui.column().classes("w-44 shrink-0 h-full border-r bg-gray-50 p-2 gap-3"):
-                ui.label("OKSA").classes("text-lg font-semibold px-3 py-2")
-                with ui.tabs(value="Models").props("vertical inline-label no-caps").classes("w-full") as self.tabs:
-                    for name, icon in (("Models", "storage"), ("Monitoring", "monitor_heart"),
-                                       ("Activity", "history"), ("Users", "people")):
-                        ui.tab(name, icon=icon).classes("justify-start")
-            with ui.column().classes("flex-1 min-w-0 h-full gap-0"):
-                self.warning_label = ui.label("").classes("text-warning px-3 py-1 whitespace-pre-line break-words")
-                self.warning_label.set_visibility(False)
-                with ui.tab_panels(self.tabs, value="Models", animated=False).classes("w-full flex-1 min-h-0 overflow-auto"):
-                    with ui.tab_panel("Monitoring"):
-                        self._build_monitoring()
-                    with ui.tab_panel("Models").classes("h-full flex-nowrap"):
-                        self._build_models()
-                    with ui.tab_panel("Activity").classes("h-full flex-nowrap"):
-                        self._build_activity()
-                    with ui.tab_panel("Users").classes("h-full flex-nowrap"):
-                        self._build_users()
-                self._build_download_manager()
-        self._build_download_dialog()
-        self._build_user_dialog()
-        self._build_key_dialog()
-        self._build_secret_dialog()
-        self.tabs.on_value_change(self._tab_changed)
-        self.client.on_connect(self._poll)
-        self.client.on_disconnect(self._disconnect)
+
+        ui.html('<a class="skip-link" href="#main">Skip to content</a>', sanitize=False)
+        self.topbar = ui.html(self._render_topbar(), sanitize=False, tag="header").classes("topbar").props('id="topbar"')
+
+        with ui.element("div").classes("app"):
+            self.sidebar = (
+                ui.html(self._render_sidebar(), sanitize=False, tag="aside")
+                .classes("sidebar")
+                .props('id="sidebar"')
+            )
+            with ui.element("main").props('id="main" tabindex="-1"'):
+                self.global_banners = ui.html("", sanitize=False)
+                self.sub_pages = ui.sub_pages(
+                    {
+                        "/": self._route_serving,
+                        "/index.html": self._route_serving,
+                        "/serving": self._route_serving,
+                        "/models": self._route_models,
+                        "/models/download": self._route_download_search,
+                        "/models/download/review": self._route_download_review,
+                        "/models/{storage_id}": self._route_model_detail,
+                        "/access": self._route_access,
+                        "/access/user": self._route_user_detail,
+                        "/operations": self._route_operations,
+                        "/operations/{job_id}": self._route_operation_detail,
+                    },
+                )
+
+        self._build_modals()
+        self.client.sub_pages_router.on_path_changed(self._on_path_changed)
+        self.client.on_connect(self._on_connect)
+        self.client.on_disconnect(self._on_disconnect)
         self.client.on_delete(self._clear_secret)
-        self._render_page()
-        ui.timer(1, self._render_page)
+        self._render_shell()
+        ui.timer(1.5, self._render_all)
         ui.timer(2.5, self._poll)
 
-    @staticmethod
-    def _table(title: str, fields: dict[str, str], *, selection: str | None = None, row_key: str = "id"):
-        table = ui.table(
-            title=title,
-            columns=[{"name": key, "field": key, "label": label, "sortable": True}
-                     for key, label in fields.items()],
-            rows=[], row_key=row_key, selection=selection, pagination=10,
-        ).props("color=primary dense flat bordered").classes("w-full")
-        table.add_slot("header-selection", "")
-        return table
+    def _host_name(self) -> str:
+        if isinstance(self.status, dict) and self.status.get("host"):
+            return str(self.status["host"])
+        return "puu"
 
-    @staticmethod
-    def _number(value, maximum: float = math.inf, *, integer: bool = False) -> bool:
-        return (type(value) in (int, float) and math.isfinite(value) and 0 <= value <= maximum
-                and (not integer or int(value) == value))
+    def _api_base_url(self) -> str:
+        if isinstance(self.status, dict) and self.status.get("api_base_url"):
+            return str(self.status["api_base_url"])
+        return "http://api.puu.local/v1"
 
-    def _metric(self, value, suffix: str = "", maximum: float = math.inf, *, integer: bool = False) -> str:
-        if not self._number(value, maximum, integer=integer):
-            self.partial = True
-            return "Unavailable"
-        return f"{value:g}{suffix}"
+    def _running_jobs(self) -> list[dict]:
+        return [
+            j for j in self.jobs.values()
+            if isinstance(j, dict) and j.get("state") == "running"
+        ]
 
-    def _text(self, value) -> str:
-        if not isinstance(value, str) or not value.strip():
-            self.partial = True
-            return "Unavailable"
-        return "None" if value == "-" else value
+    def _running_model_job(self) -> dict | None:
+        for job in self._running_jobs():
+            if job.get("operation") in Contract.MODEL_MUTATIONS:
+                return job
+        return None
+
+    def _unresolved_for_scope(self, scope: str) -> dict | None:
+        for item in self.unresolved:
+            if isinstance(item, dict) and item.get("scope") == scope:
+                return item
+        return None
+
+    def _render_topbar(self) -> str:
+        host = views.esc(self._host_name())
+        return (
+            f'<a class="brand" href="/serving">OKSA</a>'
+            f'<div class="host">'
+            f"<span>HOST <strong>{host}</strong></span>"
+            f'<span class="host-divider" aria-hidden="true"></span>'
+            f'<span class="host-extra">Local inference administration</span>'
+            f"</div>"
+        )
+
+    def _render_sidebar(self) -> str:
+        running_cnt = len(self._running_jobs())
+        op_label = f"Operations ({running_cnt} running job{'s' if running_cnt != 1 else ''})"
+        nav_items = (
+            ("serving", "/serving", "Serving"),
+            ("models", "/models", "Models"),
+            ("access", "/access", "API access"),
+            ("operations", "/operations", op_label),
+        )
+        links = []
+        for key, href, label in nav_items:
+            current = ' aria-current="page"' if self._current_nav_section == key else ""
+            links.append(f'<a class="nav-link" href="{views.esc(href)}"{current}><span>{views.esc(label)}</span></a>')
+
+        sampled = self.snapshot.get("sampled_at") or "No sample yet"
+        conn_state = (
+            "Disconnected"
+            if self.disconnected
+            else ("Stale sample" if self.status_stale else "Connected")
+        )
+        inv_state = (
+            f"{len(self.models)} installed"
+            if self.models_loaded and not self.models_error_text
+            else ("Read error" if self.models_error_text else "Loading…")
+        )
+        return (
+            f'<p class="nav-label">Workspace</p>'
+            f'<nav aria-label="Primary">{"".join(links)}</nav>'
+            f'<div class="sidebar-foot">'
+            f"<p><strong>Observation status</strong></p>"
+            f"<p>Runtime: {views.esc(conn_state)} ({views.esc(sampled)})</p>"
+            f"<p>Inventory: {views.esc(inv_state)}</p>"
+            f"<p>Tracked jobs: {len(self.jobs)} retained / 64 max</p>"
+            f"</div>"
+        )
+
+    def _render_global_banners(self) -> str:
+        parts = []
+        if self.disconnected or self.status_failed:
+            last_time = self.snapshot.get("sampled_at") or "none"
+            err = self.monitoring_error_text or self.snapshot.get("error") or "Daemon connection interrupted."
+            parts.append(
+                f'<div class="notice error" role="alert">'
+                f"<p><strong>Service observation degraded or disconnected.</strong> {views.esc(err)}</p>"
+                f"<p class=\"small\">Last runtime sample: {views.esc(last_time)}. Last-known values remain visible with staleness markers; "
+                "mutations whose safety preconditions cannot be verified are disabled.</p>"
+                f"</div>"
+            )
+        if self.unresolved:
+            parts.append(views.render_unresolved_banner(self.unresolved))
+        return "".join(parts)
+
+    def _render_shell(self) -> None:
+        if self.client.is_deleted:
+            return
+        top_html = self._render_topbar()
+        if self.topbar.content != top_html:
+            self.topbar.content = top_html
+        side_html = self._render_sidebar()
+        if self.sidebar.content != side_html:
+            self.sidebar.content = side_html
+        banner_html = self._render_global_banners()
+        if self.global_banners.content != banner_html:
+            self.global_banners.content = banner_html
+
+    def _render_all(self) -> None:
+        if self.client.is_deleted:
+            return
+        self._render_shell()
+        if self._active_updater is not None:
+            self._active_updater()
+
+    def _on_path_changed(self, path: str) -> None:
+        self._clear_secret()
+        clean = path.split("?", 1)[0].split("#", 1)[0].rstrip("/") or "/"
+        if clean.startswith("/models"):
+            self._current_nav_section = "models"
+        elif clean.startswith("/access"):
+            self._current_nav_section = "access"
+        elif clean.startswith("/operations"):
+            self._current_nav_section = "operations"
+        else:
+            self._current_nav_section = "serving"
+        self._render_shell()
+        self.client.run_javascript(
+            "requestAnimationFrame(() => { const m = document.getElementById('main'); if (m) m.focus({preventScroll: true}); });"
+        )
+
+    def _set_page_title(self, title: str) -> None:
+        full = f"{title} · OKSA"
+        self.client.run_javascript(f"document.title = {json.dumps(full)};")
+
+    def _navigate(self, path: str) -> None:
+        ui.navigate.to(path)
+
+    def _replace_url(self, path: str) -> None:
+        if not self.client.is_deleted:
+            self.client.run_javascript(f"window.history.replaceState(null, '', {json.dumps(path)});")
 
     @staticmethod
     def _success(reply: tuple[int, dict]) -> bool:
-        status, data = reply
-        return 200 <= status < 300 and data.get("ok") is True
+        return 200 <= reply[0] < 300 and reply[1].get("ok") is True
 
     @staticmethod
     def _error(reply: tuple[int, dict]) -> str:
-        return str(reply[1].get("error") or f"Invalid service response (status {reply[0]})")
+        return str(reply[1].get("error") or f"Service request failed (status {reply[0]})")
 
     @staticmethod
     def _unconfirmed(reply: tuple[int, dict]) -> bool:
         return reply[1].get("code") in ("Unconfirmed", "Timeout", "Interrupted", "WorkerFailed")
 
-    async def _call(self, method: str | Callable[..., dict], *args, wait: bool = True) -> tuple[int, dict]:
+    async def _call(self, method: str | Callable[..., dict], *args) -> tuple[int, dict]:
         try:
             if isinstance(method, str):
                 result = await run.io_bound(self.service.call, method, *args)
             else:
                 result = await run.io_bound(method, *args)
-            if isinstance(result, dict) and "job" in result and wait:
-                result = await run.io_bound(self.service.wait_job, result["job"], timeout=600)
         except OksaClientError as error:
             return 0, {**error.payload, "ok": False, "code": error.code, "error": str(error)}
         except (OSError, ValueError, TimeoutError) as error:
@@ -172,1611 +325,2181 @@ class _OksaPage:
         return 200, result
 
     async def _load(self, name: str, method: str | Callable[..., dict], *args) -> tuple[int, dict] | None:
+        cancel_stale = name in ("calibration", "search", "inspect")
         self.generations[name] += 1
-        generation = self.generations[name]
+        gen = self.generations[name]
         async with self.locks[name]:
-            if generation != self.generations[name] or self.client.is_deleted:
+            if self.client.is_deleted or (cancel_stale and gen != self.generations[name]):
                 return None
             reply = await self._call(method, *args)
-            if generation != self.generations[name] or self.client.is_deleted:
+            if self.client.is_deleted or (cancel_stale and gen != self.generations[name]):
                 return None
             return reply
 
-    def _warn(self, key: str, message: str) -> None:
-        if message:
-            self.warnings[key] = message
-        else:
-            self.warnings.pop(key, None)
-        if not self.client.is_deleted:
-            self.warning_label.set_text("\n".join(self.warnings.values()))
-            self.warning_label.set_visibility(bool(self.warnings))
-    def _begin(self, name: str, controls: list) -> bool:
-        if name in self.busy or self.client.is_deleted:
-            return False
-        self.busy.add(name)
-        for control in controls:
-            control.disable()
-        return True
+    async def _ensure_namespace(self) -> str:
+        if not self.daemon_namespace:
+            await self._refresh_daemon_state()
+        return self.daemon_namespace
 
-    def _end(self, name: str, controls: list) -> None:
-        self.busy.discard(name)
-        if self.client.is_deleted:
+    def _mint_request_id(self) -> str:
+        if not self.daemon_namespace or not re.fullmatch(r"[0-9a-f]{32}", self.daemon_namespace):
+            return ""
+        return f"{self.daemon_namespace}:{uuid.uuid4().hex}"
+
+    async def _refresh_daemon_state(self) -> None:
+        reply = await self._load("daemon", "GetDaemonState")
+        if reply is None:
             return
-        for control in controls:
-            control.enable()
-        if name == "user":
-            self._users_selection()
+        if self._success(reply):
+            data = reply[1]
+            self.daemon_namespace = str(data.get("namespace") or "")
+            self.receipts = [r for r in (data.get("receipts") or []) if isinstance(r, dict)]
+            self.unresolved = [r for r in (data.get("unresolved") or []) if isinstance(r, dict)]
 
-    async def _confirm(self, message: str, action: str, *, dangerous: bool = False) -> bool:
-        with ui.dialog() as dialog, ui.card():
-            ui.label(message).classes("whitespace-pre-line break-words max-h-96 overflow-y-auto")
-            with ui.row():
-                ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("outline")
-                ui.button(action, color="negative" if dangerous else "primary", on_click=lambda: dialog.submit(True))
-        try:
-            return await dialog is True and not self.client.is_deleted
-        finally:
-            if not dialog.is_deleted:
-                dialog.delete()
-
-    async def _tab_changed(self) -> None:
-        if self.tabs.value in ("Monitoring", "Models", "Activity"):
-            await self._refresh_model_state()
-        elif self.tabs.value == "Users":
-            await self._load_users()
-
-    async def _poll(self) -> None:
-        if self.client.is_deleted or not self.client.has_socket_connection:
-            return
-        if self.disconnected:
-            self.disconnected = False
-            self._render_page()
-            self._render_users({row["user_id"] for row in self.users_table.selected}, set())
-        if self.tabs.value in ("Monitoring", "Models", "Activity") or self.model_uncertain or self.model_job:
-            await self._refresh_model_state()
-        else:
-            await self._load_pull()
-        if self.tabs.value == "Users" and "user" not in self.busy and not self.locks["users"].locked():
-            await self._load_users()
-
-    def _build_monitoring(self) -> None:
-        self.freshness = ui.badge("Loading monitoring data…").props("outline")
-        with self.freshness:
-            self.freshness_detail = ui.tooltip("Waiting for the first update")
-        self.monitoring_error = ui.label("").classes("text-negative")
-        self.monitoring_error.set_visibility(False)
-        with ui.grid().classes("w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4"):
-            with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Serving").classes("text-sm")
-                self.inference = ui.label("Unavailable").classes("text-xl font-semibold break-words")
-            with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Host memory").classes("text-sm")
-                self.memory = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums break-words")
-                self.memory_percent = ui.label("").classes("text-sm tabular-nums")
-                self.memory_percent.set_visibility(False)
-                self.memory_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
-                self.memory_progress.set_visibility(False)
-            with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Running requests").classes("text-sm")
-                self.running_requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-            with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("Queued requests").classes("text-sm")
-                self.queued_requests = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-            with ui.card().props("flat").classes("w-full p-4 gap-1"):
-                ui.label("KV cache").classes("text-sm")
-                self.kv_cache = ui.label("Unavailable").classes("text-xl font-semibold tabular-nums")
-                self.kv_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
-                self.kv_progress.set_visibility(False)
-        self.gpus_label = ui.label("GPU data unavailable").classes("text-sm")
-        self.gpus_table = self._table("GPUs", {
-            "index": "Index", "name": "Name", "utilization": "Utilization", "memory": "Memory (MiB)",
-            "temperature": "Temperature", "power": "Power",
-        })
-        self.gpus_table.set_visibility(False)
-        self.workloads_label = ui.label("Workload data unavailable").classes("text-sm")
-        self.workloads_table = self._table("Workloads", {
-            "name": "Name", "phase": "Phase", "ready": "Ready", "restarts": "Restarts",
-        })
-        self.workloads_table.set_visibility(False)
-
-    async def _load_monitoring(self) -> None:
-        requested = time.monotonic()
+    async def _refresh_status(self) -> None:
         reply = await self._load("status", "GetStatus")
         if reply is None:
             return
-        data = reply[1]
         if not self._success(reply):
             self.status_failed = True
-            self.monitoring_error_text = "Monitoring update failed. " + self._error(reply)
-        else:
-            self.status_failed = False
-            self.status = data["status"]
-            self.snapshot = data["snapshot"]
-            self.status_received = requested
-            self.monitoring_error_text = str(self.snapshot.get("error") or "")
-        self._render_page()
-
-    def _render_monitoring(self, freshness: _Freshness, serving: str) -> None:
-        self.monitoring_error.set_text(self.monitoring_error_text)
-        self.monitoring_error.set_visibility(bool(self.monitoring_error_text))
-        self.partial = False
-        if self.status is None:
-            for widget in (self.memory, self.running_requests, self.queued_requests, self.kv_cache):
-                widget.set_text("Unavailable")
-            for widget in (self.memory_percent, self.memory_progress, self.kv_progress, self.gpus_table, self.workloads_table):
-                widget.set_visibility(False)
-            self._render_monitoring_freshness(freshness, serving)
-            return
-        status = self.status
-        model_state = status.get("model_status")
-        if (model_state not in ("stopped", "no-model", "not-ready", "ready", "unavailable")
-                or status.get("gateway_status") not in ("ready", "authentication-required", "unreachable")):
-            self.partial = True
-        memory = status.get("host_memory") if isinstance(status.get("host_memory"), dict) else {}
-        used, total, used_pct = memory.get("used_mib"), memory.get("total_mib"), memory.get("used_pct")
-        if self._number(used) and self._number(total) and total > 0:
-            self.memory.set_text(f"{self._storage(used)} / {self._storage(total)}")
-        else:
-            self.partial = True
-            self.memory.set_text("Unavailable")
-        if self._number(used_pct, 100):
-            self.memory_percent.set_text(f"{used_pct:g}% used")
-            self.memory_percent.set_visibility(True)
-        else:
-            self.partial = True
-            self.memory_percent.set_text("")
-            self.memory_percent.set_visibility(False)
-        self._progress(self.memory_progress, used_pct)
-
-        if any(not isinstance(status.get(field), str) or not status[field].strip()
-               for field in ("active_model", "selected_model")):
-            self.partial = True
-
-        metrics = status.get("metrics") if isinstance(status.get("metrics"), dict) else {}
-        idle = model_state in ("stopped", "no-model", "not-ready")
-        for widget, field in ((self.running_requests, "running_requests"), (self.queued_requests, "waiting_requests")):
-            value = metrics.get(field)
-            if self._number(value, integer=True):
-                widget.set_text(str(int(value)))
-            elif idle:
-                widget.set_text("—")
-            else:
-                self.partial = True
-                widget.set_text("Unavailable")
-
-        kv_pct = metrics.get("kv_cache_usage_pct")
-        if self._number(kv_pct, 100):
-            self.kv_cache.set_text(f"{kv_pct:g}%")
-        elif idle:
-            self.kv_cache.set_text("—")
-        else:
-            self.partial = True
-            self.kv_cache.set_text("Unavailable")
-        self._progress(self.kv_progress, kv_pct)
-
-        gpus = status.get("gpus")
-        gpu_rows = []
-        self.gpus_label.set_text("No GPUs reported" if gpus == [] else "" if isinstance(gpus, list) else "GPU data unavailable")
-        if isinstance(gpus, list):
-            for index, gpu in enumerate(gpus):
-                if not isinstance(gpu, dict):
-                    self.partial = True
-                    continue
-                total = gpu.get("memory_total_mib")
-                gpu_rows.append({
-                    "id": index, "index": self._metric(gpu.get("index"), integer=True), "name": self._text(gpu.get("name")),
-                    "utilization": self._metric(gpu.get("gpu_util_pct"), "%", 100),
-                    "memory": self._metric(gpu.get("memory_used_mib")) + " / "
-                    + self._metric(total if self._number(total) and total > 0 else None),
-                    "temperature": self._metric(gpu.get("temperature_c"), " °C"),
-                    "power": self._metric(gpu.get("power_w"), " W"),
-                })
-        else:
-            self.partial = True
-        has_gpus = bool(gpu_rows)
-        self.gpus_table.set_visibility(has_gpus)
-        self.gpus_label.set_visibility(not has_gpus)
-        if self.gpus_table.rows != gpu_rows:
-            self.gpus_table.rows = gpu_rows
-            self.gpus_table.update()
-
-        workloads = status.get("workloads")
-        workload_rows = []
-        self.workloads_label.set_text("No workloads reported" if workloads == [] else "" if isinstance(workloads, list) else "Workload data unavailable")
-        if isinstance(workloads, list):
-            for index, workload in enumerate(workloads):
-                if not isinstance(workload, dict):
-                    self.partial = True
-                    continue
-                ready = workload.get("ready")
-                if type(ready) is not bool:
-                    self.partial = True
-                workload_rows.append({
-                    "id": index, "name": self._text(workload.get("name")), "phase": self._text(workload.get("phase")),
-                    "ready": "Yes" if ready is True else "No" if ready is False else "Unavailable",
-                    "restarts": self._metric(workload.get("restarts"), integer=True),
-                })
-        else:
-            self.partial = True
-        has_workloads = bool(workload_rows)
-        self.workloads_table.set_visibility(has_workloads)
-        self.workloads_label.set_visibility(not has_workloads)
-        if self.workloads_table.rows != workload_rows:
-            self.workloads_table.rows = workload_rows
-            self.workloads_table.update()
-        self._render_monitoring_freshness(freshness, serving)
-
-    def _progress(self, progress, value) -> None:
-        available = self._number(value, 100)
-        progress.set_visibility(available)
-        if available:
-            progress.set_value(value / 100)
-
-    def _render_page(self) -> None:
-        if self.client.is_deleted:
-            return
-        freshness = self._monitoring_freshness()
-        self.status_stale = freshness.stale
-        serving = self._serving_state()
-        self._render_monitoring(freshness, serving)
-        self._render_models(serving)
-        rows = self._activity_rows()
-        self._render_activity(rows)
-        self._render_downloads(rows)
-        self._render_download_form()
-
-    def _monitoring_freshness(self) -> _Freshness:
-        metadata = self.snapshot
-        sampled = metadata.get("sampled_at")
-        try:
-            parsed = datetime.fromisoformat(sampled.replace("Z", "+00:00")) if isinstance(sampled, str) else None
-        except ValueError:
-            parsed = None
-        age, maximum = metadata.get("age_seconds"), metadata.get("max_age_seconds")
-        error = metadata.get("error")
-        known = (self.status is not None and parsed is not None and parsed.tzinfo is not None
-                 and self._number(age) and self._number(maximum) and maximum > 0
-                 and type(metadata.get("stale")) is bool
-                 and (error is None or isinstance(error, str)))
-        elapsed = age + max(0, time.monotonic() - self.status_received) if known else None
-        stale = not known or self.status_failed or metadata.get("stale") or error is not None or elapsed > maximum
-        if self.disconnected:
-            update_text = "Disconnected — monitoring updates paused"
-        elif self.status_failed:
-            update_text = "Monitoring updates unavailable"
-        elif not known:
-            update_text = "Loading monitoring data…"
-        elif stale:
-            update_text = f"Data is out of date — updated {int(elapsed)} seconds ago"
-        else:
-            update_text = "Updated just now" if elapsed < 5 else f"Updated {int(elapsed)} seconds ago"
-        detail = f"Last update {int(elapsed)} seconds ago" if known else "Waiting for a confirmed update"
-        return _Freshness(stale, update_text, detail)
-
-    def _serving_state(self) -> str:
-        if self.disconnected:
-            return "Disconnected"
-        inference = "Status unknown"
-        if self.status is not None and not self.status_stale:
-            model, gateway = self.status.get("model_status"), self.status.get("gateway_status")
-            inference = {"stopped": "Stopped", "no-model": "Stopped", "not-ready": "Not ready",
-                         "unavailable": "Status unknown"}.get(model, "Status unknown")
-            if model == "ready":
-                inference = {"ready": "Serving", "authentication-required": "Authentication required"}.get(gateway, "Gateway offline")
-        running = next((job for job in self.jobs.values()
-                        if self._jobs_fresh() and job["path"] in self.jobs_seen and job["state"] in ("queued", "running")
-                        and job["operation"] in ("StartModel", "RestartModel", "StopServing", "Calibrate")), None)
-        if running:
-            inference = "Queued" if running["state"] == "queued" else self._operation_title(running)
-        return inference
-
-    def _render_monitoring_freshness(self, freshness: _Freshness, serving: str) -> None:
-        label = "Some monitoring data is unavailable" if self.partial and not freshness.stale else freshness.label
-        self.freshness.set_text(label)
-        self.freshness_detail.set_text(freshness.detail)
-        self.inference.set_text(serving)
-
-    def _build_models(self) -> None:
-        self.model_view = ModelsView(on_select=self._model_selection, on_action=self._model_action, on_find=self._open_download)
-
-    def _build_activity(self) -> None:
-        with ui.row().classes("w-full items-center"):
-            self.activity_cancel = ui.button("Cancel operation", on_click=self._cancel_selected_job).props("outline")
-            self.activity_details = ui.button("Operation details", on_click=self._show_job).props("outline")
-            self.activity_freshness = ui.badge("Loading activity…").props("outline")
-            self.activity_spinner = ui.spinner()
-            self.activity_spinner.set_visibility(False)
-        self.pull_error = ui.label("").classes("text-negative")
-        self.activity_table = self._table("Operation history", {"action": "Action", "target": "Target", "state": "Status", "elapsed": "Seconds"}, selection="single")
-        self.activity_table.on_select(self._activity_selection)
-        self.activity_table.classes("flex-1 min-h-0")
-        self._activity_selection()
-
-    def _build_download_manager(self) -> None:
-        with ui.expansion("Downloads", icon="download").props("dense").classes("w-full shrink-0 border-t bg-gray-50") as self.download_manager:
-            with ui.column().classes("w-full max-h-64 overflow-auto p-2 gap-2"):
-                with ui.row().classes("items-center"):
-                    self.download_job_cancel = ui.button("Cancel", on_click=self._cancel_selected_download).props("outline dense")
-                    self.download_spinner = ui.spinner(size="sm")
-                    self.download_spinner.set_visibility(False)
-                self.download_table = self._table("", {"model": "Model", "state": "Status", "progress": "Progress", "elapsed": "Seconds"}, selection="single")
-                self.download_table.props('wrap-cells no-data-label="Loading downloads…"')
-                self.download_table.on_select(self._download_selection)
-                self.download_table.on("rowClick", lambda event: self._show_download(event.args[1]["id"]), args=[[], ["id"]])
-                self._download_selection()
-
-    def _render_downloads(self, activity: list[dict]) -> None:
-        rows = []
-        for row in activity:
-            job = self.jobs[row["id"]]
-            if job["operation"] != "DownloadModel":
-                continue
-            lines = job["progress"].splitlines()
-            rows.append({**row, "model": job.get("repo_id") or job.get("model_name") or "Model download",
-                         "progress": lines[-1][:512] if lines else ""})
-        selected = {row["id"] for row in self.download_table.selected}
-        selection = [row for row in rows if row["id"] in selected]
-        if self.download_table.rows != rows or self.download_table.selected != selection:
-            self.download_table.rows = rows
-            self.download_table.selected = selection
-            self.download_table.update()
-        active = {row["id"] for row in rows if row["state"] in ("Queued", "Running")}
-        fresh = self._jobs_fresh()
-        if fresh:
-            if active - self.downloads_seen:
-                self.download_manager.open()
-            self.downloads_seen.update(row["id"] for row in rows if row["id"] in self.jobs_seen)
-        summary = f"Downloads — {len(active)} active" if active else "Downloads"
-        if not fresh:
-            summary += " — waiting for updates"
-        self.download_manager.set_text(summary)
-        self.download_table.props["no-data-label"] = "No downloads yet" if fresh else "Downloads unavailable — checking automatically"
-        self.download_spinner.set_visibility(fresh and bool(active))
-        self._download_selection()
-
-    def _download_selection(self) -> None:
-        selected = self.download_table.selected
-        job = self.jobs.get(selected[0]["id"]) if selected else None
-        self.download_job_cancel.set_enabled(bool(job and job["state"] == "running" and self._jobs_fresh()
-                                             and job["path"] in self.jobs_seen and "cancel" not in self.busy))
-
-    async def _cancel_selected_download(self) -> None:
-        if self.download_table.selected:
-            await self._cancel_pull(self.download_table.selected[0]["id"])
-
-    def _show_download(self, path: str) -> None:
-        row = next((row for row in self.download_table.rows if row["id"] == path), None)
-        if row is None:
-            return
-        self.download_table.selected = [row]
-        self.download_table.update()
-        self._download_selection()
-        self._show_job_details(path)
-
-    @staticmethod
-    def _storage(value) -> str:
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-            return "Unavailable"
-        return f"{value / 1024:.1f} GiB" if value >= 1024 else f"{value:g} MiB"
-
-    def _selected_model(self) -> dict | None:
-        model_id = self.model_view.model_id
-        if model_id is None:
-            return None
-        return next((model for model in self.models if model.get("id") == model_id), None)
-
-    def _jobs_fresh(self) -> bool:
-        return not self.jobs_failed and time.monotonic() - self.jobs_received <= 10
-
-    def _active_model_jobs(self) -> bool:
-        return any(
-            job["operation"] in Contract.MODEL_MUTATIONS and job["state"] in ("queued", "running")
-            for job in self.jobs.values()
-        )
-
-    def _model_available(self) -> bool:
-        return (self._jobs_fresh() and not self.model_job and not self.model_uncertain
-                and not self.busy.intersection({"model", "download"})
-                and not self._active_model_jobs())
-
-
-    def _model_state(self, model: dict) -> str:
-        status = self.status or {}
-        if self.status_stale:
-            return "Status unknown"
-        if not self.models_verified:
-            return "Checking"
-        if model["name"] == status.get("active_model"):
-            if status.get("model_status") == "ready":
-                return "Serving" if status.get("gateway_status") == "ready" else "Gateway not ready"
-            if status.get("model_status") == "not-ready":
-                return "Starting"
-        if model.get("active"):
-            return "Status unknown"
-        return "Installed"
-
-    async def _model_selection(self) -> None:
-        self.generations["calibration"] += 1
-        model = self._selected_model()
-        if model is None or not self.calibration or self.calibration.get("model") != model["id"]:
-            self.calibration = None
-            self.calibration_received = 0.0
-            self.calibration_error = ""
-        self._render_page()
-        if model is not None and self.models_verified:
-            await self._load_calibration()
-
-    def _render_models(self, serving: str) -> None:
-        available = self._model_available() and self.models_verified
-        model = self._selected_model()
-        rows = [{
-            "id": item["id"], "name": item["name"],
-            "storage_mib": item.get("storage_mib") if self._number(item.get("storage_mib")) else None,
-            "quantization": item.get("quantization") or "none",
-            "capabilities": "Compatible" if item.get("capabilities") == "ok" else "Insufficient or unverified",
-            "state": self._model_state(item),
-        } for item in self.models]
-        detail = None
-        if model is not None:
-            calibration = self.calibration if self.calibration and self.calibration.get("model") == model["id"] else {}
-            result = calibration.get("result") or {}
-            activity = calibration.get("status") or {}
-            fresh = bool(self.calibration_received) and time.monotonic() - self.calibration_received <= 10
-            profile = ""
-            limits = result.get("limits") or {}
-            measured = (result.get("model") == model["id"] and result.get("state") == "complete"
-                        and result.get("reason") == "measured")
-            if measured and self._number(limits.get("max_model_len"), integer=True) and self._number(limits.get("max_num_seqs"), integer=True):
-                prefix = "Recorded profile (not live)" if fresh and self.models_verified else "Unverified recorded profile"
-                profile = f"{prefix}: context {limits['max_model_len']} tokens · concurrency {limits['max_num_seqs']}"
-            if self.calibration_error:
-                calibration_state = "Calibration unavailable"
-            elif not calibration:
-                calibration_state = "Loading calibration…" if self.models_verified else "Calibration unverified"
-            elif not fresh:
-                calibration_state = "Calibration out of date"
-            elif activity:
-                calibration_state = str(activity.get("state", "unknown")).replace("_", " ").capitalize()
-            elif result:
-                calibration_state = "Measured profile recorded" if measured else "No usable profile"
-            else:
-                calibration_state = "No calibration record"
-            timestamp = activity.get("updated_at") or result.get("completed_at")
-            context = ""
-            if self._number(timestamp, 253402300799):
-                context = "Recorded " + datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            detail = ModelDetails(
-                id=model["id"], name=model["name"], repo_id=model.get("repo_id") or model["name"],
-                storage=self._storage(model.get("storage_mib")), quantization=model.get("quantization") or "none",
-                compatibility="Compatible" if model.get("capabilities") == "ok" else "Insufficient or unverified",
-                state=self._model_state(model), calibration_state=calibration_state, calibration_context=context,
-                calibration_message=self.calibration_error or str(activity.get("message") or result.get("reason") or ""),
-                profile=profile,
-            )
-        capable = model is not None and model.get("capabilities") == "ok"
-        restartable = capable and (model.get("selected") or model.get("active"))
-        waiting = bool(self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
-        if self.models:
-            empty = ""
-        elif self.models_error_text:
-            empty = "Models unavailable — checking automatically"
-        elif not self.models_loaded:
-            empty = "Loading installed models…"
-        else:
-            empty = "No installed models. Choose Find models to install one."
-        active = (self.status or {}).get("active_model")
-        service = serving
-        if not self.status_stale and active and active != "-":
-            service += f" · {active}"
-        self.model_view.render(ModelsPresentation(
-            rows=rows, detail=detail, error=self.models_error_text, empty_message=empty,
-            service_state=service, busy=waiting and self._jobs_fresh(),
-            can_start=bool(available and capable and self._model_state(model) != "Serving"),
-            can_restart=bool(available and restartable),
-            can_remove=bool(available and model is not None and model.get("removable") is not False),
-            can_calibrate=bool(available and capable), can_stop=available,
-        ))
-
-    def _render_download_form(self) -> None:
-        self.download_button.set_enabled(self.inspection is not None and self._model_available() and "inspect" not in self.busy)
-
-    async def _refresh_model_state(self) -> None:
-        if not self._begin("model-state-refresh", []):
-            return
-        try:
-            await self._load_pull()
-            await self._load_monitoring()
-            await self._refresh_models()
-            await self._load_calibration()
-            if self.client.is_deleted:
-                return
-            self._render_page()
-        finally:
-            self._end("model-state-refresh", [])
-
-    async def _load_calibration(self) -> None:
-        target = self._selected_model()
-        if target is None:
-            self.generations["calibration"] += 1
-            self.calibration = None
-            self.calibration_received = 0.0
-            self.calibration_error = ""
-            self._render_page()
-            return
-        name = target["id"]
-        if self.calibration and self.calibration.get("model") != name:
-            self.calibration = None
-            self.calibration_received = 0.0
-            self.calibration_error = ""
-        requested = time.monotonic()
-        reply = await self._load("calibration", "GetCalibration", name)
-        current = self._selected_model()
-        if reply is None or current is None or current["id"] != name:
+            self.status_stale = True
+            self.monitoring_error_text = self._error(reply)
             return
         data = reply[1]
-        if self._success(reply) and data["model"] == name:
-            self.calibration = data
-            self.calibration_received = requested
-            self.calibration_error = ""
-        else:
-            self.calibration_received = 0.0
-            self.calibration_error = self._error(reply)
-        self._render_page()
+        snap = data.get("snapshot") if isinstance(data.get("snapshot"), dict) else {}
+        self.snapshot = snap
+        if isinstance(data.get("status"), dict):
+            self.status = data["status"]
+            self.status_received = time.monotonic()
+        self.status_failed = False
+        self.status_stale = bool(snap.get("stale")) or self.status is None
+        self.monitoring_error_text = str(snap.get("error") or "")
 
     async def _refresh_models(self) -> None:
-        if self.locks["models"].locked() or "model" in self.busy or not self._begin("model-refresh", []):
-            return
-        generation = self.generations["models"]
-        try:
-            try:
-                properties = await run.io_bound(self.service.get_properties)
-            except OksaClientError as error:
-                if self.client.is_deleted or generation != self.generations["models"]:
-                    return
-                self.models_revision = None
-                self.models_verified = False
-                self.models_error_text = "Automatic model updates unavailable. " + str(error)
-                return
-            if self.client.is_deleted or generation != self.generations["models"]:
-                return
-            revision = properties.get("ModelsRevision") if isinstance(properties, dict) else None
-            if not isinstance(revision, str) or not revision:
-                self.models_revision = None
-                self.models_verified = False
-                self.models_error_text = "Automatic model updates unavailable: missing model revision."
-                return
-            mutating = bool(self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
-            if (revision != self.models_revision or (not mutating and not self.models_verified)) and await self._load_models():
-                self.models_revision = revision
-        finally:
-            self._end("model-refresh", [])
-            if not self.client.is_deleted:
-                self._render_page()
-
-    async def _load_models(self) -> bool:
-        if self.client.is_deleted:
-            return False
         reply = await self._load("models", "ListModels")
         if reply is None:
-            return False
-        models = reply[1].get("models")
-        if (not self._success(reply) or not isinstance(models, list)
-                or not all(isinstance(model, dict) and isinstance(model.get("id"), str) and model["id"]
-                           and isinstance(model.get("name"), str) and model["name"]
-                           and type(model.get("active")) is bool and type(model.get("selected")) is bool for model in models)
-                or len({model["id"] for model in models}) != len(models)):
-            self.models_verified = False
-            self.models_error_text = "Unable to update models; previous list may be stale. " + self._error(reply)
-            self._render_page()
-            return False
-        self.models_error_text = ""
-        self.models = models
-        self.models_verified = not (self.model_job or self.busy.intersection({"model", "download"}) or self._active_model_jobs())
-        self.models_loaded = True
-        self._render_page()
-        return True
-
-    def _valid_job(self, job) -> bool:
-        return (isinstance(job, dict) and isinstance(job.get("path"), str)
-                and re.fullmatch(r"/io/github/puu_os/Oksa/jobs/[A-Za-z0-9_]+", job["path"]) is not None
-                and isinstance(job.get("operation"), str) and bool(job["operation"])
-                and job.get("state") in ("queued", "running", "succeeded", "failed", "canceled")
-                and self._number(job.get("started_at")) and isinstance(job.get("progress"), str)
-                and (job.get("ended_at") is None or self._number(job["ended_at"]))
-                and all(job.get(key) is None or isinstance(job[key], str) for key in ("repo_id", "model_name"))
-                and (job.get("error") is None or isinstance(job["error"], dict))
-                and (job.get("result") is None or isinstance(job["result"], dict)))
-
-    def _valid_terminal_details(self, job, summary: dict) -> bool:
-        return (self._valid_job(job) and job["state"] in ("succeeded", "failed", "canceled")
-                and all(job.get(key) == summary.get(key) for key in
-                        ("path", "operation", "state", "started_at", "ended_at", "repo_id", "model_name"))
-                and self._number(job.get("ended_at")) and job["ended_at"] >= job["started_at"]
-                and (job.get("result") is None or type(job["result"].get("ok")) is bool)
-                and (isinstance(job.get("result"), dict) if job["state"] == "succeeded" else
-                     isinstance(job.get("error"), dict) and isinstance(job["error"].get("code"), str)
-                     and isinstance(job["error"].get("message"), str)))
-
-    def _job_snapshots(self) -> dict:
-        objects = self.service.get_managed_objects()
-        if not isinstance(objects, dict):
-            raise OksaClientError("Unconfirmed", "Invalid activity discovery response")
-        jobs = []
-        for path, interfaces in objects.items():
-            if not isinstance(interfaces, dict):
-                raise OksaClientError("Unconfirmed", "Invalid activity interfaces")
-            if Contract.JOB not in interfaces:
-                continue
-            try:
-                job = self.service.get_job(path)
-            except OksaClientError as error:
-                if error.code == "NotFound":
-                    continue
-                raise
-            if not self._valid_job(job) or job["path"] != path or job.get("ok") is not True:
-                raise OksaClientError("Unconfirmed", "Invalid activity snapshot")
-            jobs.append(job)
-        return {"ok": True, "jobs": jobs}
-
-    async def _load_pull(self) -> None:
-        if not self._begin("activity-refresh", []):
             return
+        if not self._success(reply):
+            self.models_verified = False
+            self.models_error_text = self._error(reply)
+            return
+        models = reply[1].get("models")
+        if isinstance(models, list):
+            self.models = [m for m in models if isinstance(m, dict)]
+            self.models_loaded = True
+            self.models_verified = True
+            self.models_error_text = ""
+
+    async def _refresh_jobs(self) -> None:
+        reply = await self._load("jobs", self.service.get_managed_objects)
+        if reply is None:
+            return
+        if reply[0] != 200:
+            self.jobs_failed = True
+            self.activity_error_text = self._error(reply)
+            return
+        managed = reply[1]
+        paths = [
+            p for p, ifaces in managed.items()
+            if isinstance(p, str) and isinstance(ifaces, dict) and Contract.JOB in ifaces
+        ]
+        updated: dict[str, dict] = {}
+        for path in paths:
+            snap_reply = await self._call(self.service.get_job, path)
+            if self._success(snap_reply):
+                updated[path] = snap_reply[1]
+        self.jobs = updated
+        self.jobs_loaded = True
+        self.jobs_failed = False
+        self.activity_error_text = ""
+
+    async def _refresh_access(self) -> None:
+        u_reply = await self._load("users", "ListUsers")
+        if u_reply is not None:
+            if self._success(u_reply):
+                self.users = [u for u in (u_reply[1].get("users") or []) if isinstance(u, dict)]
+                self.users_verified = True
+                self.users_error_text = ""
+            else:
+                self.users_verified = False
+                self.users_error_text = self._error(u_reply)
+
+        k_reply = await self._call("ListKeys", "")
+        if self._success(k_reply):
+            self.all_keys = [k for k in (k_reply[1].get("keys") or []) if isinstance(k, dict)]
+            self.all_keys_verified = k_reply[1].get("complete") is not False
+            self.all_keys_sampled_at = str(k_reply[1].get("sampled_at") or "just now")
+            self.protected_users = {str(u) for u in (k_reply[1].get("protected_users") or []) if u}
+            self.all_keys_error_text = ""
+        else:
+            self.all_keys_verified = False
+            self.all_keys_error_text = self._error(k_reply)
+
+    async def _refresh_user_detail(self, user_id: str) -> None:
+        if not user_id:
+            return
+        await self._refresh_access()
+        k_reply = await self._call("ListKeys", user_id)
+        if self._success(k_reply):
+            self.user_detail_id = user_id
+            self.user_detail_keys = [k for k in (k_reply[1].get("keys") or []) if isinstance(k, dict)]
+            self.user_detail_keys_verified = True
+            self.user_detail_error = ""
+            for u in k_reply[1].get("protected_users") or []:
+                if u:
+                    self.protected_users.add(str(u))
+        else:
+            self.user_detail_id = user_id
+            self.user_detail_keys_verified = False
+            self.user_detail_error = self._error(k_reply)
+        self._render_all()
+
+    async def _refresh_calibration(self, model_id: str) -> None:
+        if not model_id:
+            return
+        reply = await self._load("calibration", "GetCalibration", model_id)
+        if reply is None:
+            return
+        self.calibration_model = model_id
+        if self._success(reply):
+            self.calibration_data = reply[1]
+            self.calibration_error = ""
+        else:
+            self.calibration_data = None
+            self.calibration_error = self._error(reply)
+        self._render_all()
+
+    async def _on_connect(self) -> None:
+        self.disconnected = False
+        await self._poll()
+
+    def _on_disconnect(self) -> None:
+        self.disconnected = True
+        self.status_stale = True
+        self._clear_secret()
+        self._render_all()
+
+    async def _poll(self) -> None:
+        if self.client.is_deleted or "poll" in self.busy:
+            return
+        self.busy.add("poll")
         try:
-            requested = time.monotonic()
-            reply = await self._load("pull", self._job_snapshots)
+            await self._refresh_daemon_state()
+            await self._refresh_status()
+            await self._refresh_jobs()
+            if not self.models_loaded or self._current_nav_section in ("models", "serving", "access"):
+                await self._refresh_models()
+            if self._current_nav_section == "access":
+                await self._refresh_access()
+                if self.user_detail_id:
+                    await self._refresh_user_detail(self.user_detail_id)
+            if self._current_nav_section == "models" and self.calibration_model:
+                if any(m.get("id") == self.calibration_model for m in self.models):
+                    await self._refresh_calibration(self.calibration_model)
+        finally:
+            self.busy.discard("poll")
+            self._render_all()
+
+    async def _submit_mutation(
+        self,
+        request_id: str,
+        method: str,
+        target: str,
+        *args,
+    ) -> tuple[bool, dict, str]:
+        """Submit a mutation with durable request_id and handle Unconfirmed outcomes safely."""
+        if not request_id:
+            await self._ensure_namespace()
+            request_id = self._mint_request_id()
+        if not request_id:
+            return False, {}, "Daemon request namespace is unavailable; check service connection before submitting."
+
+        reply = await self._call(method, request_id, *args)
+        await self._refresh_daemon_state()
+        if self._success(reply):
+            if method in Contract.MODEL_MUTATIONS or method == "DeleteUser":
+                await self._refresh_jobs()
+            return True, reply[1], ""
+
+        if self._unconfirmed(reply):
+            err_msg = self._error(reply)
+            rec_reply = await self._call("RecordUnconfirmed", request_id, method, target, err_msg)
+            await self._refresh_daemon_state()
+            await self._refresh_jobs()
+            if self._success(rec_reply):
+                rec = rec_reply[1].get("receipt") or {}
+                if rec.get("job_path"):
+                    return True, {"ok": True, "job": rec["job_path"]}, ""
+                if rec.get("state") == "succeeded" and method != "CreateKey":
+                    return True, {"ok": True, "message": rec.get("summary") or "Completed"}, ""
+                if rec.get("state") == "succeeded" and method == "CreateKey":
+                    return (
+                        False,
+                        rec,
+                        f"Key creation completed on the gateway ({rec.get('summary')}), but the one-time secret response was lost in transit. "
+                        "Inspect the user's keys, revoke that key, and create a replacement.",
+                    )
+            return (
+                False,
+                reply[1],
+                f"Outcome unknown (request {request_id}): {err_msg}. Automatic retry is blocked; unresolved guard recorded.",
+            )
+
+        if reply[1].get("code") == "ExpiredNamespace":
+            await self._refresh_daemon_state()
+            return False, reply[1], "Request namespace rotated; review current state and submit again."
+
+        return False, reply[1], self._error(reply)
+
+    def _route_serving(self) -> None:
+        self._current_nav_section = "serving"
+        self._set_page_title("Serving")
+
+        crumbs = ui.html("", sanitize=False)
+        with ui.element("header").classes("page-heading"):
+            with ui.element("div"):
+                ui.html("<h1>Serving</h1>", sanitize=False)
+                ui.html(
+                    '<p class="subtitle">Desired and observed serving state, host observations and workloads.</p>',
+                    sanitize=False,
+                )
+            with ui.element("div").classes("actions"):
+                btn_refresh = ui.element("button")
+                with btn_refresh:
+                    ui.html("Refresh observations", sanitize=False)
+                btn_refresh.on("click", self._poll)
+                ui.html('<a class="button" href="/models">Choose model →</a>', sanitize=False)
+
+        conflict_banner = ui.html("", sanitize=False)
+
+        with ui.element("section").props('aria-labelledby="runtime-heading"'):
+            ui.html(
+                '<div class="section-head"><h2 id="runtime-heading">Serving observations</h2></div>',
+                sanitize=False,
+            )
+            obs_box = ui.html("", sanitize=False)
+            with ui.element("div").classes("fact-actions actions"):
+                btn_restart = ui.element("button").props('id="btn-serving-restart"')
+                with btn_restart:
+                    ui.html("Review global restart…", sanitize=False)
+                btn_stop = ui.element("button").classes("danger").props('id="btn-serving-stop"')
+                with btn_stop:
+                    ui.html("Review global stop…", sanitize=False)
+            controls_help = ui.html("", sanitize=False)
+
+        with ui.element("section").classes("section").props('aria-labelledby="metrics-heading"'):
+            metrics_head = ui.html("", sanitize=False)
+            metrics_box = ui.html("", sanitize=False)
+
+        with ui.element("section").classes("section").props('aria-labelledby="gpu-heading"'):
+            ui.html(
+                '<div class="section-head"><h2 id="gpu-heading">GPUs</h2>'
+                '<p class="muted">Device readings, not model placement</p></div>',
+                sanitize=False,
+            )
+            gpu_box = ui.html("", sanitize=False)
+
+        with ui.element("section").classes("section").props('aria-labelledby="workload-heading"'):
+            ui.html(
+                '<div class="section-head"><h2 id="workload-heading">Workload pods</h2>'
+                '<p class="muted">Pod state is not proof of end-to-end external inference</p></div>',
+                sanitize=False,
+            )
+            workload_box = ui.html("", sanitize=False)
+
+        foot_box = ui.html("", sanitize=False)
+
+        btn_restart.on("click", lambda: self._open_serving_modal("RestartModel", "btn-serving-restart"))
+        btn_stop.on("click", lambda: self._open_serving_modal("StopServing", "btn-serving-stop"))
+
+        def update() -> None:
+            host = self._host_name()
+            crumbs.content = views.render_breadcrumbs([(host, None), ("Serving", "/serving")])
+
+            running_job = self._running_model_job()
+            unresolved_model = self._unresolved_for_scope("model")
+            prep = (self.status or {}).get("preparation") if isinstance(self.status, dict) else None
+
+            notices = []
+            if running_job is not None:
+                jid = views.job_short_id(running_job.get("path"))
+                op_name = views.operation_label(str(running_job.get("operation") or ""))
+                target = running_job.get("model_name") or "runtime"
+                notices.append(
+                    f'<div class="notice warning">'
+                    f"<strong>{views.esc(op_name)} ({views.esc(jid)}) is running on <code>{views.esc(target)}</code>.</strong> "
+                    f"All model mutations, including global restart and stop, are blocked until it settles. "
+                    f'<a href="/operations/{views.url_part(jid)}">Inspect running job →</a>'
+                    f"</div>"
+                )
+            elif isinstance(prep, dict) and prep.get("state") == "running":
+                p_model = views.esc(prep.get("model") or "")
+                p_msg = views.esc(prep.get("message") or "Calibrating")
+                notices.append(
+                    f'<div class="notice warning">'
+                    f"<strong>Background planner calibration is running for <code>{p_model}</code>.</strong> "
+                    f"Latest status: {p_msg}. This activity is owned by the background planner outside daemon job history."
+                    f"</div>"
+                )
+            conflict_banner.content = "".join(notices)
+
+            obs_box.content = views.render_serving_observations(
+                self.status,
+                self.snapshot,
+                self.models,
+                disconnected=self.disconnected,
+                status_failed=self.status_failed,
+            )
+
+            serving_enabled = isinstance(self.status, dict) and self.status.get("serving_enabled") is True
+            selected_id = str((self.status or {}).get("selected_model_id") or "-")
+            active_id = str((self.status or {}).get("active_model_id") or "-")
+            target_restart = selected_id if selected_id != "-" else active_id
+
+            block_reason = ""
+            if self.disconnected or self.status is None or self.status_stale:
+                block_reason = "Runtime observations are stale or unavailable; refresh before mutating serving state."
+            elif unresolved_model is not None:
+                block_reason = f"Blocked by unresolved model guard {unresolved_model.get('request_id')}."
+            elif running_job is not None:
+                block_reason = f"Blocked while {views.job_short_id(running_job.get('path'))} is running."
+
+            can_restart = not block_reason and target_restart != "-"
+            can_stop = not block_reason and (serving_enabled or active_id != "-" or selected_id != "-")
+            self._set_button_disabled(btn_restart, not can_restart)
+            self._set_button_disabled(btn_stop, not can_stop)
+
+            if block_reason:
+                controls_help.content = f'<p class="help">{views.esc(block_reason)}</p>'
+            elif target_restart == "-" and not can_stop:
+                controls_help.content = '<p class="help">Serving is currently stopped and no model is selected. Choose a model in Models to start serving.</p>'
+            else:
+                controls_help.content = '<p class="help">Both actions affect the shared appliance runtime, not an individual model installation.</p>'
+
+            sampled = self.snapshot.get("sampled_at") or "No sample timestamp"
+            metrics_head.content = (
+                f'<div class="section-head"><h2 id="metrics-heading">Host &amp; request observations</h2>'
+                f'<p class="muted">Sampled · {views.esc(sampled)}</p></div>'
+            )
+            metrics_box.content = views.render_serving_metrics(self.status, self.snapshot, stale=self.status_stale)
+            gpu_box.content = views.render_gpus_table(self.status)
+            workload_box.content = views.render_workloads_table(self.status)
+
+            run_cnt = len(self._running_jobs())
+            foot_box.content = (
+                f'<footer class="page-foot">'
+                f"<span>Sampled: {views.esc(sampled)}</span>"
+                f'<a href="/operations">{run_cnt} running daemon job{"s" if run_cnt != 1 else ""} →</a>'
+                f"</footer>"
+            )
+
+        self._active_updater = update
+        update()
+
+    def _route_models(self, q: str = "", state: str = "", **_kwargs) -> None:
+        self._current_nav_section = "models"
+        self._set_page_title("Models")
+        filter_q = str(q or "")
+        filter_state = str(state or "")
+
+        crumbs = ui.html("", sanitize=False)
+        with ui.element("header").classes("page-heading"):
+            with ui.element("div"):
+                ui.html("<h1>Models</h1>", sanitize=False)
+                ui.html(
+                    '<p class="subtitle">Installed model files, public inference names, provenance and recorded calibration.</p>',
+                    sanitize=False,
+                )
+            with ui.element("div").classes("actions"):
+                btn_refresh = ui.element("button")
+                with btn_refresh:
+                    ui.html("Refresh inventory", sanitize=False)
+                btn_refresh.on("click", self._poll)
+                ui.html('<a class="button primary" href="/models/download">Download model →</a>', sanitize=False)
+
+        notice_box = ui.html("", sanitize=False)
+
+        with ui.element("section").props('aria-labelledby="inventory-heading"'):
+            inv_head = ui.html("", sanitize=False)
+            with ui.element("div").classes("toolbar"):
+                with ui.element("div").classes("toolbar-field"):
+                    ui.html('<label for="models-filter-q">Find a local model</label>', sanitize=False)
+                    inp_q = (
+                        ui.element("input")
+                        .props(
+                            f'id="models-filter-q" type="search" placeholder="Storage ID, public name or repo" value="{views.esc(filter_q)}"'
+                        )
+                    )
+                with ui.element("div").classes("toolbar-field"):
+                    ui.html('<label for="models-filter-state">Serving observation</label>', sanitize=False)
+                    sel_state = ui.element("select").props('id="models-filter-state"')
+                    with sel_state:
+                        for val, label in (
+                            ("", "All installations"),
+                            ("active", "Observed serving"),
+                            ("selected", "Desired / selected"),
+                            ("idle", "Not observed serving"),
+                        ):
+                            selected_attr = " selected" if filter_state == val else ""
+                            ui.html(f'<option value="{views.esc(val)}"{selected_attr}>{views.esc(label)}</option>', sanitize=False)
+                count_box = ui.html("", sanitize=False).classes("count")
+
+            table_box = ui.html("", sanitize=False)
+            ui.html(
+                '<p class="help">Downloaded models are local inventory; serving is one shared runtime. '
+                "Open a model to inspect its calibration profile, provenance, or serving controls.</p>",
+                sanitize=False,
+            )
+
+        partial_box = ui.html("", sanitize=False)
+
+        def sync_url_filter() -> None:
+            params = {}
+            if filter_q.strip():
+                params["q"] = filter_q.strip()
+            if filter_state.strip():
+                params["state"] = filter_state.strip()
+            self._replace_url("/models" + ("?" + urlencode(params) if params else ""))
+
+        def on_q_input(event) -> None:
+            nonlocal filter_q
+            filter_q = str(event.args or "")
+            sync_url_filter()
+            update()
+
+        def on_state_change(event) -> None:
+            nonlocal filter_state
+            filter_state = str(event.args or "")
+            sync_url_filter()
+            update()
+
+        inp_q.on("input", on_q_input, js_handler="(e) => emit(e.target.value)")
+        sel_state.on("change", on_state_change, js_handler="(e) => emit(e.target.value)")
+
+        def update() -> None:
+            crumbs.content = views.render_breadcrumbs([(self._host_name(), None), ("Models", "/models")])
+            running_job = self._running_model_job()
+            if running_job is not None:
+                jid = views.job_short_id(running_job.get("path"))
+                op_name = views.operation_label(str(running_job.get("operation") or ""))
+                notice_box.content = (
+                    f'<div class="notice warning">'
+                    f"<strong>{views.esc(op_name)} ({views.esc(jid)}) is running.</strong> "
+                    f"Model mutation submissions remain disabled until it settles. "
+                    f'<a href="/operations/{views.url_part(jid)}">Inspect {views.esc(jid)} →</a>'
+                    f"</div>"
+                )
+            elif self.models_error_text and self.models_loaded:
+                notice_box.content = (
+                    f'<div class="notice warning">'
+                    f"<strong>Inventory refresh failed; showing last known installations.</strong> "
+                    f"{views.esc(self.models_error_text)}"
+                    f"</div>"
+                )
+            else:
+                notice_box.content = ""
+
+            total_mib = sum(int(m.get("storage_mib") or 0) for m in self.models if isinstance(m, dict))
+            inv_head.content = (
+                f'<div class="section-head"><h2 id="inventory-heading">Local installations</h2>'
+                f'<p class="muted">{len(self.models)} installation{"s" if len(self.models) != 1 else ""} · '
+                f'{views.esc(views.fmt_mib(total_mib))} aggregate size</p></div>'
+            )
+
+            q_fold = filter_q.strip().casefold()
+            filtered_models = []
+            for m in self.models:
+                if q_fold:
+                    hay = " ".join(str(m.get(k) or "") for k in ("id", "name", "repo_id", "revision")).casefold()
+                    if q_fold not in hay:
+                        continue
+                if filter_state == "active" and not m.get("active"):
+                    continue
+                if filter_state == "selected" and not m.get("selected"):
+                    continue
+                if filter_state == "idle" and (m.get("active") or m.get("selected")):
+                    continue
+                filtered_models.append(m)
+
+            count_box.content = f"{len(filtered_models)} of {len(self.models)} shown"
+            table_box.content = views.render_models_table(
+                filtered_models,
+                loaded=self.models_loaded,
+                error_text=self.models_error_text,
+                filtered=bool(q_fold or filter_state),
+            )
+
+            partial_removals = [
+                j for j in self.jobs.values()
+                if isinstance(j, dict)
+                and j.get("operation") == "RemoveModel"
+                and isinstance(j.get("result"), dict)
+                and j["result"].get("deleted") is True
+                and j["result"].get("reconciled") is False
+            ]
+            if partial_removals:
+                pjob = partial_removals[0]
+                pjid = views.job_short_id(pjob.get("path"))
+                pm = views.esc(pjob.get("model_name") or "model")
+                partial_box.content = (
+                    f'<section class="section" aria-labelledby="partial-rem-heading">'
+                    f'<div class="section-head"><h2 id="partial-rem-heading">Partial removal · {pm}</h2>'
+                    f'{views.status_badge("Reconciliation failed", "error")}</div>'
+                    f"<p>Confirmed: <code>{pm}</code> files were deleted. Catalog/workload reconciliation failed. "
+                    f"Saved calibration records are not deleted by removal. Never repeat deletion to repair reconciliation.</p>"
+                    f'<div class="actions"><a class="button" href="/operations/{views.url_part(pjid)}">Inspect operation {views.esc(pjid)} →</a>'
+                    f'<a class="button" href="/serving">Inspect Serving →</a></div></section>'
+                )
+            else:
+                partial_box.content = ""
+
+        self._active_updater = update
+        update()
+
+    def _route_download_search(self, q: str = "") -> None:
+        self._current_nav_section = "models"
+        self._set_page_title("Download model")
+        initial_q = str(q or "").strip()
+
+        crumbs = ui.html(
+            views.render_breadcrumbs([("Models", "/models"), ("Download model", "/models/download")]),
+            sanitize=False,
+        )
+        with ui.element("header").classes("page-heading"):
+            with ui.element("div"):
+                ui.html("<h1>Download model</h1>", sanitize=False)
+                ui.html(
+                    '<p class="subtitle">Specify a Hugging Face repository and revision directly, or search text-generation repositories to review before downloading.</p>',
+                    sanitize=False,
+                )
+            with ui.element("div").classes("actions"):
+                ui.html('<a class="button" href="/models">← Back to Models</a>', sanitize=False)
+
+        # Direct repository entry
+        with ui.element("section").classes("form-width").props('aria-labelledby="direct-source-heading"'):
+            ui.html(
+                '<div class="section-head"><h2 id="direct-source-heading">Direct repository &amp; revision</h2>'
+                '<p class="muted">Step 1 of 2 · Review immutable commit and capacity before submission</p></div>',
+                sanitize=False,
+            )
+            direct_err = ui.html("", sanitize=False)
+            direct_State = {"repo": initial_q if "/" in initial_q else "", "revision": "main", "name": ""}
+            with ui.element("div").classes("form-grid"):
+                with ui.element("div"):
+                    ui.html('<label for="direct-repo-input">Repository ID (org/model)</label>', sanitize=False)
+                    inp_repo = ui.element("input").props(
+                        f'id="direct-repo-input" type="text" placeholder="e.g. Qwen/Qwen2.5-7B-Instruct" value="{views.esc(direct_State["repo"])}"'
+                    )
+                with ui.element("div"):
+                    ui.html('<label for="direct-rev-input">Revision (branch, tag or 40-hex commit)</label>', sanitize=False)
+                    inp_rev = ui.element("input").props('id="direct-rev-input" type="text" value="main"')
+                with ui.element("div"):
+                    ui.html('<label for="direct-name-input">Local storage ID (optional override)</label>', sanitize=False)
+                    inp_name = ui.element("input").props('id="direct-name-input" type="text" placeholder="Derived from repository basename"')
+            with ui.element("div").classes("fact-actions actions"):
+                btn_review_direct = ui.element("button").classes("primary")
+                with btn_review_direct:
+                    ui.html("Review source →", sanitize=False)
+
+        def open_direct_review() -> None:
+            repo_val = direct_State["repo"].strip()
+            rev_val = direct_State["revision"].strip() or "main"
+            name_val = direct_State["name"].strip()
+            if not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,95}/)?[A-Za-z0-9][A-Za-z0-9._-]{0,95}", repo_val):
+                direct_err.content = '<div class="notice error">Enter a valid Hugging Face repository ID (for example <code>org/model-name</code>).</div>'
+                return
+            direct_err.content = ""
+            params = {"repo": repo_val, "revision": rev_val}
+            if name_val:
+                params["name"] = name_val
+            self._navigate("/models/download/review?" + urlencode(params))
+
+        inp_repo.on("input", lambda e: direct_State.__setitem__("repo", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        inp_rev.on("input", lambda e: direct_State.__setitem__("revision", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        inp_name.on("input", lambda e: direct_State.__setitem__("name", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        btn_review_direct.on("click", open_direct_review)
+
+        # Search section
+        with ui.element("section").classes("section").props('aria-labelledby="hf-search-heading"'):
+            ui.html(
+                '<div class="section-head"><h2 id="hf-search-heading">Search Hugging Face repositories</h2>'
+                '<p class="muted">Text-generation pipeline · sorted by downloads</p></div>',
+                sanitize=False,
+            )
+            search_state = {"q": initial_q}
+            with ui.element("div").classes("toolbar"):
+                with ui.element("div").classes("toolbar-field"):
+                    ui.html('<label for="hf-search-input">Search query</label>', sanitize=False)
+                    inp_search = ui.element("input").props(
+                        f'id="hf-search-input" type="search" placeholder="Model family or repository name" value="{views.esc(initial_q)}"'
+                    )
+                btn_search = ui.element("button")
+                with btn_search:
+                    ui.html("Search", sanitize=False)
+            results_box = ui.html("", sanitize=False)
+            ui.html(
+                '<p class="help">Gated or private repositories require a host-configured Hugging Face token and cannot be unlocked from the browser.</p>',
+                sanitize=False,
+            )
+
+        async def run_search(query_str: str) -> None:
+            q_clean = query_str.strip()
+            self.search_query = q_clean
+            self.search_error = ""
+            self.search_done = False
+            results_box.content = '<div class="table-scroll"><div class="empty">Searching Hugging Face…</div></div>'
+            reply = await self._load("search", "SearchModels", q_clean)
             if reply is None:
                 return
-            generation = self.generations["pull"]
-            jobs = reply[1].get("jobs")
-            if not self._success(reply) or not isinstance(jobs, list) or not all(self._valid_job(job) for job in jobs):
-                self.jobs_failed = True
-                self.activity_error_text = "Activity unavailable; previous activity is unverified. " + self._error(reply)
-                self._render_page()
-                return
-            self.jobs_received = requested
-            self.jobs_failed = False
-            self.activity_error_text = ""
-            self.jobs_seen = {job["path"] for job in jobs}
-            missing = set(self.jobs) - self.jobs_seen
-            if self.model_job and self.model_job not in self.jobs_seen:
-                missing.add(self.model_job)
-            for path in missing:
-                old = self.jobs.get(path)
-                if old and old["state"] not in ("queued", "running") and path != self.model_job:
-                    continue
-                recovered = await self._call(self.service.get_job, path, wait=False)
-                if self.client.is_deleted or generation != self.generations["pull"]:
-                    return
-                candidate = recovered[1]
-                if (self._success(recovered) and self._valid_job(candidate) and candidate["path"] == path
-                        and (old is None or all(candidate.get(key) == old.get(key) for key in ("operation", "started_at", "repo_id", "model_name")))
-                        and (path != self.model_job or candidate["operation"] == self.model_operation)):
-                    self.jobs[path] = candidate
-                    self.jobs_seen.add(path)
-                    if self._valid_terminal_details(candidate, candidate):
-                        self.job_details.add(path)
-                elif candidate.get("code") in ("NotFound", "UnknownObject", "UnknownMethod"):
-                    self.jobs.pop(path, None)
-                    self.job_details.discard(path)
-                    if path == self.model_job:
-                        self.model_job = None
-                        self.model_uncertain = True
-                        self.models_verified = False
-                        self.status_failed = True
-                        identity = path.rsplit("/", 1)[-1]
-                        self._warn("model-operation", f"Operation {identity} history expired. Further operations are blocked; review current state before reloading this page.")
-            for job in jobs:
-                path = job["path"]
-                old = self.jobs.get(path)
-                if self._valid_terminal_details(job, job):
-                    self.jobs[path] = job
-                    self.job_details.add(path)
-                elif path not in self.job_details or not self._valid_terminal_details(old, job):
-                    self.job_details.discard(path)
-                    self.jobs[path] = job
-            latest = {}
-            for job in sorted(self.jobs.values(), key=lambda job: job["started_at"]):
-                latest[job["operation"]] = job["path"]
-            self.jobs = {path: job for path, job in self.jobs.items()
-                         if path in latest.values() or path == self.model_job or job["state"] in ("queued", "running")
-                         or (job["operation"] == "DownloadModel" and path in self.jobs_seen)}
-            self.job_details.intersection_update(self.jobs)
-            if self._active_model_jobs():
-                self.models_verified = False
-            self._render_page()
-            for path, job in list(self.jobs.items()):
-                if job["state"] not in ("succeeded", "failed", "canceled") or path in self.job_details:
-                    continue
-                terminal = await self._call(self.service.get_job, path, wait=False)
-                if self.client.is_deleted or generation != self.generations["pull"]:
-                    return
-                if self._success(terminal) and self._valid_terminal_details(terminal[1], job):
-                    self.jobs[path] = terminal[1]
-                    self.job_details.add(path)
-            if self.model_job:
-                job = self.jobs.get(self.model_job)
-                if job is None or self.model_job not in self.jobs_seen:
-                    self.activity_error_text = "Submitted job is unverified or missing. Do not retry the operation."
-                elif job["state"] in ("succeeded", "failed", "canceled"):
-                    if self.model_job in self.job_details and job["operation"] == self.model_operation:
-                        result = job.get("result") or {}
-                        message = str((job.get("error") or {}).get("message") or result.get("warning") or result.get("error") or "")
-                        if self.model_operation == "RemoveModel" and not (result.get("deleted") is True and result.get("reconciled") is True):
-                            message = message or "Deletion was not confirmed; files or serving may be partially changed."
-                        if self._unconfirmed((0, job.get("error") or {})):
-                            self.model_uncertain = True
-                            identity = self.model_job.rsplit("/", 1)[-1]
-                            message += f" Outcome unknown for operation {identity}. Further operations are blocked; review current state before reloading this page."
-                        if job["state"] != "succeeded" or result.get("ok") is not True or message:
-                            self._warn("model-operation", f"{self._operation_title(job)}: {job['state']}. " + message)
-                        self.model_job = None
-                        self.models_verified = False
-                        await self._load_models()
-                        await self._load_monitoring()
-                        if self.client.is_deleted or generation != self.generations["pull"]:
-                            return
-                    else:
-                        self.activity_error_text = "Terminal job details are unverified (summary only). Do not retry."
-            self._render_page()
-        finally:
-            self._end("activity-refresh", [])
-
-    @staticmethod
-    def _operation_title(job: dict) -> str:
-        titles = {"StartModel": ("Start", "Starting"), "RestartModel": ("Restart", "Restarting"),
-                  "StopServing": ("Stop", "Stopping"), "Calibrate": ("Calibration", "Calibrating"),
-                  "DownloadModel": ("Download", "Downloading"), "RemoveModel": ("Delete", "Deleting"),
-                  "DeleteUser": ("User deletion", "Deleting user")}
-        return titles.get(job["operation"], ("Operation", "Working"))[job["state"] == "running"]
-
-    def _activity_rows(self) -> list[dict]:
-        rows = []
-        for job in sorted(self.jobs.values(), key=lambda job: (job["state"] in ("queued", "running"), job["started_at"]), reverse=True):
-            running = job["state"] in ("queued", "running")
-            state = {"queued": "Queued", "running": "Running", "succeeded": "Completed", "failed": "Failed", "canceled": "Canceled"}[job["state"]]
-            result = job.get("result") or {}
-            if job["state"] == "succeeded" and (result.get("ok") is not True or result.get("warning") or result.get("error")):
-                state = "Needs attention"
-            verified = self._jobs_fresh() and job["path"] in self.jobs_seen
-            if not verified:
-                state = "Status unknown"
-            elif not running and job["path"] not in self.job_details:
-                state = "Checking result"
-            end = time.time() if running else job.get("ended_at")
-            rows.append({"id": job["path"], "action": self._operation_title(job), "state": state,
-                         "target": job.get("model_name") or job.get("repo_id") or job["path"].rsplit("/", 1)[-1],
-                         "elapsed": int(max(0, end - job["started_at"])) if end is not None else None})
-        return rows
-
-    def _render_activity(self, rows: list[dict]) -> None:
-        self.pull_error.set_text(self.activity_error_text)
-        self.pull_error.set_visibility(bool(self.activity_error_text))
-        fresh = self._jobs_fresh()
-        self.activity_freshness.set_text("Disconnected" if self.disconnected else "Up to date" if fresh else "Activity unavailable" if self.activity_error_text else "Waiting for activity updates")
-        self.activity_spinner.set_visibility(fresh and any(job["state"] in ("queued", "running") for job in self.jobs.values()))
-        self.activity_table.props["no-data-label"] = "No operations yet" if fresh else "Activity unavailable — checking automatically" if self.activity_error_text else "Loading operations…"
-        selected = {row["id"] for row in self.activity_table.selected}
-        if self.activity_table.rows != rows:
-            self.activity_table.rows = rows
-            self.activity_table.selected = [row for row in rows if row["id"] in selected]
-            self.activity_table.update()
-        self._activity_selection()
-
-    def _activity_selection(self) -> None:
-        selected = self.activity_table.selected
-        job = self.jobs.get(selected[0]["id"]) if selected else None
-        self.activity_details.set_enabled(job is not None)
-        self.activity_cancel.set_enabled(bool(job and job["state"] == "running" and self._jobs_fresh()
-                                             and job["path"] in self.jobs_seen and "cancel" not in self.busy))
-
-    async def _cancel_selected_job(self) -> None:
-        if self.activity_table.selected:
-            await self._cancel_pull(self.activity_table.selected[0]["id"])
-
-    def _show_job(self) -> None:
-        if self.activity_table.selected:
-            self._show_job_details(self.activity_table.selected[0]["id"])
-
-    def _show_job_details(self, path: str) -> None:
-        job = self.jobs.get(path)
-        if job is None:
-            return
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
-            ui.label(self._operation_title(job)).classes("text-lg")
-            target = job.get("repo_id") or job.get("model_name")
-            if target:
-                ui.input("Model", value=str(target)).props("readonly").classes("w-full")
-            if job["state"] in ("queued", "running") and job.get("progress"):
-                ui.textarea("Progress", value=job["progress"]).props("readonly autogrow").classes("w-full")
-            error, result = job.get("error") or {}, job.get("result") or {}
-            message = error.get("message") or result.get("warning") or result.get("error")
-            if message:
-                ui.textarea("Problem", value=str(message)).props("readonly autogrow").classes("w-full")
-            ui.button("Close", on_click=dialog.close).props("outline")
-        dialog.on_value_change(lambda event: dialog.delete() if not event.value else None)
-        dialog.open()
-
-    async def _cancel_pull(self, path: str) -> None:
-        job = self.jobs.get(path)
-        if not self._jobs_fresh() or path not in self.jobs_seen or not job or job["state"] != "running":
-            return
-        if not self._begin("cancel", []):
-            return
-        try:
-            target = job.get("model_name") or job.get("repo_id") or path.rsplit("/", 1)[-1]
-            if not await self._confirm(f"Cancel {self._operation_title(job).lower()} for {target}? Partial changes may remain.", "Cancel operation", dangerous=True):
-                return
-            try:
-                canceled = await run.io_bound(self.service.cancel_job, path)
-                if canceled:
-                    self._warn("cancel", "")
-                if not self.client.is_deleted:
-                    ui.notify("Cancellation requested; checking job state" if canceled else "Cancellation was not confirmed", type="info" if canceled else "warning")
-            except (OksaClientError, OSError, ValueError, TimeoutError) as error:
-                self._warn("cancel", f"Could not confirm cancellation: {error}")
-            await self._load_pull()
-        finally:
-            self._end("cancel", [])
-
-    async def _model_action(self, action: str) -> None:
-        model = self._selected_model() if action != "stop" else None
-        if not self._model_available() or not self.models_verified:
-            return
-        if action != "stop" and (model is None or not isinstance(model.get("id"), str)):
-            return
-        if action in ("start", "restart", "calibrate") and model.get("capabilities") != "ok":
-            return
-        if action == "remove" and model.get("removable") is False:
-            return
-        if action == "restart" and not (model.get("selected") or model.get("active")):
-            return
-        if not self._begin("model", self.model_view.controls):
-            return
-        name = str(model.get("name")) if model else "model serving"
-        if model and model["id"] != name:
-            name += f" ({model['id']})"
-        try:
-            if action != "start":
-                message, label, dangerous = {
-                    "restart": (f"Restart model {name}? Inference will be briefly unavailable.", "Restart model", False),
-                    "stop": ("Stop all model serving? Applications will lose inference access.", "Stop serving", True),
-                    "remove": (f"Delete model {name} and its files? If this model is serving, it will be stopped first.", "Delete model", True),
-                    "calibrate": (f"Calibrate model {name}? Inference may be unavailable during measurement.", "Calibrate model", False),
-                }[action]
-                if not await self._confirm(message, label, dangerous=dangerous):
-                    return
-            if not self._jobs_fresh() or self._active_model_jobs():
-                self._warn("model-operation", "Activity changed. Checking status automatically before another operation.")
-                return
-            current = self._selected_model()
-            if action != "stop" and (current is None or current["id"] != model["id"]):
-                self._warn("model-operation", "Model changed. Review the current model before continuing.")
-                return
-            for key in ("models", "status", "pull", "calibration"):
-                self.generations[key] += 1
-            self.models_verified = False
-            self.status_failed = True
-            self.calibration_received = 0.0
-            self.model_uncertain = True
-            self._render_page()
-            method = {"start": "StartModel", "restart": "RestartModel", "stop": "StopServing", "remove": "RemoveModel",
-                      "calibrate": "Calibrate"}[action]
-            if action == "stop":
-                args = ()
-            elif action == "calibrate":
-                args = (model["id"], False)
-            else:
-                args = (model["id"],)
-            reply = await self._call(method, *args, wait=False)
-            if self.client.is_deleted:
-                return
-            path = reply[1].get("job")
-            if self._success(reply) and isinstance(path, str) and re.fullmatch(r"/io/github/puu_os/Oksa/jobs/[A-Za-z0-9_]+", path):
-                self.model_job = path
-                self.model_operation = method
-                self.model_uncertain = False
-                self._warn("model-operation", "")
-                ui.notify("Operation accepted; following job state")
-            elif self._unconfirmed(reply) or self._success(reply):
-                self._warn("model-operation", f"{action.title()} acceptance was not confirmed. Further operations are blocked; review Activity and current state before reloading this page. " + self._error(reply))
-            else:
-                self.model_uncertain = False
-                self._warn("model-operation", self._error(reply))
-                await self._refresh_model_state()
-                return
-            await self._load_pull()
-        finally:
-            self._end("model", self.model_view.controls)
-            if not self.client.is_deleted:
-                self._render_page()
-
-    def _build_download_dialog(self) -> None:
-        with ui.dialog() as self.download_dialog, ui.card().classes("w-full max-w-3xl"):
-            ui.label("Find models").classes("text-lg font-semibold").props("role=heading aria-level=2")
-            ui.label("Browse downloadable AI models from Hugging Face.").classes("text-sm")
-            with ui.row().classes("w-full items-start gap-2"):
-                self.model_search = ui.input("Search models", placeholder="Model name",
-                                             on_change=self._search_models).props("outlined clearable debounce=500").classes("grow")
-                self.model_search.on("keydown.enter", self._search_models)
-                self.search_button = ui.button("Search models", icon="search", on_click=self._search_models)
-            self.search_message = ui.label("Search by model name.").classes("text-sm")
-            self.search_table = self._table("", {
-                "name": "Model", "author": "Publisher", "downloads": "Downloads", "access": "Access",
-            }, selection="single", row_key="repo_id").props("flat dense wrap-cells")
-            self.search_table.set_visibility(False)
-            self.search_table.on_select(self._select_search_result)
-            self.inspection_text = ui.label("Choose a model to review its download size.").classes("whitespace-pre-line break-words")
-            self.download_error = ui.label("").classes("text-negative")
-            with ui.expansion("Advanced", icon="tune").classes("w-full"):
-                self.repo = ui.input("Model ID", placeholder="publisher/model", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
-                self.download_name = ui.input("Local name (optional)", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
-                self.revision = ui.input("Version or commit", value="main", on_change=self._invalidate_inspection).props("outlined").classes("w-full")
-                self.inspection_revision = ui.label("").classes("text-sm font-mono break-all")
-                self.inspect_button = ui.button("Review model", on_click=self._inspect).props("outline")
-            with ui.row().classes("w-full justify-end gap-2"):
-                self.download_cancel = ui.button("Close", on_click=self.download_dialog.close).props("flat")
-                self.download_button = ui.button("Download model", icon="download", on_click=self._download)
-        self.download_button.disable()
-        self.download_dialog.on_value_change(self._download_dialog_changed)
-
-    def _download_dialog_changed(self) -> None:
-        if not self.download_dialog.value:
-            self.search_generation += 1
-            self._invalidate_inspection()
-
-    async def _open_download(self) -> None:
-        if "download" in self.busy:
-            return
-        self._invalidate_inspection()
-        self.download_error.set_text("")
-        self.download_dialog.open()
-        await self._search_models()
-
-    async def _search_models(self) -> None:
-        if not self.download_dialog.value or "download" in self.busy:
-            return
-        self.search_generation += 1
-        generation = self.search_generation
-        query = str(self.model_search.value or "").strip()
-        self._invalidate_inspection()
-        self.repo.set_value("")
-        self.search_table.selected = []
-        self.search_table.rows = []
-        self.search_table.set_visibility(False)
-        self.search_message.set_text("Searching…")
-        self.download_error.set_text("")
-        async with self.locks["search"]:
-            if self.client.is_deleted or not self.download_dialog.value or generation != self.search_generation:
-                return
-            self.search_button.disable()
-            try:
-                reply = await self._call("SearchModels", query)
-                if (self.client.is_deleted or not self.download_dialog.value or generation != self.search_generation
-                        or query != str(self.model_search.value or "").strip()):
-                    return
-                models = reply[1].get("models")
-                if (not self._success(reply) or not isinstance(models, list)
-                        or not all(isinstance(model, dict) and isinstance(model.get("repo_id"), str)
-                                   and isinstance(model.get("name"), str) and isinstance(model.get("author"), str)
-                                   and self._number(model.get("downloads"), integer=True)
-                                   and type(model.get("gated")) is bool for model in models)):
-                    self.search_message.set_text("Search unavailable. " + self._error(reply))
-                    return
-                self.search_table.rows = [dict(model, access="Approval required" if model["gated"] else "Public") for model in models]
-                self.search_table.update()
-                self.search_table.set_visibility(bool(models))
-                self.search_message.set_text("Select a model to review its download size." if models else "No models found. Try another model name.")
-            finally:
-                if not self.client.is_deleted:
-                    self.search_button.enable()
-
-    async def _select_search_result(self) -> None:
-        if "download" in self.busy:
-            return
-        selected = self.search_table.selected
-        self._invalidate_inspection()
-        if not selected:
-            self.repo.set_value("")
-            return
-        self.repo.set_value(selected[0]["repo_id"])
-        self.revision.set_value("main")
-        await self._inspect()
-
-    def _download_inputs(self) -> tuple[str, str | None, str]:
-        return (str(self.repo.value or "").strip(), str(self.download_name.value or "").strip() or None,
-                str(self.revision.value or "").strip() or "main")
-
-    def _invalidate_inspection(self) -> None:
-        self.inspection_generation += 1
-        self.inspection = None
-        if not self.client.is_deleted:
-            self.download_button.disable()
-            self.inspection_text.set_text("Choose a model to review its download size.")
-            self.inspection_revision.set_text("")
-
-    async def _inspect(self) -> None:
-        if not self.download_dialog.value or "download" in self.busy:
-            return
-        self._invalidate_inspection()
-        generation = self.inspection_generation
-        inputs = self._download_inputs()
-        self.inspection_text.set_text("Reviewing model…")
-        self.download_error.set_text("")
-        async with self.locks["inspect"]:
-            if self.client.is_deleted or not self.download_dialog.value or generation != self.inspection_generation:
-                return
-            self._begin("inspect", [self.inspect_button])
-            try:
-                if not inputs[0]:
-                    self.download_error.set_text("Choose a model from the search results or enter a model ID under Advanced.")
-                    return
-                reply = await self._call("InspectModel", inputs[0], inputs[2])
-                if (self.client.is_deleted or not self.download_dialog.value or generation != self.inspection_generation
-                        or inputs != self._download_inputs()):
-                    return
-                data = reply[1]
-                metadata = data.get("metadata")
-                if (not self._success(reply) or type(data.get("fits")) is not bool or not isinstance(metadata, dict)
-                        or not isinstance(metadata.get("repo_id"), str) or not metadata["repo_id"].strip()
-                        or not isinstance(metadata.get("resolved_revision"), str)
-                        or re.fullmatch(r"[0-9a-fA-F]{40}", metadata["resolved_revision"]) is None):
-                    self.inspection_text.set_text("Model review unavailable.")
-                    self.download_error.set_text("Could not review the model; no download was started. " + self._error(reply))
-                    return
-                self.inspection = {"inputs": inputs, "generation": generation, "fits": data["fits"],
-                                   "repo_id": metadata["repo_id"], "revision": metadata["resolved_revision"], "name": inputs[1]}
-                author, _, name = metadata["repo_id"].rpartition("/")
-                self.inspection_text.set_text(
-                    f"{name or metadata['repo_id']}\nPublisher: {author or 'not specified'}"
-                    + "\nDownload: " + self._storage(metadata.get("storage_mib"))
-                    + "; estimated RAM/VRAM: " + self._storage(metadata.get("estimated_memory_mib"))
-                    + "\n" + str(data.get("reason") or ("Within estimated host capacity" if data["fits"] else "Exceeds estimated host capacity"))
-                    + "\nServing limits are measured after installation.")
-                self.inspection_revision.set_text("Pinned commit: " + metadata["resolved_revision"])
-                self.download_button.enable()
-            finally:
-                self._end("inspect", [self.inspect_button])
-                if not self.client.is_deleted:
-                    self._render_page()
-
-    async def _download(self) -> None:
-        inspection = self.inspection
-        if (not self.download_dialog.value or inspection is None or "inspect" in self.busy
-                or not self._model_available()
-                or inspection["inputs"] != self._download_inputs()
-                or inspection["generation"] != self.inspection_generation):
-            return
-        controls = [self.download_button, self.inspect_button, self.download_cancel, self.repo, self.download_name,
-                    self.revision, self.model_search, self.search_button]
-        if not self._begin("download", controls):
-            return
-        self.download_dialog.props("persistent")
-        try:
-            if inspection["fits"] is False and not await self._confirm(
-                f"Force download of incompatible model {inspection['repo_id']} @ {inspection['revision']}? It may not run on this host.",
-                "Download", dangerous=True,
-            ):
-                return
-            if (not self.download_dialog.value or self.inspection is not inspection
-                    or inspection["generation"] != self.inspection_generation
-                    or inspection["inputs"] != self._download_inputs()):
-                return
-            if not self._jobs_fresh() or self._active_model_jobs():
-                self.download_error.set_text("Activity changed. Checking status automatically before downloading.")
-                return
-            self.download_error.set_text("")
-            for key in ("models", "status", "pull", "calibration"):
-                self.generations[key] += 1
-            self.models_verified = False
-            self.status_failed = True
-            self.model_uncertain = True
-            self._render_page()
-            reply = await self._call("DownloadModel", inspection["repo_id"], inspection["name"] or "",
-                                     inspection["revision"], inspection["fits"] is False, wait=False)
-            if self.client.is_deleted:
-                return
-            path = reply[1].get("job")
-            if self._success(reply) and isinstance(path, str) and re.fullmatch(r"/io/github/puu_os/Oksa/jobs/[A-Za-z0-9_]+", path):
-                self.inspection = None
-                self.model_job = path
-                self.model_operation = "DownloadModel"
-                self.model_uncertain = False
-                self._warn("download", "")
-                self.download_dialog.close()
-                ui.notify("Download accepted; following job state")
-            elif self._unconfirmed(reply) or self._success(reply):
-                self.inspection = None
-                message = "Download acceptance was not confirmed. Further operations are blocked; review Activity and current state before reloading this page. " + self._error(reply)
-                self.download_error.set_text(message)
-                self._warn("download", message)
-            else:
-                self.model_uncertain = False
-                self.download_error.set_text(self._error(reply))
-                await self._refresh_model_state()
-                return
-            await self._load_pull()
-        finally:
-            self._end("download", controls)
-            if not self.client.is_deleted:
-                self.download_dialog.props(remove="persistent")
-                self._render_page()
-
-    def _build_users(self) -> None:
-        self.users_loaded = False
-        self.keys_loaded = False
-        self.users_error_text = ""
-        self.keys_error_text = ""
-        self.user_key_counts: dict[str, int] | None = None
-        with ui.column().classes("w-full flex-1 min-h-0 flex-nowrap") as self.users_list:
-            with ui.row().classes("w-full items-center"):
-                self.create_user_button = ui.button("Create user", on_click=self._open_user)
-                self.delete_users_button = ui.button("DELETE", color="negative", on_click=self._delete_selected_users).props("outline")
-                search = ui.input("Filter", placeholder="User ID or email").props("clearable")
-                self.users_state = ui.badge("Loading").props("outline")
-                with self.users_state:
-                    self.users_state_detail = ui.tooltip("Loading users and API keys")
-            self.users_table = self._table("Users", {"user_id": "User ID", "email": "Email", "enabled": "Enabled API keys"}, selection="multiple", row_key="user_id")
-            self.users_table.classes("flex-1 min-h-0")
-            self.users_table.props('loading no-data-label="Loading users…" no-results-label="No matching users"')
-            self.users_table.on_select(self._users_selection)
-            self.users_table.on("rowClick", lambda event: self._show_user(event.args[1]["user_id"]), args=[[], ["user_id"]])
-            search.bind_value_to(self.users_table, "filter")
-        with ui.column().classes("w-full flex-1 min-h-0 flex-nowrap") as self.user_detail:
-            self.user_title = ui.label("").classes("text-xl font-semibold break-all")
-            with ui.row().classes("items-center"):
-                ui.button("Back to users", on_click=self._show_users).props("outline")
-                self.delete_user_button = ui.button("Delete user", color="negative", on_click=self._delete_user).props("outline")
-                self.create_key_button = ui.button("Create API key", on_click=self._open_key)
-                self.revoke_button = ui.button("Revoke API key", color="negative", on_click=self._revoke_key).props("outline")
-                self.keys_state = ui.badge("Loading").props("outline")
-                with self.keys_state:
-                    self.keys_state_detail = ui.tooltip("Loading API keys")
-            self.keys_table = self._table("API keys", {"name": "Name", "models": "Models", "status": "Status", "expires": "Expires"}, selection="single")
-            self.keys_table.classes("flex-1 min-h-0")
-            self.keys_table.props('loading no-data-label="Loading API keys…"')
-            self.keys_table.on_select(self._users_selection)
-        self.user_controls = [self.create_user_button, self.delete_users_button, self.delete_user_button, self.create_key_button, self.revoke_button]
-        self._render_users(set(), set())
-
-    def _users_selection(self) -> None:
-        idle = "user" not in self.busy
-        self.create_user_button.set_enabled(idle and self.users_verified)
-        self.delete_users_button.set_enabled(idle and self.users_verified and bool(self.users_table.selected))
-        available = idle and self.users_verified and self.owner is not None and any(user["user_id"] == self.owner for user in self.users)
-        self.delete_user_button.set_enabled(available)
-        self.create_key_button.set_enabled(available and self.keys_verified)
-        self.revoke_button.set_enabled(available and self.keys_verified and len(self.keys_table.selected) == 1)
-    @staticmethod
-    def _expiry(value) -> datetime | None:
-        if not isinstance(value, str):
-            return None
-        try:
-            expiry = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return expiry.replace(tzinfo=timezone.utc) if expiry.tzinfo is None else expiry
-
-    def _key_status(self, key: dict) -> str:
-        if key.get("blocked"):
-            return "Blocked"
-        if key.get("expires"):
-            expiry = self._expiry(key["expires"])
-            if expiry is None:
-                return "Expiry unknown"
-            if expiry <= datetime.now(timezone.utc):
-                return "Expired"
-        return "Enabled"
-
-    def _render_users(self, selected_users: set[str], selected_keys: set[str]) -> None:
-        loading = not self.users_loaded or not self.keys_loaded
-        current = self.users_verified and self.keys_verified
-        self.users_state.set_text("Loading" if loading else "Up to date" if current else "Users unavailable" if not self.users_verified else "Keys unavailable")
-        self.users_state.props("color=primary" if loading else "color=positive" if current else "color=warning")
-        self.users_state_detail.set_text(
-            "Loading users and API keys" if loading else
-            "Users and enabled-key counts are current" if current and self.user_key_counts is not None else
-            "Users and API keys are current" if current else
-            "Updates continue automatically. " + (self.users_error_text if not self.users_verified else self.keys_error_text)
-        )
-        self.users_table.props("loading" if not self.users_loaded else "", remove="" if not self.users_loaded else "loading")
-        self.users_table.props['no-data-label'] = "Loading users…" if not self.users_loaded else "No users yet" if self.users_verified else "Users unavailable — reconnecting automatically"
-        self.users_table.rows = [{
-            "user_id": user["user_id"], "email": user.get("user_email") or "—",
-            "enabled": str(self.user_key_counts.get(user["user_id"], 0)) if self.user_key_counts is not None else "Unavailable",
-        } for user in self.users]
-        self.users_table.selected = [row for row in self.users_table.rows if row["user_id"] in selected_users]
-        self.users_table.update()
-        self.user_title.set_text(f"User: {self.owner}" if self.owner is not None else "")
-        self.keys_table.props['title'] = f"API keys for {self.owner}" if self.owner is not None else "API keys"
-        self.keys_table.props("loading" if not self.keys_loaded else "", remove="" if not self.keys_loaded else "loading")
-        self.keys_table.props['no-data-label'] = "Loading API keys…" if not self.keys_loaded else "No API keys yet" if self.keys_verified else "API keys unavailable — reconnecting automatically"
-        self.keys_state.set_text("Loading" if not self.keys_loaded else "Up to date" if self.keys_verified else "Unavailable")
-        self.keys_state.props("color=primary" if not self.keys_loaded else "color=positive" if self.keys_verified else "color=warning")
-        self.keys_state_detail.set_text("Loading API keys" if not self.keys_loaded else "API keys are current" if self.keys_verified else "Updates continue automatically. " + self.keys_error_text)
-        self.keys_table.rows = [{
-            "id": identity, "name": key.get("key_alias") or key.get("key_name") or "Unnamed key",
-            "models": ", ".join(str(model) for model in key["models"]) if isinstance(key.get("models"), list) and key["models"] else "All models (including future models)",
-            "status": self._key_status(key), "expires": str(key.get("expires")) if self._expiry(key.get("expires")) else "Unknown" if key.get("expires") else "Never",
-        } for identity, key in self.keys.items()]
-        if self.owner is not None and self.users_verified and not any(user["user_id"] == self.owner for user in self.users):
-            self.keys_state.set_text("User deleted")
-            self.keys_state.props("color=warning")
-            self.keys_state_detail.set_text("This user no longer exists. Use Back to users to return to Users.")
-            self.keys_table.rows = []
-            self.keys_table.props['no-data-label'] = "User deleted"
-        self.keys_table.selected = [row for row in self.keys_table.rows if self.keys[row["id"]]["token"] in selected_keys]
-        self.keys_table.update()
-        self.users_list.set_visibility(self.owner is None)
-        self.user_detail.set_visibility(self.owner is not None)
-        if self.disconnected:
-            for state, detail, table in ((self.users_state, self.users_state_detail, self.users_table),
-                                         (self.keys_state, self.keys_state_detail, self.keys_table)):
-                state.set_text("Disconnected")
-                state.props("color=warning")
-                detail.set_text("Connection lost. Displayed data is unverified; updates resume automatically.")
-                table.props(remove="loading")
-                table.props['no-data-label'] = "Connection lost — reconnecting automatically"
-                table.update()
-        self._users_selection()
-
-    async def _load_users(self) -> None:
-        self.generations["users"] += 1
-        generation, owner = self.generations["users"], self.owner
-        async with self.locks["users"]:
-            if generation != self.generations["users"] or owner != self.owner or self.client.is_deleted:
-                return
-            users_reply, keys_reply = await asyncio.gather(
-                self._call("ListUsers"),
-                self._call("ListKeys", owner or ""),
-            )
-            if generation != self.generations["users"] or owner != self.owner or self.client.is_deleted:
-                return
-            selected_users = {row["user_id"] for row in self.users_table.selected}
-            selected_keys = {self.keys[row["id"]]["token"] for row in self.keys_table.selected if row["id"] in self.keys}
-            users, keys = users_reply[1].get("users"), keys_reply[1].get("keys")
-            users_ok = self._success(users_reply) and isinstance(users, list) and all(isinstance(user, dict) and isinstance(user.get("user_id"), str) for user in users)
-            keys_ok = self._success(keys_reply) and isinstance(keys, list) and all(isinstance(key, dict) and isinstance(key.get("token"), str) for key in keys)
-            self.users_verified, self.keys_verified = users_ok, keys_ok
-            self.users_loaded = self.keys_loaded = True
-            self.users_error_text = "" if users_ok else self._error(users_reply)
-            self.keys_error_text = "" if keys_ok else self._error(keys_reply)
-            if users_ok:
-                self.users = [{"user_id": user["user_id"], "user_email": user.get("user_email")} for user in users]
-            self.user_key_counts = None
-            if keys_ok and owner is None:
-                self.user_key_counts = {}
-                for key in keys:
-                    if key.get("key_alias") != "open-webui" and self._key_status(key) == "Enabled":
-                        user_id = key.get("user_id")
-                        if isinstance(user_id, str):
-                            self.user_key_counts[user_id] = self.user_key_counts.get(user_id, 0) + 1
-            self.keys = {}
-            if keys_ok and owner is not None:
-                self.keys = {f"{generation}:{index}": {
-                    field: key.get(field) for field in ("token", "user_id", "key_alias", "key_name", "models", "blocked", "expires")
-                } for index, key in enumerate(keys)
-                    if key.get("user_id") == owner and key.get("key_alias") != "open-webui"}
-            self._render_users(selected_users, selected_keys)
-
-    def _set_owner(self, owner: str | None) -> None:
-        selected_users = {row["user_id"] for row in self.users_table.selected}
-        self.owner = owner
-        self.keys_verified = False
-        self.keys_loaded = False
-        self.keys_error_text = ""
-        self.keys = {}
-        self.user_key_counts = None
-        self._render_users(selected_users, set())
-
-    async def _show_user(self, owner: str) -> None:
-        if not isinstance(owner, str) or "user" in self.busy or not any(user["user_id"] == owner for user in self.users):
-            return
-        self._set_owner(owner)
-        await self._load_users()
-
-    async def _show_users(self) -> None:
-        if "user" in self.busy:
-            return
-        self._set_owner(None)
-        await self._load_users()
-    def _build_user_dialog(self) -> None:
-        with ui.dialog() as self.user_dialog, ui.card():
-            ui.label("Create user").classes("text-lg font-semibold").props("role=heading aria-level=2")
-            self.new_user_id = ui.input("User ID")
-            self.new_user_email = ui.input("Email (optional)", validation={
-                "Enter a valid email address": lambda value: not value or re.fullmatch(r"[^@\s]+@[^@\s]+", value) is not None,
-            }).props("type=email")
-            self.new_user_error = ui.label("").classes("text-negative")
-            with ui.row():
-                self.user_cancel = ui.button("Cancel", on_click=self.user_dialog.close).props("outline")
-                self.user_submit = ui.button("Create user", on_click=self._create_user)
-
-    def _open_user(self) -> None:
-        if "user" in self.busy:
-            return
-        self.new_user_id.set_value("")
-        self.new_user_email.set_value("")
-        self.new_user_error.set_text("")
-        self.user_dialog.open()
-
-    async def _create_user(self) -> None:
-        if not self.user_dialog.value:
-            return
-        owner = str(self.new_user_id.value or "").strip()
-        email = str(self.new_user_email.value or "").strip()
-        if not owner:
-            self.new_user_error.set_text("User ID is required.")
-            return
-        if not self.new_user_email.validate():
-            return
-        controls = [*self.user_controls, self.user_submit, self.user_cancel, self.new_user_id, self.new_user_email]
-        if not self._begin("user", controls):
-            return
-        self.new_user_error.set_text("")
-        self._warn("user-create:" + owner, "")
-        self.user_dialog.props("persistent")
-        self.generations["users"] += 1
-        try:
-            reply = await self._call("CreateUser", owner, email or "", -1.0)
-            if self.client.is_deleted:
-                return
-            if self._success(reply) and isinstance(reply[1].get("result"), dict) and reply[1]["result"].get("user_id") == owner:
-                self.user_dialog.close()
-                ui.notify("User created")
-                self._set_owner(None)
-            elif self._unconfirmed(reply) or self._success(reply):
-                message = f"Creation of user {owner} was not confirmed. Check the user list before retrying. " + self._error(reply)
-                self.new_user_error.set_text(message)
-                self._warn("user-create:" + owner, message)
-            else:
-                self.new_user_error.set_text(self._error(reply))
-            await self._load_users()
-        finally:
-            self._end("user", controls)
-            if not self.client.is_deleted:
-                self.user_dialog.props(remove="persistent")
-
-    async def _delete_user(self) -> None:
-        if self.owner is not None:
-            await self._delete_users([self.owner])
-
-    async def _delete_selected_users(self) -> None:
-        owners = [row.get("user_id") for row in self.users_table.selected]
-        if not owners or any(not isinstance(owner, str) or not any(user["user_id"] == owner for user in self.users) for owner in owners):
-            return
-        await self._delete_users(list(dict.fromkeys(owners)))
-
-    async def _delete_users(self, owners: list[str]) -> None:
-        if not self._begin("user", self.user_controls):
-            return
-        try:
-            message = (f"Permanently delete user {owners[0]} and ALL their API keys? This cannot be undone." if len(owners) == 1 else
-                       f"Permanently delete {len(owners)} users and ALL their API keys? This cannot be undone.\n\n" + "\n".join(owners))
-            if not await self._confirm(message, "Delete user" if len(owners) == 1 else "Delete users", dangerous=True):
-                return
-            if not self.client.has_socket_connection or not all(any(user["user_id"] == owner for user in self.users) for owner in owners):
-                return
-            if self.user_detail.visible and owners != [self.owner]:
-                return
-            self.generations["users"] += 1
-            deleted = 0
-            for index, owner in enumerate(owners):
-                if self.client.is_deleted:
-                    return
-                if not self.client.has_socket_connection:
-                    self._warn("user-delete:" + owner,
-                               f"Browser disconnected during user deletion. Batch stopped: {deleted} deletion(s) confirmed; {len(owners) - index} user(s) not attempted.")
-                    break
-                reply = await self._call("DeleteUser", owner)
-                if self.client.is_deleted:
-                    return
-                data = reply[1]
-                if self._success(reply) and data.get("outcome") == "deleted" and data.get("deleted") is True:
-                    deleted += 1
-                    self._warn("user-delete:" + owner, "")
-                    if self.owner == owner:
-                        self._set_owner(None)
-                else:
-                    if data.get("outcome") in ("invalid", "protected", "not_started") or (
-                        not self._success(reply) and not self._unconfirmed(reply) and not data.get("outcome")
-                    ):
-                        message = self._error(reply)
-                    else:
-                        revoked = data.get("confirmed_revoked_keys")
-                        summary = f" {revoked} key(s) confirmed revoked." if type(revoked) is int and revoked >= 0 else ""
-                        message = str(data.get("warning") or
-                                      f"Deletion of user {owner} was not confirmed; keys may have been revoked.{summary} Check the user list before retrying. " + self._error(reply))
-                    if len(owners) > 1:
-                        message = f"{owner}: {message} Batch stopped: {deleted} deletion(s) confirmed; {len(owners) - index - 1} user(s) not attempted."
-                    self._warn("user-delete:" + owner, message)
-                    break
-            if deleted:
-                ui.notify("User and their API keys deleted" if len(owners) == 1 else f"{deleted} users and their API keys deleted")
-            await self._load_users()
-        finally:
-            self._end("user", self.user_controls)
-
-    def _build_key_dialog(self) -> None:
-        self.key_owner: str | None = None
-        self.key_form_generation = 0
-        self.key_model_names: set[str] = set()
-        with ui.dialog() as self.key_dialog, ui.card().classes("w-full"):
-            ui.label("Create key").classes("text-lg font-semibold").props("role=heading aria-level=2")
-            self.key_owner_label = ui.label("")
-            self.key_alias = ui.input("Name").classes("w-full")
-            self.key_access = ui.select({"all": "All models (including future models)", "selected": "Selected models only"}, value="all", label="Allowed models")
-            self.key_models = ui.select([], multiple=True, label="Installed models", with_input=True).classes("w-full")
-            self.key_models.bind_visibility_from(self.key_access, "value", backward=lambda value: value == "selected")
-            self.key_duration = ui.input("Expires in (optional, e.g. 30d, 24h)")
-            self.key_model_error = ui.label("")
-            self.key_error = ui.label("").classes("text-negative")
-            with ui.row():
-                self.key_cancel = ui.button("Cancel", on_click=self.key_dialog.close).props("outline")
-                self.key_submit = ui.button("Create API key", on_click=self._create_key)
-        self.key_dialog.on_value_change(lambda event: self._close_key_form() if not event.value else None)
-
-    def _close_key_form(self) -> None:
-        self.key_form_generation += 1
-        self.key_owner = None
-        self.key_model_names = set()
-
-    async def _open_key(self) -> None:
-        if self.owner is None or "user" in self.busy or self.key_dialog.value:
-            return
-        self.key_form_generation += 1
-        generation = self.key_form_generation
-        self.key_owner = self.owner
-        self.key_owner_label.set_text("User: " + self.key_owner)
-        self.key_alias.set_value("")
-        self.key_duration.set_value("")
-        self.key_access.set_value("all")
-        self.key_models.set_options([], value=[])
-        self.key_model_names = set()
-        self.key_model_error.set_text("Loading installed models…")
-        self.key_error.set_text("")
-        self.key_dialog.open()
-        async with self.locks["models"]:
-            if self.client.is_deleted or generation != self.key_form_generation or not self.key_dialog.value:
-                return
-            reply = await self._call("ListModels")
-        if self.client.is_deleted or generation != self.key_form_generation or not self.key_dialog.value:
-            return
-        models = reply[1].get("models")
-        if self._success(reply) and isinstance(models, list) and all(isinstance(model, dict) and isinstance(model.get("name"), str) and model["name"] for model in models):
-            self.key_model_names = {model["name"] for model in models}
-            self.key_models.set_options(sorted(self.key_model_names), value=[])
-            self.key_model_error.set_text("" if models else "No models installed. All models also permits future models.")
-        else:
-            self.key_model_error.set_text("Models unavailable. Close and reopen to retry, or explicitly choose All models.")
-
-    async def _create_key(self) -> None:
-        owner = self.key_owner
-        if not self.key_dialog.value or owner is None or owner != self.owner:
-            self.key_error.set_text("Open the intended user again before creating a key.")
-            return
-        alias = str(self.key_alias.value or "").strip()
-        if not alias or alias == "open-webui":
-            self.key_error.set_text("Enter a key name; open-webui is reserved for the service key.")
-            return
-        selected = self.key_access.value == "selected"
-        models = list(self.key_models.value or []) if selected else []
-        if self.key_access.value not in ("all", "selected") or (selected and (not models or not all(model in self.key_model_names for model in models))):
-            self.key_error.set_text("Select at least one installed model, or explicitly choose All models.")
-            return
-        controls = [*self.user_controls, self.key_submit, self.key_cancel, self.key_alias, self.key_access, self.key_models, self.key_duration]
-        if not self._begin("user", controls):
-            return
-        self.key_error.set_text("")
-        self._warn("key-create:" + owner, "")
-        self.key_dialog.props("persistent")
-        self.generations["users"] += 1
-        generation = self.key_form_generation
-        try:
-            reply = await self._call("CreateKey", owner, alias, models, -1.0,
-                                     str(self.key_duration.value or "").strip())
-            data = reply[1].get("key")
-            if self.client.is_deleted:
-                if isinstance(data, dict):
-                    data.pop("key", None)
-                return
-            if (self._success(reply) and isinstance(data, dict) and isinstance(data.get("key"), str) and data["key"].strip()
-                    and ("user_id" not in data or data["user_id"] == owner)):
-                connected = self.client.has_socket_connection and generation == self.key_form_generation
-                self.key_dialog.close()
-                self._clear_secret()
-                if connected:
-                    self.secret = data.pop("key")
-                    self.secret_input.set_value(self.secret)
-                    self.secret_owner_label.set_text(f"User: {owner}; key: {alias}")
-                    self.secret_dialog.open()
-                else:
-                    data.pop("key", None)
-                    self._warn("key-create:" + owner, f"Key created for {owner}, but the browser disconnected before the secret could be shown. Revoke it and create a replacement if needed.")
-            else:
-                if isinstance(data, dict):
-                    data.pop("key", None)
-                if self._unconfirmed(reply) or self._success(reply):
-                    message = f"Key creation for {owner} was not confirmed. Check the key list before retrying. " + self._error(reply)
-                    self.key_error.set_text(message)
-                    self._warn("key-create:" + owner, message)
-                else:
-                    self.key_error.set_text(self._error(reply))
-            await self._load_users()
-        finally:
-            self._end("user", controls)
-            if not self.client.is_deleted:
-                self.key_dialog.props(remove="persistent")
-
-    async def _revoke_key(self) -> None:
-        owner = self.owner
-        selected = self.keys_table.selected
-        key = self.keys.get(selected[0].get("id")) if selected else None
-        if owner is None or key is None or key.get("user_id") != owner or key.get("key_alias") == "open-webui" or not key.get("token"):
-            return
-        if not self._begin("user", self.user_controls):
-            return
-        try:
-            if not await self._confirm(f"Revoke {key.get('key_alias') or key.get('key_name') or 'Unnamed key'} for {owner}? Applications using it will lose access.", "Revoke", dangerous=True):
-                return
-            self._warn("key-revoke:" + owner, "")
-            self.generations["users"] += 1
-            reply = await self._call("RevokeKey", key["token"])
-            if self.client.is_deleted:
-                return
+            self.search_done = True
             if self._success(reply):
-                ui.notify("API key revocation confirmed")
-            elif self._unconfirmed(reply):
-                self._warn("key-revoke:" + owner, f"Key revocation for {owner} was not confirmed; the key may still grant access. Check the key list before retrying. " + self._error(reply))
+                self.search_results = [m for m in (reply[1].get("models") or []) if isinstance(m, dict)]
+                self.search_error = ""
             else:
-                self._warn("key-revoke:" + owner, f"Could not revoke key for {owner}: " + self._error(reply))
-            await self._load_users()
-        finally:
-            self._end("user", self.user_controls)
+                self.search_results = []
+                self.search_error = self._error(reply)
+            update()
 
-    def _build_secret_dialog(self) -> None:
-        with ui.dialog() as self.secret_dialog, ui.card().classes("w-full"):
-            ui.label("Key created").classes("text-lg font-semibold").props("role=heading aria-level=2")
-            ui.label("Shown once.").classes("text-warning")
-            self.secret_owner_label = ui.label("")
-            self.secret_input = ui.input("API key").props("readonly autocomplete=off").classes("w-full")
-            with ui.row():
-                ui.button("Copy", on_click=self._copy_secret)
-                ui.button("Done", on_click=self.secret_dialog.close).props("outline")
-        self.secret_dialog.on_value_change(lambda event: self._clear_secret() if not event.value else None)
+        def trigger_search() -> None:
+            q_val = search_state["q"].strip()
+            target = "/models/download" + ("?" + urlencode({"q": q_val}) if q_val else "")
+            if q_val != initial_q:
+                self._navigate(target)
+            else:
+                asyncio.create_task(run_search(q_val))
 
-    def _copy_secret(self) -> None:
-        if self.secret and self.secret_dialog.value:
-            ui.clipboard.write(self.secret)
-            ui.notify("Copy requested")
+        inp_search.on("input", lambda e: search_state.__setitem__("q", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        inp_search.on("keydown.enter", lambda _: trigger_search())
+        btn_search.on("click", trigger_search)
+
+        def update() -> None:
+            crumbs.content = views.render_breadcrumbs([("Models", "/models"), ("Download model", "/models/download")])
+            results_box.content = views.render_search_results_table(
+                self.search_results,
+                searched=self.search_done,
+                error_text=self.search_error,
+            )
+
+        self._active_updater = update
+        update()
+        if initial_q and (not self.search_done or self.search_query != initial_q):
+            asyncio.create_task(run_search(initial_q))
+
+    def _route_download_review(self, repo: str = "", revision: str = "main", name: str = "") -> None:
+        self._current_nav_section = "models"
+        repo_clean = str(repo or "").strip()
+        rev_clean = str(revision or "main").strip() or "main"
+        name_clean = str(name or "").strip()
+        effective_name = ms.normalize_storage_id(repo_clean, name_clean or None) if repo_clean else ""
+        self._set_page_title(f"Review {effective_name or repo_clean or 'download'}")
+
+        crumbs = ui.html(
+            views.render_breadcrumbs([
+                ("Models", "/models"),
+                ("Download model", "/models/download"),
+                (f"Review {effective_name or repo_clean or 'source'}", None),
+            ]),
+            sanitize=False,
+        )
+        with ui.element("header").classes("page-heading"):
+            with ui.element("div"):
+                ui.html("<h1>Review model download</h1>", sanitize=False)
+                ui.html(
+                    '<p class="subtitle">Step 2 of 2 · Verify resolved immutable commit, local storage target, replacement impact and capacity before submitting.</p>',
+                    sanitize=False,
+                )
+            with ui.element("div").classes("actions"):
+                back_href = "/models/download" + ("?" + urlencode({"q": repo_clean}) if repo_clean else "")
+                ui.html(f'<a class="button" href="{views.esc(back_href)}">← Change source</a>', sanitize=False)
+
+        if not repo_clean:
+            ui.html(
+                '<div class="notice error"><strong>No repository specified for review.</strong> '
+                '<a href="/models/download">Return to Download model →</a></div>',
+                sanitize=False,
+            )
+            self._active_updater = None
+            return
+
+        status_notice = ui.html("", sanitize=False)
+        facts_box = ui.html("", sanitize=False)
+
+        # Target local ID override & consent controls
+        consent_state = {"replace": False, "force": False, "custom_name": name_clean}
+        with ui.element("section").classes("section form-width").props('aria-labelledby="review-submit-heading"'):
+            ui.html('<div class="section-head"><h2 id="review-submit-heading">Target &amp; submission controls</h2></div>', sanitize=False)
+            with ui.element("div").classes("field"):
+                ui.html('<label for="review-local-id">Local storage ID</label>', sanitize=False)
+                with ui.element("div").classes("actions"):
+                    inp_local_id = ui.element("input").props(
+                        f'id="review-local-id" type="text" value="{views.esc(name_clean or effective_name)}" style="max-width: 320px;"'
+                    )
+                    btn_apply_id = ui.element("button")
+                    with btn_apply_id:
+                        ui.html("Re-evaluate local ID", sanitize=False)
+                ui.html(
+                    '<p class="help">Changing the local storage ID re-runs collision and replacement checks before submission.</p>',
+                    sanitize=False,
+                )
+
+            replace_row = ui.element("label").classes("option")
+            with replace_row:
+                chk_replace = ui.element("input").props('type="checkbox" id="chk-replace-existing"')
+                replace_text = ui.html("", sanitize=False)
+
+            force_row = ui.element("label").classes("option")
+            with force_row:
+                chk_force = ui.element("input").props('type="checkbox" id="chk-force-capacity"')
+                force_text = ui.html(
+                    "<div><strong>Override host RAM capacity estimate (--force)</strong>"
+                    "<small>Proceed even though estimated model memory exceeds total host RAM (for multi-node QSFP clustering).</small></div>",
+                    sanitize=False,
+                )
+
+            submit_err = ui.html("", sanitize=False)
+            with ui.element("div").classes("form-footer"):
+                btn_submit = ui.element("button").classes("primary").props('id="btn-submit-download"')
+                with btn_submit:
+                    ui.html("Start download", sanitize=False)
+                ui.html('<a class="button" href="/models">Cancel</a>', sanitize=False)
+                submit_help = ui.html("", sanitize=False).classes("help")
+
+        def on_change_local_id() -> None:
+            new_id = ms.normalize_storage_id(repo_clean, consent_state["custom_name"] or None)
+            params = {"repo": repo_clean, "revision": rev_clean}
+            if new_id:
+                params["name"] = new_id
+            self._navigate("/models/download/review?" + urlencode(params))
+
+        inp_local_id.on("input", lambda e: (consent_state.__setitem__("custom_name", str(e.args or "")), update()), js_handler="(e) => emit(e.target.value)")
+        btn_apply_id.on("click", on_change_local_id)
+        chk_replace.on("change", lambda e: (consent_state.__setitem__("replace", bool(e.args)), update()), js_handler="(e) => emit(Boolean(e.target.checked))")
+        chk_force.on("change", lambda e: (consent_state.__setitem__("force", bool(e.args)), update()), js_handler="(e) => emit(Boolean(e.target.checked))")
+
+        async def load_inspection() -> None:
+            self.inspect_loading = True
+            self.inspect_error = ""
+            self.inspection = None
+            update()
+            await self._ensure_namespace()
+            await self._refresh_models()
+            reply = await self._load("inspect", "InspectModel", repo_clean, rev_clean)
+            if reply is None:
+                return
+            self.inspect_loading = False
+            if self._success(reply):
+                self.inspect_key = (repo_clean, rev_clean)
+                self.inspection = reply[1]
+                self.inspect_error = ""
+                self._review_request_id = self._mint_request_id()
+            else:
+                self.inspection = None
+                self.inspect_error = self._error(reply)
+            update()
+
+        async def submit_download() -> None:
+            if not isinstance(self.inspection, dict) or not isinstance(self.inspection.get("metadata"), dict):
+                return
+            meta = self.inspection["metadata"]
+            resolved_commit = str(meta.get("resolved_revision") or "")
+            existing = next((m for m in self.models if m.get("id") == effective_name), None)
+            exp_repo = str(existing.get("repo_id") or "") if existing else ""
+            if exp_repo == "-":
+                exp_repo = ""
+            exp_rev = str(existing.get("revision") or "") if existing else ""
+
+            self._set_button_disabled(btn_submit, True)
+            submit_err.content = ""
+            ok, res, err_msg = await self._submit_mutation(
+                self._review_request_id,
+                "DownloadModel",
+                effective_name,
+                repo_clean,
+                effective_name,
+                resolved_commit,
+                bool(consent_state["force"]),
+                existing is not None and bool(consent_state["replace"]),
+                exp_repo,
+                exp_rev,
+            )
+            if ok and res.get("job"):
+                jid = views.job_short_id(res["job"])
+                self._navigate(f"/operations/{views.url_part(jid)}")
+                return
+            if reply_code := res.get("code"):
+                if reply_code == "StateChanged":
+                    await self._refresh_models()
+                    self._review_request_id = self._mint_request_id()
+            submit_err.content = f'<div class="notice error" role="alert"><strong>Download submission not accepted:</strong> {views.esc(err_msg)}</div>'
+            update()
+
+        btn_submit.on("click", submit_download)
+
+        def update() -> None:
+            existing = next((m for m in self.models if m.get("id") == effective_name), None)
+            running_job = self._running_model_job()
+            unresolved_model = self._unresolved_for_scope("model")
+
+            if self.inspect_loading:
+                status_notice.content = '<div class="notice">Inspecting remote repository and resolving immutable commit…</div>'
+                facts_box.content = ""
+                replace_row.set_visibility(False)
+                force_row.set_visibility(False)
+                self._set_button_disabled(btn_submit, True)
+                submit_help.content = "Waiting for repository metadata…"
+                return
+
+            if self.inspect_error:
+                status_notice.content = (
+                    f'<div class="notice error" role="alert"><strong>Repository inspection failed.</strong> '
+                    f"{views.esc(self.inspect_error)}</div>"
+                )
+                facts_box.content = ""
+                replace_row.set_visibility(False)
+                force_row.set_visibility(False)
+                self._set_button_disabled(btn_submit, True)
+                submit_help.content = "Source metadata is required before download submission."
+                return
+
+            status_notice.content = ""
+            facts_box.content = views.render_download_review_facts(self.inspection, effective_name, existing)
+
+            meta = (self.inspection or {}).get("metadata") or {}
+            fits = (self.inspection or {}).get("fits") is True
+            gated = meta.get("gated") is True
+
+            if existing is not None and existing.get("provenance") != "unknown":
+                replace_row.set_visibility(True)
+                ex_repo = views.esc(existing.get("repo_id") or "-")
+                ex_rev = views.esc((existing.get("revision") or "")[:12] or "unknown")
+                replace_text.content = (
+                    f"<div><strong>Replace existing installation at <code>{views.esc(effective_name)}</code></strong>"
+                    f"<small>Overwrites {ex_repo} @ {ex_rev}. Different revisions replace this local ID; OKSA is not a multi-version manager.</small></div>"
+                )
+            else:
+                replace_row.set_visibility(False)
+
+            force_row.set_visibility(not fits)
+
+            pending_name = ms.normalize_storage_id(repo_clean, consent_state["custom_name"] or None)
+            block_reason = ""
+            if pending_name != effective_name:
+                block_reason = "Local storage ID was edited; click Re-evaluate local ID before starting download."
+            elif not self.models_verified:
+                block_reason = "Local model inventory must be verified before download submission."
+            elif unresolved_model is not None:
+                block_reason = f"Blocked by unresolved model guard {unresolved_model.get('request_id')}."
+            elif running_job is not None:
+                block_reason = f"Blocked while {views.job_short_id(running_job.get('path'))} is running."
+            elif gated:
+                block_reason = "Gated repositories require a host-configured token and cannot be downloaded from the browser."
+            elif existing is not None and existing.get("provenance") == "unknown":
+                block_reason = f"Existing installation {effective_name} has unknown provenance; choose a different local storage ID or inspect storage."
+            elif existing is not None and not consent_state["replace"]:
+                block_reason = f"Confirm replacement of existing installation {effective_name} to continue."
+            elif not fits and not consent_state["force"]:
+                block_reason = "Confirm host RAM capacity override (--force) to continue."
+
+            self._set_button_disabled(btn_submit, bool(block_reason))
+            submit_help.content = views.esc(block_reason or f"Pins commit {str(meta.get('resolved_revision') or '')[:12]} into /var/lib/vllm/models/{effective_name}.")
+
+        self._active_updater = update
+        asyncio.create_task(load_inspection())
+
+    def _route_model_detail(self, storage_id: str = "") -> None:
+        self._current_nav_section = "models"
+        model_id = str(storage_id or "").strip()
+        self._set_page_title(f"{model_id} · Models")
+        self._cal_force = False
+
+        crumbs = ui.html("", sanitize=False)
+        header_box = ui.element("header").classes("page-heading")
+        with header_box:
+            title_box = ui.html("", sanitize=False)
+            with ui.element("div").classes("actions"):
+                btn_refresh = ui.element("button")
+                with btn_refresh:
+                    ui.html("Refresh model", sanitize=False)
+                btn_serve = ui.element("button").classes("primary").props('id="btn-model-serve"')
+                with btn_serve:
+                    ui.html("Serve this model…", sanitize=False)
+                btn_restart = ui.element("button").props('id="btn-model-restart"')
+                with btn_restart:
+                    ui.html("Restart model…", sanitize=False)
+                ui.html('<a class="button" href="/models">← All models</a>', sanitize=False)
+
+        missing_box = ui.html("", sanitize=False)
+        detail_container = ui.element("div")
+        with detail_container:
+            conflict_box = ui.html("", sanitize=False)
+            with ui.element("section").props('aria-labelledby="model-identity-heading"'):
+                ui.html('<div class="section-head"><h2 id="model-identity-heading">Model identity &amp; local storage</h2></div>', sanitize=False)
+                identity_facts = ui.html("", sanitize=False)
+                action_reason = ui.html("", sanitize=False).classes("help")
+
+            with ui.element("section").classes("section").props('id="calibration" aria-labelledby="model-cal-heading"'):
+                ui.html(
+                    '<div class="section-head"><h2 id="model-cal-heading">Calibration</h2>'
+                    '<p class="muted">Model-owned hardware/runtime capability profile</p></div>',
+                    sanitize=False,
+                )
+                cal_summary = ui.html("", sanitize=False)
+                with ui.element("div").classes("form-width"):
+                    with ui.element("fieldset"):
+                        ui.html("<legend>Review calibration measurement</legend>", sanitize=False)
+                        with ui.element("label").classes("option"):
+                            rad_reuse = ui.element("input").props('type="radio" name="cal-mode" value="reuse" checked')
+                            ui.html(
+                                "<div><strong>Calibrate; reuse matching results if possible</strong>"
+                                "<small>Uses a matching recorded profile for the current hardware/runtime fingerprint if one exists; "
+                                "otherwise initiates GPU measurement (up to a 4-hour search budget plus setup/cleanup, interrupting shared inference).</small></div>",
+                                sanitize=False,
+                            )
+                        with ui.element("label").classes("option"):
+                            rad_force = ui.element("input").props('type="radio" name="cal-mode" value="force"')
+                            ui.html(
+                                "<div><strong>Measure again (force=True)</strong>"
+                                "<small>Forces fresh GPU benchmark measurement even when a matching profile exists. "
+                                "Shared inference stops during measurement (up to a 4-hour search budget plus setup/cleanup).</small></div>",
+                                sanitize=False,
+                            )
+                    cal_err = ui.html("", sanitize=False)
+                    with ui.element("div").classes("actions"):
+                        btn_calibrate = ui.element("button").props('id="btn-model-calibrate"')
+                        with btn_calibrate:
+                            ui.html("Start calibration", sanitize=False)
+                        cal_help = ui.html("", sanitize=False).classes("help")
+
+            with ui.element("section").classes("section").props('aria-labelledby="model-ops-heading"'):
+                ui.html('<div class="section-head"><h2 id="model-ops-heading">Related operations</h2></div>', sanitize=False)
+                related_ops_box = ui.html("", sanitize=False)
+
+            with ui.element("section").classes("section").props('aria-labelledby="model-danger-heading"'):
+                ui.html('<div class="section-head"><h2 id="model-danger-heading">Danger zone · Remove installation</h2></div>', sanitize=False)
+                ui.html(
+                    "<p class=\"small muted\">Deletes local model files and catalog registration. "
+                    "If this model is active, serving is stopped before deletion. Saved calibration records are preserved.</p>",
+                    sanitize=False,
+                )
+                with ui.element("div").classes("actions"):
+                    btn_delete = ui.element("button").classes("danger").props('id="btn-model-delete"')
+                    with btn_delete:
+                        ui.html("Delete model installation…", sanitize=False)
+                    delete_help = ui.html("", sanitize=False).classes("help")
+
+        rad_reuse.on("change", lambda _: setattr(self, "_cal_force", False))
+        rad_force.on("change", lambda _: setattr(self, "_cal_force", True))
+
+        async def refresh_this() -> None:
+            await self._ensure_namespace()
+            await self._refresh_models()
+            await self._refresh_status()
+            await self._refresh_jobs()
+            if any(m.get("id") == model_id for m in self.models):
+                await self._refresh_calibration(model_id)
+            self._cal_request_id = self._mint_request_id()
+            update()
+
+        async def submit_calibration() -> None:
+            self._set_button_disabled(btn_calibrate, True)
+            cal_err.content = ""
+            sel_id = str((self.status or {}).get("selected_model_id") or "-")
+            act_id = str((self.status or {}).get("active_model_id") or "-")
+            ok, res, err_msg = await self._submit_mutation(
+                self._cal_request_id,
+                "Calibrate",
+                model_id,
+                model_id,
+                bool(self._cal_force),
+                sel_id,
+                act_id,
+            )
+            if ok and res.get("job"):
+                jid = views.job_short_id(res["job"])
+                self._navigate(f"/operations/{views.url_part(jid)}")
+                return
+            self._cal_request_id = self._mint_request_id()
+            cal_err.content = f'<div class="notice error" role="alert"><strong>Calibration not started:</strong> {views.esc(err_msg)}</div>'
+            update()
+
+        btn_refresh.on("click", refresh_this)
+        btn_serve.on("click", lambda: self._open_serving_modal("StartModel", "btn-model-serve", model_id=model_id))
+        btn_restart.on("click", lambda: self._open_serving_modal("RestartModel", "btn-model-restart", model_id=model_id))
+        btn_delete.on("click", lambda: self._open_serving_modal("RemoveModel", "btn-model-delete", model_id=model_id))
+        btn_calibrate.on("click", submit_calibration)
+
+        def update() -> None:
+            crumbs.content = views.render_breadcrumbs([("Models", "/models"), (model_id, f"/models/{views.url_part(model_id)}")])
+            valid_id = bool(re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", model_id))
+            model = next((m for m in self.models if m.get("id") == model_id), None) if valid_id else None
+            if model is None:
+                detail_container.set_visibility(False)
+                self._set_button_disabled(btn_serve, True)
+                self._set_button_disabled(btn_restart, True)
+                title_box.content = f"<h1>{views.esc(model_id or 'Unknown model')}</h1><p class=\"subtitle\">Model detail</p>"
+                if valid_id and not self.models_loaded:
+                    missing_box.content = '<div class="notice">Loading local model inventory…</div>'
+                else:
+                    rem_job = next(
+                        (j for j in self.jobs.values() if isinstance(j, dict) and j.get("model_name") == model_id),
+                        None,
+                    )
+                    op_link = ""
+                    if rem_job:
+                        rjid = views.job_short_id(rem_job.get("path"))
+                        op_link = f' <a href="/operations/{views.url_part(rjid)}">Inspect operation {views.esc(rjid)} →</a>'
+                    missing_box.content = (
+                        f'<div class="notice error" role="alert">'
+                        f"<p><strong>Model <code>{views.esc(model_id)}</code> is not installed.</strong> "
+                        f"It may have been removed or never downloaded.{op_link}</p>"
+                        f'<p><a class="button" href="/models">← Return to Models inventory</a></p>'
+                        f"</div>"
+                    )
+                return
+
+            missing_box.content = ""
+            detail_container.set_visibility(True)
+            pub = str(model.get("name") or model_id)
+            title_box.content = (
+                f"<h1>{views.esc(model_id)}</h1>"
+                f'<p class="subtitle">Public inference name <code>{views.esc(pub)}</code> · local installation details and calibration.</p>'
+            )
+
+            running_job = self._running_model_job()
+            unresolved_model = self._unresolved_for_scope("model")
+            if running_job is not None:
+                jid = views.job_short_id(running_job.get("path"))
+                op_name = views.operation_label(str(running_job.get("operation") or ""))
+                conflict_box.content = (
+                    f'<div class="notice warning">'
+                    f"<strong>{views.esc(op_name)} ({views.esc(jid)}) is running.</strong> "
+                    f"Model mutations are blocked until it finishes. "
+                    f'<a href="/operations/{views.url_part(jid)}">Inspect {views.esc(jid)} →</a></div>'
+                )
+            else:
+                conflict_box.content = ""
+
+            identity_facts.content = views.render_model_detail_facts(model)
+
+            block_reason = ""
+            if self.disconnected or not self.models_verified or self.status is None or self.status_stale:
+                block_reason = "Runtime and inventory observations must be fresh before mutating model state."
+            elif unresolved_model is not None:
+                block_reason = f"Blocked by unresolved model guard {unresolved_model.get('request_id')}."
+            elif running_job is not None:
+                block_reason = f"Blocked while {views.job_short_id(running_job.get('path'))} is running."
+
+            capable = model.get("capabilities") == "ok"
+            can_serve = not block_reason and capable
+            can_restart = not block_reason and capable and (model.get("active") is True or model.get("selected") is True)
+            can_cal = not block_reason
+            can_del = not block_reason
+
+            self._set_button_disabled(btn_serve, not can_serve)
+            self._set_button_disabled(btn_restart, not can_restart)
+            self._set_button_disabled(btn_calibrate, not can_cal)
+            self._set_button_disabled(btn_delete, not can_del)
+
+            if block_reason:
+                action_reason.content = views.esc(block_reason)
+            elif not capable:
+                action_reason.content = "This model exceeds detected host capabilities and cannot be started."
+            else:
+                action_reason.content = "Serving this model updates the shared appliance runtime selection."
+
+            cal_data = self.calibration_data if self.calibration_model == model_id else None
+            cal_err_txt = self.calibration_error if self.calibration_model == model_id else ""
+            cal_summary.content = views.render_calibration_summary(cal_data, error_text=cal_err_txt)
+            cal_help.content = views.esc(block_reason or "4-hour search budget maximum; not an ETA.")
+            delete_help.content = views.esc(block_reason or f"Removes /var/lib/vllm/models/{model_id}.")
+
+            rel_jobs = sorted(
+                (j for j in self.jobs.values() if isinstance(j, dict) and j.get("model_name") == model_id),
+                key=lambda item: float(item.get("started_at") or 0.0),
+                reverse=True,
+            )
+            related_ops_box.content = views.render_operations_table(
+                rel_jobs, loaded=self.jobs_loaded, error_text=self.activity_error_text, filtered=True
+            )
+
+        self._active_updater = update
+        update()
+        asyncio.create_task(refresh_this())
+
+    def _route_access(self, q: str = "", key_q: str = "", **_kwargs) -> None:
+        self._current_nav_section = "access"
+        self._set_page_title("API access")
+        user_q = str(q or "")
+        lookup_q = str(key_q or "")
+
+        crumbs = ui.html("", sanitize=False)
+        with ui.element("header").classes("page-heading"):
+            with ui.element("div"):
+                ui.html("<h1>API access</h1>", sanitize=False)
+                ui.html(
+                    '<p class="subtitle">Inference consumers and API keys. API users are LiteLLM consumers, not appliance administrators or Linux accounts.</p>',
+                    sanitize=False,
+                )
+            with ui.element("div").classes("actions"):
+                btn_refresh = ui.element("button")
+                with btn_refresh:
+                    ui.html("Refresh access", sanitize=False)
+                btn_create_user = ui.element("button").classes("primary").props('id="btn-open-create-user"')
+                with btn_create_user:
+                    ui.html("Create API user…", sanitize=False)
+
+        auth_notice = ui.html("", sanitize=False)
+
+        # Cross-owner key lookup
+        with ui.element("section").props('aria-labelledby="key-lookup-heading"'):
+            lookup_head = ui.html("", sanitize=False)
+            with ui.element("div").classes("toolbar"):
+                with ui.element("div").classes("toolbar-field").props('style="min-width: 280px;"'):
+                    ui.html('<label for="access-key-lookup">Find key metadata across users</label>', sanitize=False)
+                    inp_lookup = ui.element("input").props(
+                        f'id="access-key-lookup" type="search" aria-label="Find key metadata across users" '
+                        f'placeholder="Key alias, displayed prefix (sk-...abcd), key ID or owner" value="{views.esc(lookup_q)}"'
+                    )
+                ui.html(
+                    '<span class="count">Metadata index only · never enter a complete secret key</span>',
+                    sanitize=False,
+                )
+            lookup_table = ui.html("", sanitize=False)
+
+        # Users list
+        with ui.element("section").classes("section").props('aria-labelledby="users-heading"'):
+            users_head = ui.html("", sanitize=False)
+            with ui.element("div").classes("toolbar"):
+                with ui.element("div").classes("toolbar-field"):
+                    ui.html('<label for="access-user-filter">Find API user</label>', sanitize=False)
+                    inp_user = ui.element("input").props(
+                        f'id="access-user-filter" type="search" placeholder="User ID or email" value="{views.esc(user_q)}"'
+                    )
+                user_count = ui.html("", sanitize=False).classes("count")
+            users_table = ui.html("", sanitize=False)
+
+        def sync_access_url() -> None:
+            params = {}
+            if user_q.strip():
+                params["q"] = user_q.strip()
+            kq = lookup_q.strip()
+            if kq and not (kq.startswith("sk-") and len(kq) >= 20 and "..." not in kq):
+                params["key_q"] = kq
+            self._replace_url("/access" + ("?" + urlencode(params) if params else ""))
+
+        def on_lookup_input(event) -> None:
+            nonlocal lookup_q
+            lookup_q = str(event.args or "")
+            sync_access_url()
+            update()
+
+        def on_user_input(event) -> None:
+            nonlocal user_q
+            user_q = str(event.args or "")
+            sync_access_url()
+            update()
+        inp_lookup.on("input", on_lookup_input, js_handler="(e) => emit(e.target.value)")
+        inp_user.on("input", on_user_input, js_handler="(e) => emit(e.target.value)")
+        btn_refresh.on("click", self._poll)
+        btn_create_user.on("click", lambda: self._open_create_user_modal("btn-open-create-user"))
+
+        def update() -> None:
+            crumbs.content = views.render_breadcrumbs([(self._host_name(), None), ("API access", "/access")])
+            auth = str((self.status or {}).get("auth_enforcement") or "unknown")
+            if auth == "enforced":
+                auth_notice.content = (
+                    '<div class="notice">'
+                    "<strong>Gateway authentication enforced.</strong> Anonymous <code>/v1/models</code> probe was rejected. "
+                    "Key revocation confirms database removal, not immediate in-memory cache eviction."
+                    "</div>"
+                )
+            elif auth == "keyless":
+                auth_notice.content = (
+                    '<div class="notice warning">'
+                    "<strong>Keyless inference is currently enabled.</strong> Anonymous requests to the gateway are accepted until "
+                    "<code>litellm-master-key</code> is encrypted and <code>puu-k3s-addons.service</code> is restarted. "
+                    "Revoking a key will not block anonymous requests while keyless mode is active."
+                    "</div>"
+                )
+            else:
+                auth_notice.content = (
+                    '<div class="notice warning">'
+                    "<strong>Authentication enforcement not verified.</strong> Gateway readiness does not prove that anonymous inference is denied."
+                    "</div>"
+                )
+
+            unresolved_user = self._unresolved_for_scope("user")
+            can_create = not self.disconnected and self.users_verified and unresolved_user is None
+            self._set_button_disabled(btn_create_user, not can_create)
+
+            cov = (
+                f"Complete index · {len(self.all_keys)} keys sampled at {self.all_keys_sampled_at}"
+                if self.all_keys_verified
+                else "Incomplete / unverified index — absence of a match is not proof of absence"
+            )
+            lookup_head.content = (
+                f'<div class="section-head"><h2 id="key-lookup-heading">Cross-owner key lookup</h2>'
+                f'<p class="muted">{views.esc(cov)}</p></div>'
+            )
+            lookup_table.content = views.render_key_lookup_table(
+                self.all_keys,
+                lookup_q,
+                verified=self.all_keys_verified,
+                sampled_at=self.all_keys_sampled_at,
+                error_text=self.all_keys_error_text,
+            )
+
+            users_head.content = (
+                f'<div class="section-head"><h2 id="users-heading">API users</h2>'
+                f'<p class="muted">{len(self.users)} consumer account{"s" if len(self.users) != 1 else ""}</p></div>'
+            )
+            uq_fold = user_q.strip().casefold()
+            filtered_users = [
+                u for u in self.users
+                if not uq_fold or uq_fold in f"{u.get('user_id', '')} {u.get('user_email', '')}".casefold()
+            ]
+            user_count.content = f"{len(filtered_users)} of {len(self.users)} shown"
+            users_table.content = views.render_users_table(
+                filtered_users,
+                self.all_keys,
+                self.protected_users,
+                users_verified=self.users_verified,
+                keys_verified=self.all_keys_verified,
+                error_text=self.users_error_text,
+                filtered=bool(uq_fold),
+            )
+
+        self._active_updater = update
+        update()
+        asyncio.create_task(self._refresh_access())
+
+    def _route_user_detail(self, id: str = "") -> None:
+        self._current_nav_section = "access"
+        user_id = str(id or "").strip()
+        self.user_detail_id = user_id
+        self._set_page_title(f"{user_id or 'User'} · API access")
+
+        crumbs = ui.html("", sanitize=False)
+        with ui.element("header").classes("page-heading"):
+            title_box = ui.html("", sanitize=False)
+            with ui.element("div").classes("actions"):
+                btn_refresh = ui.element("button")
+                with btn_refresh:
+                    ui.html("Refresh user", sanitize=False)
+                btn_create_key = ui.element("button").classes("primary").props('id="btn-open-create-key"')
+                with btn_create_key:
+                    ui.html("Create API key…", sanitize=False)
+                ui.html('<a class="button" href="/access">← All API users</a>', sanitize=False)
+
+        missing_box = ui.html("", sanitize=False)
+        detail_container = ui.element("div")
+        with detail_container:
+            with ui.element("section").props('aria-labelledby="user-identity-heading"'):
+                ui.html('<div class="section-head"><h2 id="user-identity-heading">Consumer identity &amp; handoff context</h2></div>', sanitize=False)
+                user_facts = ui.html("", sanitize=False)
+
+            with ui.element("section").classes("section").props('aria-labelledby="user-keys-heading"'):
+                keys_head = ui.html("", sanitize=False)
+                keys_notice = ui.html("", sanitize=False)
+                with ui.element("div").classes("table-scroll").props('tabindex="0" role="region" aria-label="User API keys"'):
+                    with ui.element("table"):
+                        ui.html(
+                            "<thead><tr>"
+                            '<th scope="col">Key alias</th><th scope="col">Key ID</th>'
+                            '<th scope="col">Displayed prefix</th><th scope="col">Model scope</th>'
+                            '<th scope="col">Expires</th><th scope="col">Created</th><th scope="col">Action</th>'
+                            "</tr></thead>",
+                            sanitize=False,
+                        )
+                        keys_tbody = ui.element("tbody")
+
+            with ui.element("section").classes("section").props('aria-labelledby="user-danger-heading"'):
+                ui.html('<div class="section-head"><h2 id="user-danger-heading">Danger zone · Delete API user</h2></div>', sanitize=False)
+                with ui.element("div").classes("actions"):
+                    btn_delete_user = ui.element("button").classes("danger").props('id="btn-delete-user"')
+                    with btn_delete_user:
+                        ui.html("Delete user and revoke keys…", sanitize=False)
+                    delete_user_help = ui.html("", sanitize=False).classes("help")
+
+        keys_sig: list = [None]
+
+        btn_refresh.on("click", lambda: asyncio.create_task(self._refresh_user_detail(user_id)))
+        btn_create_key.on("click", lambda: self._open_create_key_modal(user_id, "btn-open-create-key"))
+        btn_delete_user.on("click", lambda: self._open_delete_user_modal(user_id, "btn-delete-user"))
+
+        def update() -> None:
+            crumbs.content = views.render_breadcrumbs([
+                ("API access", "/access"),
+                (user_id or "User", f"/access/user?id={views.url_part(user_id)}"),
+            ])
+            user_obj = next((u for u in self.users if u.get("user_id") == user_id), None)
+            if not user_id or (self.users_verified and user_obj is None):
+                detail_container.set_visibility(False)
+                self._set_button_disabled(btn_create_key, True)
+                title_box.content = f"<h1>{views.esc(user_id or 'Unknown user')}</h1><p class=\"subtitle\">API consumer detail</p>"
+                del_job = next(
+                    (j for j in self.jobs.values() if isinstance(j, dict) and j.get("user_id") == user_id),
+                    None,
+                )
+                job_link = ""
+                if del_job:
+                    djid = views.job_short_id(del_job.get("path"))
+                    job_link = f' <a href="/operations/{views.url_part(djid)}">Inspect deletion job {views.esc(djid)} →</a>'
+                missing_box.content = (
+                    f'<div class="notice error" role="alert">'
+                    f"<p><strong>API user <code>{views.esc(user_id or 'unspecified')}</code> was not found.</strong>{job_link}</p>"
+                    f'<p><a class="button" href="/access">← Return to API access</a></p></div>'
+                )
+                return
+
+            missing_box.content = ""
+            detail_container.set_visibility(True)
+            email = str((user_obj or {}).get("user_email") or "Not set")
+            owns_service = user_id in self.protected_users
+            title_box.content = (
+                f"<h1>{views.esc(user_id)}</h1>"
+                f'<p class="subtitle">LiteLLM inference consumer · not an appliance or OS login.</p>'
+            )
+
+            active_pub = str((self.status or {}).get("active_model") or "None active")
+            user_facts.content = views.render_facts([
+                ("User ID", f"<code>{views.esc(user_id)}</code>"),
+                ("Email", views.esc(email)),
+                ("Privilege scope", "Inference API consumer only (no OKSA admin or host privileges)"),
+                (
+                    "Protected service key",
+                    views.status_badge("Owns Open WebUI service key (blocks user deletion)", "warning")
+                    if owns_service
+                    else "None",
+                ),
+                ("API base URL", f"<code>{views.esc(self._api_base_url())}</code>"),
+                ("Observed public inference model", f"<code>{views.esc(active_pub)}</code>"),
+            ])
+
+            unresolved_user = self._unresolved_for_scope("user")
+            block_reason = ""
+            if self.disconnected or not self.users_verified or not self.user_detail_keys_verified:
+                block_reason = "User and key records must be verified before mutating keys or deleting this user."
+            elif unresolved_user is not None:
+                block_reason = f"Blocked by unresolved user/key guard {unresolved_user.get('request_id')}."
+
+            self._set_button_disabled(btn_create_key, bool(block_reason))
+            can_del_user = not block_reason and not owns_service
+            self._set_button_disabled(btn_delete_user, not can_del_user)
+            if owns_service:
+                delete_user_help.content = "Protected: this user owns the Open WebUI service key and cannot be deleted."
+            else:
+                delete_user_help.content = views.esc(
+                    block_reason or f"Revokes all {len(self.user_detail_keys)} key(s) owned by {user_id}, then deletes the user record."
+                )
+
+            keys_head.content = (
+                f'<div class="section-head"><h2 id="user-keys-heading">API keys owned by {views.esc(user_id)}</h2>'
+                f'<p class="muted">{len(self.user_detail_keys)} editable key{"s" if len(self.user_detail_keys) != 1 else ""}</p></div>'
+            )
+            if self.user_detail_error:
+                keys_notice.content = f'<div class="notice error">Could not verify keys for {views.esc(user_id)}: {views.esc(self.user_detail_error)}</div>'
+            else:
+                keys_notice.content = ""
+
+            new_sig = (self.user_detail_keys_verified, bool(block_reason), json.dumps(self.user_detail_keys, sort_keys=True))
+            if keys_sig[0] != new_sig:
+                keys_sig[0] = new_sig
+                keys_tbody.clear()
+                with keys_tbody:
+                    if not self.user_detail_keys_verified:
+                        ui.html('<tr><td colspan="7" class="muted">Loading user keys…</td></tr>', sanitize=False)
+                    elif not self.user_detail_keys:
+                        ui.html('<tr><td colspan="7" class="muted">No editable API keys exist for this user.</td></tr>', sanitize=False)
+                    else:
+                        for k in self.user_detail_keys:
+                            kid = str(k.get("key_id") or "")
+                            alias = str(k.get("key_alias") or "Unnamed key")
+                            prefix = str(k.get("key_prefix") or "—")
+                            models_list = k.get("models") if isinstance(k.get("models"), list) else []
+                            scope_txt = ", ".join(str(m) for m in models_list) if models_list else "All models (including future)"
+                            exp_txt = str(k.get("expires") or "No expiration")
+                            created_txt = str(k.get("created_at") or "—")
+                            btn_id = f"btn-revoke-{kid}"
+                            with ui.element("tr"):
+                                ui.html(
+                                    f"<td><strong>{views.esc(alias)}</strong></td>"
+                                    f'<td class="mono">{views.esc(kid)}</td>'
+                                    f'<td class="mono">{views.esc(prefix)}</td>'
+                                    f"<td>{views.esc(scope_txt)}</td>"
+                                    f"<td>{views.esc(exp_txt)}</td>"
+                                    f"<td>{views.esc(created_txt)}</td>",
+                                    sanitize=False,
+                                )
+                                with ui.element("td"):
+                                    r_btn = ui.element("button").classes("danger").props(f'id="{views.esc(btn_id)}"')
+                                    with r_btn:
+                                        ui.html("Revoke…", sanitize=False)
+                                    self._set_button_disabled(r_btn, bool(block_reason))
+                                    r_btn.on("click", lambda _, item=dict(k), bid=btn_id: self._open_revoke_key_modal(item, bid))
+
+        self._active_updater = update
+        update()
+        asyncio.create_task(self._refresh_user_detail(user_id))
+
+    def _route_operations(self, state: str = "", kind: str = "", **_kwargs) -> None:
+        self._current_nav_section = "operations"
+        self._set_page_title("Operations")
+        filter_state = str(state or "")
+        filter_kind = str(kind or "")
+
+        crumbs = ui.html("", sanitize=False)
+        with ui.element("header").classes("page-heading"):
+            with ui.element("div"):
+                ui.html("<h1>Operations</h1>", sanitize=False)
+                ui.html(
+                    '<p class="subtitle">Daemon-tracked jobs, including model downloads, serving changes, calibration and user deletion.</p>',
+                    sanitize=False,
+                )
+            with ui.element("div").classes("actions"):
+                btn_refresh = ui.element("button")
+                with btn_refresh:
+                    ui.html("Refresh operations", sanitize=False)
+                btn_refresh.on("click", self._poll)
+
+        ui.html(
+            '<div class="notice">'
+            "<strong>Scope &amp; retention:</strong> Only the latest 64 daemon jobs are retained; this is not an unlimited security audit log. "
+            "Downloads appear here as operations rather than in a separate panel. Synchronous user/key writes are not daemon jobs."
+            "</div>",
+            sanitize=False,
+        )
+
+        with ui.element("section").props('aria-labelledby="ops-list-heading"'):
+            ops_head = ui.html("", sanitize=False)
+            with ui.element("div").classes("toolbar"):
+                with ui.element("div").classes("toolbar-field"):
+                    ui.html('<label for="ops-filter-state">State</label>', sanitize=False)
+                    sel_state = ui.element("select").props('id="ops-filter-state"')
+                    with sel_state:
+                        for val, label in (
+                            ("", "All states"),
+                            ("running", "Running"),
+                            ("succeeded", "Succeeded"),
+                            ("failed", "Failed"),
+                            ("canceled", "Canceled"),
+                        ):
+                            sel_attr = " selected" if filter_state == val else ""
+                            ui.html(f'<option value="{views.esc(val)}"{sel_attr}>{views.esc(label)}</option>', sanitize=False)
+                with ui.element("div").classes("toolbar-field"):
+                    ui.html('<label for="ops-filter-kind">Operation kind</label>', sanitize=False)
+                    sel_kind = ui.element("select").props('id="ops-filter-kind"')
+                    with sel_kind:
+                        for val, label in (
+                            ("", "All kinds"),
+                            ("DownloadModel", "Downloads"),
+                            ("serving", "Serving (Start / Restart / Stop)"),
+                            ("Calibrate", "Calibration"),
+                            ("RemoveModel", "Model removal"),
+                            ("DeleteUser", "User deletion"),
+                        ):
+                            sel_attr = " selected" if filter_kind == val else ""
+                            ui.html(f'<option value="{views.esc(val)}"{sel_attr}>{views.esc(label)}</option>', sanitize=False)
+                count_box = ui.html("", sanitize=False).classes("count")
+            table_box = ui.html("", sanitize=False)
+
+        def apply_ops_filter(new_state: str, new_kind: str) -> None:
+            nonlocal filter_state, filter_kind
+            filter_state = new_state
+            filter_kind = new_kind
+            params = {}
+            if filter_state:
+                params["state"] = filter_state
+            if filter_kind:
+                params["kind"] = filter_kind
+            self._replace_url("/operations" + ("?" + urlencode(params) if params else ""))
+            update()
+
+        sel_state.on("change", lambda e: apply_ops_filter(str(e.args or ""), filter_kind), js_handler="(e) => emit(e.target.value)")
+        sel_kind.on("change", lambda e: apply_ops_filter(filter_state, str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+
+        def update() -> None:
+            crumbs.content = views.render_breadcrumbs([(self._host_name(), None), ("Operations", "/operations")])
+            ordered = sorted(
+                (j for j in self.jobs.values() if isinstance(j, dict)),
+                key=lambda item: float(item.get("started_at") or 0.0),
+                reverse=True,
+            )
+            filtered = []
+            for j in ordered:
+                if filter_state and j.get("state") != filter_state:
+                    continue
+                op = str(j.get("operation") or "")
+                if filter_kind == "serving" and op not in ("StartModel", "RestartModel", "StopServing"):
+                    continue
+                if filter_kind and filter_kind != "serving" and op != filter_kind:
+                    continue
+                filtered.append(j)
+
+            run_cnt = len(self._running_jobs())
+            ops_head.content = (
+                f'<div class="section-head"><h2 id="ops-list-heading">Retained daemon jobs</h2>'
+                f'<p class="muted">{run_cnt} running · {len(ordered)} retained</p></div>'
+            )
+            count_box.content = f"{len(filtered)} of {len(ordered)} shown"
+            table_box.content = views.render_operations_table(
+                filtered,
+                loaded=self.jobs_loaded,
+                error_text=self.activity_error_text,
+                filtered=bool(filter_state or filter_kind),
+            )
+
+        self._active_updater = update
+        update()
+
+    def _route_operation_detail(self, job_id: str = "") -> None:
+        self._current_nav_section = "operations"
+        short_id = str(job_id or "").strip().removeprefix("op-")
+        full_path = f"{Contract.PATH}/jobs/{short_id}"
+        self._set_page_title(f"Operation {short_id}")
+
+        crumbs = ui.html("", sanitize=False)
+        with ui.element("header").classes("page-heading"):
+            title_box = ui.html("", sanitize=False)
+            with ui.element("div").classes("actions"):
+                btn_refresh = ui.element("button")
+                with btn_refresh:
+                    ui.html("Refresh operation", sanitize=False)
+                btn_cancel = ui.element("button").classes("danger").props('id="btn-cancel-job"')
+                with btn_cancel:
+                    ui.html("Request cancellation…", sanitize=False)
+                ui.html('<a class="button" href="/operations">← All operations</a>', sanitize=False)
+
+        missing_box = ui.html("", sanitize=False)
+        detail_container = ui.element("div")
+        with detail_container:
+            with ui.element("section").props('aria-labelledby="op-identity-heading"'):
+                ui.html('<div class="section-head"><h2 id="op-identity-heading">Operation identity</h2></div>', sanitize=False)
+                facts_box = ui.html("", sanitize=False)
+            with ui.element("section").classes("section").props('aria-labelledby="op-status-heading"'):
+                ui.html('<div class="section-head"><h2 id="op-status-heading">Latest reported status</h2></div>', sanitize=False)
+                status_box = ui.html("", sanitize=False)
+            with ui.element("section").classes("section").props('aria-labelledby="op-outcome-heading"'):
+                ui.html('<div class="section-head"><h2 id="op-outcome-heading">Outcome &amp; safe next step</h2></div>', sanitize=False)
+                outcome_box = ui.html("", sanitize=False)
+
+        btn_refresh.on("click", self._poll)
+        btn_cancel.on("click", lambda: self._open_cancel_job_modal(full_path, "btn-cancel-job"))
+
+        def update() -> None:
+            crumbs.content = views.render_breadcrumbs([("Operations", "/operations"), (short_id, f"/operations/{views.url_part(short_id)}")])
+            valid_jid = bool(re.fullmatch(r"[0-9a-f]{32}", short_id))
+            job = self.jobs.get(full_path) if valid_jid else None
+            if job is None:
+                detail_container.set_visibility(False)
+                btn_cancel.set_visibility(False)
+                title_box.content = f"<h1>Operation {views.esc(short_id or 'unknown')}</h1><p class=\"subtitle\">Daemon job detail</p>"
+                if valid_jid and not self.jobs_loaded:
+                    missing_box.content = '<div class="notice">Loading daemon operations…</div>'
+                else:
+                    missing_box.content = (
+                        f'<div class="notice error" role="alert">'
+                        f"<p><strong>Operation <code>{views.esc(short_id)}</code> is not in retained daemon history.</strong> "
+                        "Only the latest 64 jobs are retained; a pruned job does not mean its effects were undone.</p>"
+                        f'<p><a class="button" href="/operations">← Return to Operations</a></p></div>'
+                    )
+                return
+
+            missing_box.content = ""
+            detail_container.set_visibility(True)
+            op_label = views.operation_label(str(job.get("operation") or ""))
+            target = job.get("model_name") or job.get("user_id") or ""
+            heading = f"{op_label} · {target}" if target else op_label
+            title_box.content = (
+                f"<h1>{views.esc(heading)}</h1>"
+                f'<p class="subtitle">Accepted work remains owned by the daemon when you navigate away.</p>'
+            )
+            is_running = job.get("state") == "running"
+            btn_cancel.set_visibility(is_running)
+            self._set_button_disabled(btn_cancel, not is_running or self.disconnected)
+
+            f_html, s_html, o_html = views.render_operation_detail(job)
+            facts_box.content = f_html
+            status_box.content = s_html
+            outcome_box.content = o_html
+
+        self._active_updater = update
+        update()
+
+    @staticmethod
+    def _set_button_disabled(button, disabled: bool) -> None:
+        if disabled:
+            button.props("disabled")
+        else:
+            button.props(remove="disabled")
+
+    def _open_dialog(self, dialog_id: str) -> None:
+        self.client.run_javascript(
+            f"const d = document.getElementById({json.dumps(dialog_id)}); if (d && !d.open) d.showModal();"
+        )
+
+    def _close_dialog(self, dialog_id: str, opener_id: str = "") -> None:
+        self.client.run_javascript(
+            f"const d = document.getElementById({json.dumps(dialog_id)}); if (d && d.open) d.close();"
+            f"if ({json.dumps(opener_id)}) document.getElementById({json.dumps(opener_id)})?.focus();"
+        )
 
     def _clear_secret(self) -> None:
         self.secret = ""
-        if not self.secret_input.is_deleted:
-            self.secret_input.set_value("")
-            self.secret_owner_label.set_text("")
+        self.secret_meta = {}
+        if hasattr(self, "_secret_code_box") and not self.client.is_deleted:
+            self._secret_code_box.content = ""
 
-    def _disconnect(self) -> None:
-        self.disconnected = True
+    def _build_modals(self) -> None:
+        # 1. Serving / Model action modal
+        with ui.element("dialog").classes("oksa-modal").props('id="modal-serving-action" aria-labelledby="modal-serving-title"'):
+            self._srv_modal_body = ui.html("", sanitize=False)
+            self._srv_modal_err = ui.html("", sanitize=False)
+            with ui.element("div").classes("dialog-actions"):
+                btn_srv_cancel = ui.element("button")
+                with btn_srv_cancel:
+                    ui.html("Cancel", sanitize=False)
+                self._btn_srv_confirm = ui.element("button").classes("primary")
+                with self._btn_srv_confirm:
+                    self._srv_confirm_label = ui.html("Confirm", sanitize=False)
+        btn_srv_cancel.on("click", lambda: self._close_dialog("modal-serving-action", self._modal_action.get("opener", "")))
+        self._btn_srv_confirm.on("click", self._confirm_serving_modal)
+
+        # 2. Create user modal
+        with ui.element("dialog").classes("oksa-modal").props('id="modal-create-user" aria-labelledby="modal-user-title"'):
+            ui.html(
+                '<h2 id="modal-user-title">Create API user</h2>'
+                "<p>Creates an inference consumer identity in the LiteLLM gateway database (not an OS or OKSA admin account).</p>",
+                sanitize=False,
+            )
+            self._user_modal_err = ui.html("", sanitize=False)
+            with ui.element("div").classes("field"):
+                ui.html('<label for="modal-input-user-id">User ID (required)</label>', sanitize=False)
+                self._inp_user_id = ui.element("input").props('id="modal-input-user-id" type="text" placeholder="e.g. team-analytics"')
+            with ui.element("div").classes("field"):
+                ui.html('<label for="modal-input-user-email">Email (optional)</label>', sanitize=False)
+                self._inp_user_email = ui.element("input").props('id="modal-input-user-email" type="email" placeholder="owner@example.org"')
+            with ui.element("div").classes("dialog-actions"):
+                btn_u_cancel = ui.element("button")
+                with btn_u_cancel:
+                    ui.html("Cancel", sanitize=False)
+                self._btn_u_confirm = ui.element("button").classes("primary")
+                with self._btn_u_confirm:
+                    ui.html("Create user", sanitize=False)
+        self._inp_user_id.on("input", lambda e: setattr(self, "_create_user_id", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        self._inp_user_email.on("input", lambda e: setattr(self, "_create_user_email", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        btn_u_cancel.on("click", lambda: self._close_dialog("modal-create-user", self._modal_action.get("opener", "")))
+        self._btn_u_confirm.on("click", self._confirm_create_user)
+
+        # 3. Create key modal
+        with ui.element("dialog").classes("oksa-modal").props('id="modal-create-key" aria-labelledby="modal-key-title"'):
+            self._key_modal_head = ui.html("", sanitize=False)
+            self._key_modal_err = ui.html("", sanitize=False)
+            with ui.element("div").classes("field"):
+                ui.html('<label for="modal-input-key-alias">Key alias / name (required)</label>', sanitize=False)
+                self._inp_key_alias = ui.element("input").props('id="modal-input-key-alias" type="text" placeholder="e.g. ci-eval-runner"')
+            with ui.element("fieldset"):
+                ui.html("<legend>Model access scope</legend>", sanitize=False)
+                with ui.element("label").classes("option"):
+                    self._rad_scope_sel = ui.element("input").props('type="radio" name="key-scope" value="selected" checked')
+                    ui.html(
+                        "<div><strong>Selected public model(s)</strong>"
+                        "<small>Restricts this key to the specific public inference model names checked below.</small></div>",
+                        sanitize=False,
+                    )
+                self._key_models_box = ui.element("div").classes("field")
+                with ui.element("label").classes("option"):
+                    self._rad_scope_all = ui.element("input").props('type="radio" name="key-scope" value="all"')
+                    ui.html(
+                        "<div><strong>All models, including future models</strong>"
+                        "<small>Broad grant: permits inference against any model served on this appliance now or in the future.</small></div>",
+                        sanitize=False,
+                    )
+            with ui.element("div").classes("field"):
+                ui.html('<label for="modal-select-key-duration">Expiration</label>', sanitize=False)
+                self._sel_key_dur = ui.element("select").props('id="modal-select-key-duration"')
+                with self._sel_key_dur:
+                    for val, label in (
+                        ("24h", "24 hours"),
+                        ("7d", "7 days"),
+                        ("30d", "30 days"),
+                        ("90d", "90 days"),
+                        ("", "No expiration"),
+                    ):
+                        sel = " selected" if val == "30d" else ""
+                        ui.html(f'<option value="{views.esc(val)}"{sel}>{views.esc(label)}</option>', sanitize=False)
+            with ui.element("div").classes("dialog-actions"):
+                btn_k_cancel = ui.element("button")
+                with btn_k_cancel:
+                    ui.html("Cancel", sanitize=False)
+                self._btn_k_confirm = ui.element("button").classes("primary")
+                with self._btn_k_confirm:
+                    ui.html("Create API key", sanitize=False)
+        self._inp_key_alias.on("input", lambda e: setattr(self, "_create_key_alias", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        self._rad_scope_sel.on("change", lambda _: setattr(self, "_create_key_scope_mode", "selected"))
+        self._rad_scope_all.on("change", lambda _: setattr(self, "_create_key_scope_mode", "all"))
+        self._sel_key_dur.on("change", lambda e: setattr(self, "_create_key_duration", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
+        btn_k_cancel.on("click", lambda: self._close_dialog("modal-create-key", self._modal_action.get("opener", "")))
+        self._btn_k_confirm.on("click", self._confirm_create_key)
+
+        # 4. One-time secret handoff modal
+        self._secret_dialog = (
+            ui.element("dialog")
+            .classes("oksa-modal")
+            .props('id="modal-one-time-secret" aria-labelledby="modal-secret-title"')
+        )
+        with self._secret_dialog:
+            ui.html(
+                '<h2 id="modal-secret-title">Record API key secret now</h2>'
+                "<p>This secret is shown once and is never stored by the OKSA frontend or in daemon operation receipts.</p>",
+                sanitize=False,
+            )
+            self._secret_facts_box = ui.html("", sanitize=False)
+            self._secret_code_box = ui.html("", sanitize=False)
+            self._secret_copy_note = ui.html("", sanitize=False)
+            with ui.element("div").classes("dialog-actions"):
+                btn_copy_sec = ui.element("button")
+                with btn_copy_sec:
+                    ui.html("Copy secret", sanitize=False)
+                btn_dismiss_sec = ui.element("button").classes("primary")
+                with btn_dismiss_sec:
+                    ui.html("I have recorded this key", sanitize=False)
+        btn_copy_sec.on("click", self._copy_secret_to_clipboard)
+        btn_dismiss_sec.on("click", self._dismiss_secret_modal)
+        self._secret_dialog.on("close", self._on_secret_dialog_closed)
+
+        # 5. Revoke key modal
+        with ui.element("dialog").classes("oksa-modal").props('id="modal-revoke-key" aria-labelledby="modal-revoke-title"'):
+            self._revoke_modal_body = ui.html("", sanitize=False)
+            self._revoke_modal_err = ui.html("", sanitize=False)
+            with ui.element("div").classes("dialog-actions"):
+                btn_rev_cancel = ui.element("button")
+                with btn_rev_cancel:
+                    ui.html("Cancel", sanitize=False)
+                self._btn_rev_confirm = ui.element("button").classes("danger")
+                with self._btn_rev_confirm:
+                    ui.html("Revoke key", sanitize=False)
+        btn_rev_cancel.on("click", lambda: self._close_dialog("modal-revoke-key", self._modal_action.get("opener", "")))
+        self._btn_rev_confirm.on("click", self._confirm_revoke_key)
+
+        # 6. Delete user modal
+        with ui.element("dialog").classes("oksa-modal").props('id="modal-delete-user" aria-labelledby="modal-del-user-title"'):
+            self._del_user_body = ui.html("", sanitize=False)
+            self._del_user_err = ui.html("", sanitize=False)
+            with ui.element("div").classes("dialog-actions"):
+                btn_du_cancel = ui.element("button")
+                with btn_du_cancel:
+                    ui.html("Cancel", sanitize=False)
+                self._btn_du_confirm = ui.element("button").classes("danger")
+                with self._btn_du_confirm:
+                    ui.html("Delete user and revoke keys", sanitize=False)
+        btn_du_cancel.on("click", lambda: self._close_dialog("modal-delete-user", self._modal_action.get("opener", "")))
+        self._btn_du_confirm.on("click", self._confirm_delete_user)
+
+        # 7. Cancel operation modal
+        with ui.element("dialog").classes("oksa-modal").props('id="modal-cancel-job" aria-labelledby="modal-cancel-job-title"'):
+            self._cancel_job_body = ui.html("", sanitize=False)
+            self._cancel_job_err = ui.html("", sanitize=False)
+            with ui.element("div").classes("dialog-actions"):
+                btn_cj_keep = ui.element("button")
+                with btn_cj_keep:
+                    ui.html("Keep running", sanitize=False)
+                self._btn_cj_confirm = ui.element("button").classes("danger")
+                with self._btn_cj_confirm:
+                    ui.html("Request cancellation", sanitize=False)
+        btn_cj_keep.on("click", lambda: self._close_dialog("modal-cancel-job", self._modal_action.get("opener", "")))
+        self._btn_cj_confirm.on("click", self._confirm_cancel_job)
+
+    async def _open_serving_modal(self, method: str, opener_id: str, *, model_id: str = "") -> None:
+        await self._ensure_namespace()
+        sel_id = str((self.status or {}).get("selected_model_id") or "-")
+        act_id = str((self.status or {}).get("active_model_id") or "-")
+        sel_pub = str((self.status or {}).get("selected_model") or "-")
+        act_pub = str((self.status or {}).get("active_model") or "-")
+        target_id = model_id or (sel_id if sel_id != "-" else act_id)
+        model_obj = next((m for m in self.models if m.get("id") == target_id), None)
+        rev = str((model_obj or {}).get("revision") or "-")
+
+        self._pending_request_id = self._mint_request_id()
+        self._modal_action = {
+            "method": method,
+            "target": target_id,
+            "expected_selected": sel_id,
+            "expected_active": act_id,
+            "expected_revision": rev,
+            "opener": opener_id,
+        }
+        self._srv_modal_err.content = ""
+        self._set_button_disabled(self._btn_srv_confirm, False)
+
+        if method == "StartModel":
+            self._btn_srv_confirm.classes(replace="primary")
+            self._srv_confirm_label.content = f"Serve {views.esc(target_id)}"
+            self._srv_modal_body.content = (
+                f'<h2 id="modal-serving-title">Serve {views.esc(target_id)}</h2>'
+                f"<p>Changes the shared appliance serving selection to <code>{views.esc(target_id)}</code> "
+                f"(currently desired: <code>{views.esc(sel_pub)}</code>, observed active: <code>{views.esc(act_pub)}</code>).</p>"
+                "<p><strong>Impact:</strong> Any active model workload will be replaced, interrupting shared inference. "
+                "If no matching calibrated profile exists for this boot, calibration measurement can take up to the 4-hour search budget plus setup and cleanup.</p>"
+            )
+        elif method == "RestartModel":
+            self._btn_srv_confirm.classes(replace="primary")
+            self._srv_confirm_label.content = f"Restart {views.esc(target_id)}"
+            self._srv_modal_body.content = (
+                f'<h2 id="modal-serving-title">Restart {views.esc(target_id)}</h2>'
+                f"<p>Restarts the shared inference runtime for <code>{views.esc(target_id)}</code> "
+                f"(observed active: <code>{views.esc(act_pub)}</code>).</p>"
+                "<p><strong>Impact:</strong> In-flight inference requests will be interrupted while the workload pod restarts.</p>"
+            )
+        elif method == "StopServing":
+            self._btn_srv_confirm.classes(replace="danger")
+            self._srv_confirm_label.content = "Stop serving"
+            self._srv_modal_body.content = (
+                '<h2 id="modal-serving-title">Stop all model serving</h2>'
+                f"<p>Clears the desired serving selection (<code>{views.esc(sel_pub)}</code>) and scales down active inference workloads (<code>{views.esc(act_pub)}</code>).</p>"
+                "<p><strong>Impact:</strong> All shared inference on this appliance will stop until a model is explicitly served again.</p>"
+            )
+        elif method == "RemoveModel":
+            self._btn_srv_confirm.classes(replace="danger")
+            self._srv_confirm_label.content = f"Delete {views.esc(target_id)}"
+            active_warn = (
+                "<p><strong>Active model warning:</strong> This model is currently selected or active; deletion will stop serving before removing files.</p>"
+                if target_id in (sel_id, act_id)
+                else ""
+            )
+            self._srv_modal_body.content = (
+                f'<h2 id="modal-serving-title">Delete {views.esc(target_id)}</h2>'
+                f"<p>Permanently deletes local model files at <code>/var/lib/vllm/models/{views.esc(target_id)}</code> "
+                f"(revision <code>{views.esc(rev[:12] if rev and rev != '-' else 'unknown')}</code>) and removes it from the catalog.</p>"
+                f"{active_warn}"
+                "<p>Saved calibration records in <code>/var/lib/puu/calibration</code> are not deleted by model removal.</p>"
+            )
+        self._open_dialog("modal-serving-action")
+
+    async def _confirm_serving_modal(self) -> None:
+        method = self._modal_action.get("method", "")
+        target = self._modal_action.get("target", "")
+        exp_sel = self._modal_action.get("expected_selected", "")
+        exp_act = self._modal_action.get("expected_active", "")
+        exp_rev = self._modal_action.get("expected_revision", "")
+        opener = self._modal_action.get("opener", "")
+
+        self._set_button_disabled(self._btn_srv_confirm, True)
+        self._srv_modal_err.content = ""
+
+        if method in ("StartModel", "RestartModel"):
+            args = (target, exp_sel, exp_act)
+        elif method == "StopServing":
+            args = (exp_sel, exp_act)
+            target = "runtime"
+        elif method == "RemoveModel":
+            args = (target, exp_rev, exp_sel, exp_act)
+        else:
+            return
+
+        ok, res, err_msg = await self._submit_mutation(self._pending_request_id, method, target, *args)
+        if ok and res.get("job"):
+            self._close_dialog("modal-serving-action", opener)
+            jid = views.job_short_id(res["job"])
+            self._navigate(f"/operations/{views.url_part(jid)}")
+            return
+
+        self._pending_request_id = self._mint_request_id()
+        self._set_button_disabled(self._btn_srv_confirm, False)
+        self._srv_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
+        self._render_all()
+
+    async def _open_create_user_modal(self, opener_id: str) -> None:
+        await self._ensure_namespace()
+        self._pending_request_id = self._mint_request_id()
+        self._modal_action = {"opener": opener_id}
+        self._create_user_id = ""
+        self._create_user_email = ""
+        self._user_modal_err.content = ""
+        self._set_button_disabled(self._btn_u_confirm, False)
+        self.client.run_javascript(
+            "const u = document.getElementById('modal-input-user-id'); if (u) u.value = '';"
+            "const e = document.getElementById('modal-input-user-email'); if (e) e.value = '';"
+        )
+        self._open_dialog("modal-create-user")
+
+    async def _confirm_create_user(self) -> None:
+        uid = self._create_user_id.strip()
+        email = self._create_user_email.strip()
+        opener = self._modal_action.get("opener", "")
+        if not uid:
+            self._user_modal_err.content = '<div class="notice error" role="alert">User ID is required.</div>'
+            return
+        self._set_button_disabled(self._btn_u_confirm, True)
+        self._user_modal_err.content = ""
+        ok, _, err_msg = await self._submit_mutation(self._pending_request_id, "CreateUser", uid, uid, email, -1.0)
+        if ok:
+            await self._refresh_access()
+            self._close_dialog("modal-create-user", opener)
+            self._navigate(f"/access/user?id={views.url_part(uid)}")
+            return
+        self._pending_request_id = self._mint_request_id()
+        self._set_button_disabled(self._btn_u_confirm, False)
+        self._user_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
+        await self._refresh_access()
+        self._render_all()
+
+    async def _open_create_key_modal(self, user_id: str, opener_id: str) -> None:
+        await self._ensure_namespace()
+        await self._refresh_models()
+        self._pending_request_id = self._mint_request_id()
+        self._modal_action = {"user_id": user_id, "opener": opener_id}
+        self._create_key_alias = ""
+        self._create_key_scope_mode = "selected"
+        self._create_key_selected_models = set()
+        self._create_key_duration = "30d"
+        self._key_modal_err.content = ""
+        self._set_button_disabled(self._btn_k_confirm, False)
+        self._key_modal_head.content = (
+            f'<h2 id="modal-key-title">Create API key for <code>{views.esc(user_id)}</code></h2>'
+            "<p>Choose an explicit key alias, model scope, and expiration. The generated secret will be displayed once upon creation.</p>"
+        )
+        self._key_models_box.clear()
+        with self._key_models_box:
+            if not self.models_verified:
+                ui.html(
+                    '<div class="notice warning">Model inventory could not be verified; selected-model scope cannot be chosen until inventory is readable.</div>',
+                    sanitize=False,
+                )
+            elif not self.models:
+                ui.html(
+                    '<div class="notice warning">No models are currently installed. Install a model first or explicitly select All models below.</div>',
+                    sanitize=False,
+                )
+            else:
+                for m in self.models:
+                    pub = str(m.get("name") or m.get("id") or "")
+                    mid = str(m.get("id") or "")
+                    with ui.element("label").classes("option"):
+                        chk = ui.element("input").props('type="checkbox"')
+                        ui.html(
+                            f"<div><strong><code>{views.esc(pub)}</code></strong>"
+                            f"<small>Local storage ID: {views.esc(mid)}</small></div>",
+                            sanitize=False,
+                        )
+                        chk.on(
+                            "change",
+                            lambda e, p=pub: (
+                                self._create_key_selected_models.add(p)
+                                if e.args
+                                else self._create_key_selected_models.discard(p)
+                            ),
+                            js_handler="(e) => emit(Boolean(e.target.checked))",
+                        )
+        self.client.run_javascript(
+            "const a = document.getElementById('modal-input-key-alias'); if (a) a.value = '';"
+            "const r = document.querySelector('input[name=\"key-scope\"][value=\"selected\"]'); if (r) r.checked = true;"
+            "const d = document.getElementById('modal-select-key-duration'); if (d) d.value = '30d';"
+        )
+        self._open_dialog("modal-create-key")
+
+    async def _confirm_create_key(self) -> None:
+        user_id = self._modal_action.get("user_id", "")
+        opener = self._modal_action.get("opener", "")
+        alias = self._create_key_alias.strip()
+        if not alias:
+            self._key_modal_err.content = '<div class="notice error" role="alert">Key alias is required.</div>'
+            return
+        if alias == "open-webui":
+            self._key_modal_err.content = '<div class="notice error" role="alert">The open-webui alias is reserved for the protected service key.</div>'
+            return
+        if self._create_key_scope_mode == "selected":
+            if not self.models_verified:
+                self._key_modal_err.content = (
+                    '<div class="notice error" role="alert">Model discovery failed; refusing to broaden scope automatically.</div>'
+                )
+                return
+            if not self._create_key_selected_models:
+                self._key_modal_err.content = (
+                    '<div class="notice error" role="alert">Select at least one public model, or explicitly choose All models, including future models.</div>'
+                )
+                return
+            models_arg = sorted(self._create_key_selected_models)
+            scope_label = ", ".join(models_arg)
+        else:
+            models_arg = []
+            scope_label = "All models, including future models"
+
+        self._set_button_disabled(self._btn_k_confirm, True)
+        self._key_modal_err.content = ""
+        ok, res, err_msg = await self._submit_mutation(
+            self._pending_request_id,
+            "CreateKey",
+            user_id,
+            user_id,
+            alias,
+            models_arg,
+            -1.0,
+            self._create_key_duration,
+        )
+        await self._refresh_user_detail(user_id)
+        if ok and isinstance(res.get("key"), dict):
+            key_obj = res["key"]
+            self.secret = str(key_obj.get("key") or "")
+            self._close_dialog("modal-create-key", "")
+            self._show_secret_modal(
+                owner=user_id,
+                alias=alias,
+                key_id=str(key_obj.get("key_id") or ""),
+                scope_label=scope_label,
+                expires=str(key_obj.get("expires") or self._create_key_duration or "No expiration"),
+                opener=opener,
+            )
+            return
+
+        self._pending_request_id = self._mint_request_id()
+        self._set_button_disabled(self._btn_k_confirm, False)
+        self._key_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
+        self._render_all()
+
+    def _show_secret_modal(
+        self,
+        *,
+        owner: str,
+        alias: str,
+        key_id: str,
+        scope_label: str,
+        expires: str,
+        opener: str,
+    ) -> None:
+        self.secret_meta = {"opener": opener}
+        active_pub = str((self.status or {}).get("active_model") or "None active")
+        self._secret_facts_box.content = views.render_facts([
+            ("Owner user ID", f"<code>{views.esc(owner)}</code>"),
+            ("Key alias / ID", f"<strong>{views.esc(alias)}</strong> · <code>{views.esc(key_id)}</code>"),
+            ("API base URL", f"<code>{views.esc(self._api_base_url())}</code>"),
+            ("Observed public inference model", f"<code>{views.esc(active_pub)}</code>"),
+            ("Granted model scope", views.esc(scope_label)),
+            ("Expiration", views.esc(expires)),
+        ])
+        self._secret_code_box.content = f'<code class="secret-box" id="one-time-secret-code">{views.esc(self.secret)}</code>'
+        self._secret_copy_note.content = ""
+        self._open_dialog("modal-one-time-secret")
+
+    def _copy_secret_to_clipboard(self) -> None:
+        if not self.secret:
+            return
+        self.client.run_javascript(
+            "const el = document.getElementById('one-time-secret-code');"
+            "if (el && navigator.clipboard) navigator.clipboard.writeText(el.textContent || '');"
+        )
+        self._secret_copy_note.content = '<p class="small">Copied to clipboard. Clear clipboard after storing in your secret manager.</p>'
+
+    def _dismiss_secret_modal(self) -> None:
+        opener = self.secret_meta.get("opener", "btn-open-create-key")
         self._clear_secret()
-        self.search_generation += 1
-        self._invalidate_inspection()
-        self._close_key_form()
-        for name in self.generations:
-            self.generations[name] += 1
-        self.status_failed = True
-        self.jobs_failed = True
-        self.models_verified = False
-        self.calibration_received = 0.0
-        self.users_verified = False
-        self.keys_verified = False
-        self.users_loaded = self.keys_loaded = True
-        self.users_error_text = self.keys_error_text = "Connection lost — reconnecting automatically"
-        self.user_key_counts = None
-        self.keys = {}
-        self.models_error_text = "Connection lost. Displayed models are unverified; updates resume automatically."
-        self.monitoring_error_text = "Connection lost. Monitoring updates resume automatically."
-        self.activity_error_text = "Connection lost. Displayed operations are unverified; do not retry."
-        self._render_users({row["user_id"] for row in self.users_table.selected}, set())
-        self._render_page()
-        if not self.secret_dialog.is_deleted:
-            self.secret_dialog.close()
+        self._close_dialog("modal-one-time-secret", opener)
+
+    def _on_secret_dialog_closed(self) -> None:
+        opener = self.secret_meta.get("opener", "btn-open-create-key")
+        self._clear_secret()
+        if opener and not self.client.is_deleted:
+            self.client.run_javascript(f"document.getElementById({json.dumps(opener)})?.focus();")
+
+    async def _open_revoke_key_modal(self, key_item: dict, opener_id: str) -> None:
+        await self._ensure_namespace()
+        self._pending_request_id = self._mint_request_id()
+        self._revoke_key_target = dict(key_item)
+        self._modal_action = {"opener": opener_id}
+        self._revoke_modal_err.content = ""
+        self._set_button_disabled(self._btn_rev_confirm, False)
+
+        alias = views.esc(key_item.get("key_alias") or "Unnamed key")
+        kid = views.esc(key_item.get("key_id") or "")
+        prefix = views.esc(key_item.get("key_prefix") or "—")
+        owner = views.esc(key_item.get("user_id") or "")
+        self._revoke_modal_body.content = (
+            f'<h2 id="modal-revoke-title">Revoke API key {alias}</h2>'
+            f"<p>Permanently removes key <strong>{alias}</strong> (ID <code>{kid}</code>, prefix <code>{prefix}</code>) "
+            f"owned by user <code>{owner}</code> from the gateway database.</p>"
+            "<p><strong>Caveat:</strong> Revocation confirms database absence only; it does not certify immediate cache propagation or block anonymous requests when keyless mode is enabled.</p>"
+        )
+        self._open_dialog("modal-revoke-key")
+
+    async def _confirm_revoke_key(self) -> None:
+        owner = str(self._revoke_key_target.get("user_id") or "")
+        kid = str(self._revoke_key_target.get("key_id") or "")
+        opener = self._modal_action.get("opener", "")
+        self._set_button_disabled(self._btn_rev_confirm, True)
+        self._revoke_modal_err.content = ""
+        ok, _, err_msg = await self._submit_mutation(
+            self._pending_request_id, "RevokeKey", f"{owner}:{kid}", owner, kid
+        )
+        await self._refresh_user_detail(owner)
+        if ok:
+            self._close_dialog("modal-revoke-key", "btn-open-create-key")
+            return
+        self._pending_request_id = self._mint_request_id()
+        self._set_button_disabled(self._btn_rev_confirm, False)
+        self._revoke_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
+        self._render_all()
+
+    async def _open_delete_user_modal(self, user_id: str, opener_id: str) -> None:
+        await self._ensure_namespace()
+        self._pending_request_id = self._mint_request_id()
+        self._modal_action = {"user_id": user_id, "opener": opener_id}
+        self._del_user_err.content = ""
+        self._set_button_disabled(self._btn_du_confirm, False)
+        key_cnt = len(self.user_detail_keys)
+        self._del_user_body.content = (
+            f'<h2 id="modal-del-user-title">Delete API user {views.esc(user_id)}</h2>'
+            f"<p>Revokes all <strong>{key_cnt}</strong> API key(s) owned by <code>{views.esc(user_id)}</code>, "
+            "verifies their absence in the gateway database, and then deletes the user record.</p>"
+            "<p>If key revocation or user deletion is only partially confirmed, the operation records the exact confirmed count and blocks conflicting writes until reconciled.</p>"
+        )
+        self._open_dialog("modal-delete-user")
+
+    async def _confirm_delete_user(self) -> None:
+        user_id = self._modal_action.get("user_id", "")
+        opener = self._modal_action.get("opener", "")
+        self._set_button_disabled(self._btn_du_confirm, True)
+        self._del_user_err.content = ""
+        ok, res, err_msg = await self._submit_mutation(
+            self._pending_request_id, "DeleteUser", user_id, user_id
+        )
+        if ok and res.get("job"):
+            self._close_dialog("modal-delete-user", opener)
+            jid = views.job_short_id(res["job"])
+            self._navigate(f"/operations/{views.url_part(jid)}")
+            return
+        self._pending_request_id = self._mint_request_id()
+        self._set_button_disabled(self._btn_du_confirm, False)
+        self._del_user_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
+        self._render_all()
+
+    def _open_cancel_job_modal(self, job_path: str, opener_id: str) -> None:
+        self._cancel_job_path = job_path
+        self._modal_action = {"opener": opener_id}
+        self._cancel_job_err.content = ""
+        self._set_button_disabled(self._btn_cj_confirm, False)
+        job = self.jobs.get(job_path) or {}
+        jid = views.job_short_id(job_path)
+        op_name = views.operation_label(str(job.get("operation") or ""))
+        target = job.get("model_name") or job.get("user_id") or "runtime"
+        self._cancel_job_body.content = (
+            f'<h2 id="modal-cancel-job-title">Request cancellation · {views.esc(jid)}</h2>'
+            f"<p>Sends a termination request (<code>SIGTERM</code>) to running job <strong>{views.esc(op_name)}</strong> on <code>{views.esc(target)}</code>.</p>"
+            "<p><strong>Important:</strong> Cancellation is a request, not a rollback. It may race completion, and partial changes to staged files, calibration records, or runtime state may remain.</p>"
+        )
+        self._open_dialog("modal-cancel-job")
+
+    async def _confirm_cancel_job(self) -> None:
+        path = self._cancel_job_path
+        opener = self._modal_action.get("opener", "")
+        self._set_button_disabled(self._btn_cj_confirm, True)
+        self._cancel_job_err.content = ""
+        reply = await self._call(self.service.cancel_job, path)
+        await self._refresh_daemon_state()
+        await self._refresh_jobs()
+        if reply[0] == 200 or (self.jobs.get(path) or {}).get("state") != "running":
+            self._close_dialog("modal-cancel-job", opener)
+            self._render_all()
+            return
+        self._set_button_disabled(self._btn_cj_confirm, False)
+        self._cancel_job_err.content = f'<div class="notice error" role="alert">{views.esc(self._error(reply))}</div>'
+        self._render_all()
