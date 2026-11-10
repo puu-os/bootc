@@ -95,11 +95,11 @@ if [ -d "${TARGET_DIR}/opt/cni" ]; then
   mv "${TARGET_DIR}/opt/cni" "${cni_plugins_tmp}"
 fi
 
-for d in boot home root usr/local srv opt mnt var; do
+for d in boot efi home root usr/local srv opt mnt var; do
   rm -rf "${TARGET_DIR:?}/${d}"
 done
 
-mkdir -p "${TARGET_DIR}"/{sysroot,efi,boot,usr/lib/{ostree,tmpfiles.d},var/tmp}
+mkdir -p "${TARGET_DIR}"/{sysroot,boot,usr/lib/tmpfiles.d,var/tmp}
 
 host_dracut_link="${TARGET_DIR}${HOST_DIR}/lib/dracut"
 cleanup_host_dracut_link() {
@@ -153,7 +153,6 @@ if [ -d "${cni_plugins_tmp}" ]; then
   mv "${cni_plugins_tmp}" "${TARGET_DIR}/usr/lib/cni"
 fi
 
-ln -sfT sysroot/ostree "${TARGET_DIR}/ostree"
 ln -sfT var/roothome "${TARGET_DIR}/root"
 ln -sfT var/srv "${TARGET_DIR}/srv"
 ln -sfT var/opt "${TARGET_DIR}/opt"

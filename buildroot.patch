@@ -123,6 +123,23 @@ index 33012853..6eb68ac2 100644
  (exec "${topdir}/bin/dracut.real" "${@}")
  
  if [ -n "${DRACUT_LDD}" ]; then
+diff --git a/package/dracut/merged-usr-module-setup.sh b/package/dracut/merged-usr-module-setup.sh
+--- a/package/dracut/merged-usr-module-setup.sh
++++ b/package/dracut/merged-usr-module-setup.sh
+@@ -18,9 +18,9 @@ install() {
+     for dir in lib bin sbin; do
+         mkdir -p "${initdir?}/usr/${dir}"
+-        if [ -d "${initdir?}/${dir}" ]; then
+-            mv "${initdir?}/${dir}/"* "${initdir?}/usr/${dir}"
+-            rm -rf "${initdir?}/${dir}"
+-            ln -s "usr/${dir}" "${initdir?}/${dir}"
++        if [ -d "${initdir?}/${dir}" ] && [ ! -L "${initdir?}/${dir}" ]; then
++            cp -a "${initdir?}/${dir}/." "${initdir?}/usr/${dir}" || return
++            rm -rf "${initdir?}/${dir}" || return
++            ln -s "usr/${dir}" "${initdir?}/${dir}" || return
+         fi
+     done
+ }
 diff --git a/package/fwupd/fwupd.mk b/package/fwupd/fwupd.mk
 index d143740c..93cb2907 100644
 --- a/package/fwupd/fwupd.mk
@@ -344,7 +361,7 @@ diff --git a/package/libostree/Config.in b/package/libostree/Config.in
 index 49eed651..d0bec81f 100644
 --- a/package/libostree/Config.in
 +++ b/package/libostree/Config.in
-@@ -1,27 +1,34 @@
+@@ -1,27 +1,33 @@
  config BR2_PACKAGE_LIBOSTREE
  	bool "libostree"
 +	depends on BR2_INIT_SYSTEMD
@@ -362,7 +379,6 @@ index 49eed651..d0bec81f 100644
 -	select BR2_PACKAGE_LIBARCHIVE if BR2_s390x
 +	select BR2_PACKAGE_LIBARCHIVE
 +	select BR2_PACKAGE_LIBCAP
-+	select BR2_PACKAGE_COMPOSEFS
  	select BR2_PACKAGE_LIBGLIB2
  	select BR2_PACKAGE_LIBGPG_ERROR
  	select BR2_PACKAGE_LIBGPGME
@@ -403,7 +419,7 @@ diff --git a/package/libostree/libostree.mk b/package/libostree/libostree.mk
 index a737dc04..166c35e5 100644
 --- a/package/libostree/libostree.mk
 +++ b/package/libostree/libostree.mk
-@@ -4,24 +4,50 @@
+@@ -4,24 +4,49 @@
  #
  ################################################################################
  
@@ -416,7 +432,6 @@ index a737dc04..166c35e5 100644
  LIBOSTREE_LICENSE_FILES = COPYING
 -LIBOSTREE_DEPENDENCIES = e2fsprogs host-bison host-pkgconf libglib2 libgpg-error libgpgme xz
 +LIBOSTREE_DEPENDENCIES = \
-+	composefs \
 +	e2fsprogs \
 +	host-bison \
 +	host-pkgconf \
@@ -435,7 +450,7 @@ index a737dc04..166c35e5 100644
  LIBOSTREE_CONF_ENV = \
  	GPG_ERROR_CONFIG=$(STAGING_DIR)/usr/bin/gpg-error-config
  LIBOSTREE_CONF_OPTS += \
-+	--with-composefs \
++	--without-composefs \
 +	--without-avahi \
 +	--without-curl \
 +	--with-crypto=glib \
@@ -447,7 +462,7 @@ index a737dc04..166c35e5 100644
 +	--with-libmount \
 +	--with-libsystemd \
 +	--with-soup3 \
-+	--with-dracut=yes \
++	--without-dracut \
  	--disable-gtk-doc \
  	--disable-gtk-doc-html \
  	--disable-gtk-doc-pdf \
@@ -458,7 +473,7 @@ index a737dc04..166c35e5 100644
  
  ifeq ($(BR2_PACKAGE_GOBJECT_INTROSPECTION),y)
  LIBOSTREE_DEPENDENCIES += gobject-introspection
-@@ -31,48 +57,6 @@ else
+@@ -31,48 +56,6 @@ else
  LIBOSTREE_CONF_OPTS += --disable-introspection
  endif
  
@@ -507,7 +522,7 @@ index a737dc04..166c35e5 100644
  ifeq ($(BR2_PACKAGE_LIBSELINUX),y)
  LIBOSTREE_CONF_OPTS += --with-selinux
  LIBOSTREE_DEPENDENCIES += libselinux
-@@ -80,13 +64,5 @@ else
+@@ -80,13 +63,5 @@ else
  LIBOSTREE_CONF_OPTS += --without-selinux
  endif
  
