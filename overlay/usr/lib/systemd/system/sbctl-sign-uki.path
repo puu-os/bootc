@@ -6,10 +6,9 @@ Description=Watch ESP for new UKIs to re-sign
 ConditionPathExists=/var/lib/sbctl/keys/db/db.key
 
 [Path]
-PathChanged=/efi/EFI/Linux
-PathChanged=/efi/EFI/PUU
-PathChanged=/efi/EFI/systemd
-PathChanged=/efi/EFI/BOOT
+PathChanged=/boot/loader
+PathChanged=/boot/EFI/systemd
+PathChanged=/boot/EFI/BOOT
 
 [Install]
 WantedBy=multi-user.target

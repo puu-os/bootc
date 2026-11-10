@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+import os
 from pathlib import Path
 import subprocess
 import sys
-
 ALLOWLIST_PATTERNS = [
     "EFI/Linux/*.efi",
-    "EFI/PUU/*.efi",
+    "EFI/Linux/bootc_composefs-*/vmlinuz",
     "EFI/systemd/systemd-bootx64.efi",
     "EFI/systemd/systemd-bootaa64.efi",
     "EFI/BOOT/BOOTX64.EFI",
@@ -17,18 +17,18 @@ ALLOWLIST_PATTERNS = [
 
 
 def main() -> None:
-    efi_dir = Path("/efi")
+    efi_dir = Path("/boot")
     sbctl_bin = "sbctl"
 
     files = sorted(
         {path for pattern in ALLOWLIST_PATTERNS for path in efi_dir.glob(pattern) if path.is_file()}
     )
     if not files:
-        sys.exit("puu-sbctl-sign-uki: no files matched any allowlist pattern under /efi")
+        sys.exit("puu-sbctl-sign-uki: no files matched any allowlist pattern under /boot")
 
     for path in files:
-        subprocess.run([sbctl_bin, "sign", "-s", str(path)], check=True)
-
+        subprocess.run([sbctl_bin, "sign", str(path)], check=True)
+    os.sync()
 
 if __name__ == "__main__":
     main()
