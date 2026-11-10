@@ -7,6 +7,15 @@ Puu OS is a bootc container operating system. It provides the means to create
 your own images and the supply chain for OS updates using any standard OCI
 container repository.
 
+**NOTE:** This is a pre-release project i.e., backwards compatibility breaking
+updates this happen commonly.
+
+## Development
+
+    make help
+
+## Components
+
 Puu OS builds on top of the following open source projects:
 
 - [bootc](https://bootc.dev/)
@@ -17,7 +26,6 @@ Puu OS builds on top of the following open source projects:
 - [K3s](https://k3s.io/)
 - [Linux](https://kernel.org)
 - [LiteLLM](https://www.litellm.ai)
-- [OSTree](https://github.com/ostreedev)
 - [PipeWire](https://pipewire.org)
 - [Skopeo](https://skopeo.org)
 - [systemd](https://systemd.io)
@@ -26,63 +34,23 @@ Puu OS builds on top of the following open source projects:
 
 ## Services
 
-Default network services available after installation:
+| Service    | URL                     |
+| ---------- | ------------------------|
+| Oksa       | http://oksa.puu.local   |
+| OpenAI API | http://api.puu.local/v1 |
+| Open WebUI | http://puu.local/       |
+| Kubernetes | https://puu.local:6443  |
 
-- Open WebUI: `http://puu.local/`
-- OpenAI-compatible API: `http://api.puu.local/v1`
-- Kubernetes (K3s): `https://puu.local:6443`
-- SSH: port 22
+Services URLs are still very much due to constant change.
 
-Puu publishes `api.puu.local` over mDNS. Linux clients using `mdns4_minimal`
-need `mdns4` before `resolve`/`dns` in `/etc/nsswitch.conf` and `.local`
-allowed in `/etc/mdns.allow`, or a local DNS record for the API hostname.
+## LiteLLM
 
-LiteLLM inference is keyless by default; supplied per-user keys are still
-validated. Anonymous requests remain unrestricted. Store a master key to
-require credentials for every inference request:
+Store a master key in order to require credentials for every inference request:
 
 ```sh
 sudo systemd-creds encrypt --with-key=host - /etc/credstore.encrypted/litellm-master-key
 sudo systemctl restart puu-k3s-addons.service
 ```
-
-## First boot
-
-After the first login, a new GNOME installation opens a setup session that
-shows service startup, configured model downloads and per-model capacity
-calibration. Installed models are discovered and deployed through one serving
-planner. Network settings and TTY/SSH are available for recovery. When setup
-completes, Continue returns to the login screen and the next login opens GNOME.
-
-To recalibrate an installed model:
-
-```sh
-sudo /usr/libexec/puu/oksa-calibrate --model MODEL --force
-sudo /usr/libexec/puu/oksa-plan-vllm-workloads --require-reconcile
-```
-
-## Development
-
-### Listing the available boards
-
-    make list
-
-### Building
-
-    make BOARD=puu_amd64 flatpak-update
-    make BOARD=puu_amd64 build PUU_COSIGN_KEYS=
-    make BOARD=puu_arm64 flatpak-update
-    make BOARD=puu_arm64 build PUU_COSIGN_KEYS=
-    make BOARD=puu_amd64 burn DEVICE=/dev/sdX
-    make lint
-
-Set `PUU_COSIGN_KEYS` to a colon-separated list of signing keys for signed builds;
-set it empty explicitly for unsigned builds.
-
-### Releasing
-
-    make release VERSION=N
-    make publish
 
 ## License
 
