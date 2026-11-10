@@ -135,6 +135,10 @@ def collect_models_list(
     models = []
     for name, public_name in state.catalogue:
         meta = meta_map.get(name, {})
+        repo_id = str(meta.get("repo_id") or "")
+        revision = str(meta.get("revision") or "")
+        model_path = str(meta.get("path") or (MODELS_DIR / name))
+        provenance = model_provenance(Path(model_path), repo_id, revision)
         try:
             resolved_name = state.resolve_model_name(name)
             capable = (planner_available and evaluator is not None
@@ -144,7 +148,10 @@ def collect_models_list(
         models.append({
             "name": public_name,
             "id": name,
-            "repo_id": meta.get("repo_id") or "-",
+            "repo_id": repo_id or "-",
+            "revision": revision,
+            "provenance": provenance,
+            "path": model_path,
             "storage_mib": meta.get("storage_mib") or 0,
             "quantization": meta.get("quantization") or "none",
             "capabilities": "ok" if capable else "insufficient",
@@ -156,6 +163,8 @@ def collect_models_list(
         "ok": True,
         "active_model": state.public_model_name(active_model, state_dir),
         "selected_model": state.public_model_name(selected_model, state_dir),
+        "active_model_id": active_model or "-",
+        "selected_model_id": selected_model or "-",
         "serving_enabled": serving_enabled,
         "models": models,
     }
@@ -213,6 +222,56 @@ def verified_preseed(model_dir: Path, repo_id: str | None = None, revision: str 
         return "config.json" in names and any(name.endswith((".safetensors", ".bin")) for name in names)
     except (OSError, ValueError, TypeError, KeyError):
         return False
+
+
+def model_provenance(model_dir: Path, repo_id: str, revision: str) -> str:
+    if model_dir.is_dir() and verified_preseed(model_dir, repo_id or None, revision or None):
+        return "verified"
+    if repo_id and repo_id != "-" and re.fullmatch(r"[0-9a-f]{40}", revision or ""):
+        try:
+            if ModelSpec(repo_id=repo_id, revision=revision, path=str(model_dir)).cached_model_root is not None:
+                return "verified"
+        except ValueError:
+            pass
+        return "catalog"
+    return "unknown"
+
+
+def inspect_installed_model(
+    model_name: str, state_dir: Path = STATE_DIR, models_dir: Path = MODELS_DIR,
+) -> dict | None:
+    if not isinstance(model_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
+        return None
+    dest_dir = models_dir / model_name
+    entries = [entry for entry in read_models_list(state_dir / "models.list") if entry[0] == model_name]
+    if not entries and not dest_dir.exists():
+        return None
+    model_path = Path(entries[0][1]) if entries else dest_dir
+    repo_id = ""
+    revision = ""
+    manifest_path = model_path / PRESEED_MANIFEST
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest, dict):
+                repo_id = str(manifest.get("repo_id") or "")
+                revision = str(manifest.get("revision") or "")
+        except (OSError, ValueError):
+            pass
+    if not repo_id or not revision:
+        for env_path in (state_dir / "models.d" / f"{model_name}.env", model_path / "puu-serving.env"):
+            meta = parse_env_file(env_path)
+            repo_id = repo_id or meta.get("PUU_VLLM_REPO_ID", "")
+            revision = revision or meta.get("PUU_VLLM_REVISION", "")
+    provenance = model_provenance(model_path, repo_id, revision)
+    return {
+        "id": model_name,
+        "name": public_model_name(model_name, state_dir),
+        "repo_id": repo_id,
+        "revision": revision,
+        "provenance": provenance,
+        "path": str(model_path),
+    }
 
 
 def parse_env_file(path: Path | str) -> Dict[str, str]:
@@ -1253,12 +1312,46 @@ def litellm_user_list(master_key: str | None = None) -> tuple[bool, list[dict] |
         page += 1
 
 
+def key_ref(token: str) -> str:
+    return hashlib.sha256(f"oksa-key-ref:{token}".encode("utf-8")).hexdigest()[:16]
+
+
+def mask_key_prefix(key_name: str) -> str:
+    text = (key_name or "").strip()
+    if not text:
+        return ""
+    if "..." in text and len(text) <= 24:
+        return text
+    if len(text) > 10:
+        return f"{text[:6]}...{text[-4:]}"
+    return text[:4] + "..."
+
+
+def sanitize_key_record(key: dict) -> dict:
+    token = str(key.get("token") or "")
+    models = [str(m) for m in (key.get("models") or []) if isinstance(m, str) and m.strip()]
+    return {
+        "key_id": key_ref(token) if token else "",
+        "user_id": str(key.get("user_id") or ""),
+        "key_alias": str(key.get("key_alias") or ""),
+        "key_prefix": mask_key_prefix(str(key.get("key_name") or "")),
+        "models": models,
+        "expires": str(key.get("expires") or ""),
+        "created_at": str(key.get("created_at") or ""),
+    }
+
+
 def litellm_user_info(user_id: str, master_key: str | None = None) -> tuple[bool, dict | str]:
     quoted_id = urllib.parse.quote(user_id, safe="")
     status, resp = litellm_api_call("GET", f"/user/info?user_id={quoted_id}", master_key=master_key)
     if status == 200:
-        if isinstance(resp.get("keys"), list):
-            resp["keys"] = [key for key in resp["keys"] if isinstance(key, dict) and key.get("key_alias") != "open-webui"]
+        raw_keys = resp.get("keys") if isinstance(resp.get("keys"), list) else []
+        resp["owns_service_key"] = any(isinstance(key, dict) and key.get("key_alias") == "open-webui" for key in raw_keys)
+        resp["keys"] = [
+            sanitize_key_record(key)
+            for key in raw_keys
+            if isinstance(key, dict) and key.get("key_alias") != "open-webui"
+        ]
         return True, resp
     return False, litellm_error_detail(resp, status)
 
@@ -1371,11 +1464,13 @@ def litellm_key_absent(token: str, master_key: str | None = None) -> tuple[bool,
     return False, f"Key absence could not be confirmed (HTTP {status})" + (f": {detail}" if detail else "")
 
 
-def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tuple[bool, str]:
+def litellm_key_delete(
+    key_or_alias: str, master_key: str | None = None, *, user_id: str | None = None,
+) -> tuple[bool, str]:
     if not isinstance(key_or_alias, str) or not key_or_alias.strip():
         return False, "Key or alias is required"
     try:
-        ok, keys = litellm_key_list(master_key=master_key, include_service=True)
+        ok, keys = litellm_key_list(user_id=user_id, master_key=master_key, include_service=True)
     except (http.client.HTTPException, OSError, subprocess.SubprocessError, ValueError) as exc:
         return False, f"Cannot list keys before revocation; no write attempted: {type(exc).__name__}: {exc}"
     if not ok:
@@ -1385,16 +1480,14 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
             for key in keys):
         return False, "Invalid LiteLLM key-list response; no write attempted"
     hashed = hashlib.sha256(key_or_alias.encode("utf-8")).hexdigest()
-    matches = [key for key in keys if key["token"] in (key_or_alias, hashed)]
-    if not matches and len(key_or_alias) >= 8:
-        matches = [key for key in keys if key["token"].startswith(key_or_alias)]
+    matches = [key for key in keys if key_ref(key["token"]) == key_or_alias or key["token"] in (key_or_alias, hashed)]
     if not matches:
         matches = [key for key in keys if key.get("key_alias") == key_or_alias]
-    if not matches:
-        matches = [key for key in keys if key.get("key_name") == key_or_alias]
     if len(matches) != 1:
-        return False, "Key not found or identifier is ambiguous; use the full key or its token ID"
+        return False, "Key not found or identifier is ambiguous; open the owner's key records and select the exact key"
     key = matches[0]
+    if user_id and key.get("user_id") != user_id:
+        return False, f"Key does not belong to user {user_id}; no write attempted"
     if key.get("key_alias") == "open-webui":
         return False, "The Open WebUI service key cannot be revoked here"
     token = key.get("token")
@@ -1414,8 +1507,8 @@ def litellm_key_delete(key_or_alias: str, master_key: str | None = None) -> tupl
     absent, detail = litellm_key_absent(token, master_key=master_key)
     if not absent:
         return False, UnconfirmedMessage(detail)
-    return True, f"Key {key_or_alias} revoked"
-
+    alias_label = key.get("key_alias") or key_ref(token)
+    return True, f"Key {alias_label} revoked (confirmed absent from gateway database)"
 
 def _sync_litellm_models_once(
     active_model: str | None,
@@ -1673,6 +1766,47 @@ def collect_litellm_status() -> str:
     return "unreachable"
 
 
+def collect_litellm_auth_enforcement(gateway_status: str) -> str:
+    if gateway_status == "authentication-required":
+        return "enforced"
+    if gateway_status != "ready":
+        return "unknown"
+    base_url = litellm_base_url(timeout=3)
+    if not base_url:
+        return "unknown"
+    req = urllib.request.Request(f"{base_url}/v1/models", headers={"User-Agent": "puu-oksa/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return "keyless" if resp.status == 200 else "unknown"
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        exc.close()
+        return "enforced" if code in (401, 403) else "unknown"
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
+        return "unknown"
+
+
+def collect_calibration_preparation() -> dict | None:
+    from oksa_calibration_state import STATUS_PATH, boot_id, read_record
+    try:
+        record = read_record(STATUS_PATH)
+        if record.get("boot_id") != boot_id():
+            return None
+        state = str(record.get("state") or "")
+        model = str(record.get("model") or "")
+        if not model or state not in ("running", "complete", "error"):
+            return None
+        updated = record.get("updated_at")
+        return {
+            "model": model,
+            "state": state,
+            "message": str(record.get("message") or ""),
+            "updated_at": float(updated) if isinstance(updated, (int, float)) and math.isfinite(updated) else 0.0,
+        }
+    except (OSError, ValueError):
+        return None
+
+
 def collect_serving_status() -> dict:
     selected_file = Path(os.environ.get("PUU_VLLM_SELECTED_MODEL_FILE", str(STATE_DIR / "selected-model")))
     disabled_file = Path(os.environ.get("PUU_VLLM_SERVING_DISABLED_FILE", str(STATE_DIR / "serving.disabled")))
@@ -1697,15 +1831,28 @@ def collect_serving_status() -> dict:
     if not serving_enabled and model_status != "ready":
         model_status = "stopped"
     gateway_status = collect_litellm_status()
+    auth_enforcement = collect_litellm_auth_enforcement(gateway_status)
+    preparation = collect_calibration_preparation()
+    host = socket.gethostname().strip() or "puu"
+    try:
+        api_base_url = f"http://{primary_gateway_hosts()[1]}/v1"
+    except Exception:
+        api_base_url = f"http://api.{host}.local/v1"
 
     return {
+        "host": host,
+        "api_base_url": api_base_url,
+        "auth_enforcement": auth_enforcement,
         "serving_enabled": serving_enabled,
         "selected_model": public_model_name(selected_model),
         "active_model": public_model_name(active_model),
+        "selected_model_id": selected_model,
+        "active_model_id": active_model,
         "host_memory": host_mem,
         "gpus": gpus,
         "workloads": workloads,
         "metrics": metrics,
         "model_status": model_status,
         "gateway_status": gateway_status,
+        "preparation": preparation,
     }

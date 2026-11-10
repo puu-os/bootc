@@ -306,6 +306,8 @@ def preseed_target(
                 return False
 
     models_dir.mkdir(parents=True, exist_ok=True)
+    if os.environ.get("PUU_PRESEED_LOCK_HELD") == f"1:{model_name}":
+        return preseed_locked(catalog_file, models_dir, model_name, repo_id, revision, hf_meta=hf_meta)
     lock_path = models_dir.parent / f".{model_name}.preseed.lock"
     with lock_path.open("w") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)

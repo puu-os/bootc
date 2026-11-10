@@ -198,7 +198,8 @@ class WorkloadPlanner:
         ms.STATE_DIR.mkdir(parents=True, exist_ok=True)
         STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with (ms.STATE_DIR / "planner.lock").open("a") as planner_lock:
-            fcntl.flock(planner_lock, fcntl.LOCK_EX)
+            if os.environ.get("PUU_PLANNER_LOCK_HELD") != "1":
+                fcntl.flock(planner_lock, fcntl.LOCK_EX)
             subprocess.run([str(Path(__file__).with_name("oksa-label-model-serving-node"))], check=True)
             planner.calibrate()
             with (STATUS_PATH.parent / "lock").open("a") as gpu_lock:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 import fcntl
@@ -80,7 +81,7 @@ class ModelRemovalService:
         self.discover_bin = discover_bin
         self.planner_bin = planner_bin
 
-    def remove(self, model_name: str) -> RemovalResult:
+    def remove(self, model_name: str, *, prevalidate: Callable[[str], None] | None = None) -> RemovalResult:
         if not isinstance(model_name, str) or not model_name:
             return RemovalResult(RemovalOutcome.INVALID, "Model name must be a non-empty string")
         failure_outcome = RemovalOutcome.SHUTDOWN_FAILED
@@ -97,7 +98,10 @@ class ModelRemovalService:
             if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name)
                     or not (ms.MODELS_DIR / model_name).resolve().is_relative_to(ms.MODELS_DIR.resolve())):
                 return RemovalResult(RemovalOutcome.INVALID, "Invalid model name")
-            with (ms.MODELS_DIR.parent / f".{model_name}.preseed.lock").open("a") as model_lock:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            STATUS_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            planner_env = dict(os.environ, PUU_PLANNER_LOCK_HELD="1")
+            with (ms.MODELS_DIR.parent / f".{model_name}.preseed.lock").open("a") as model_lock, (state_dir / "planner.lock").open("a") as lock:
                 try:
                     fcntl.flock(model_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
@@ -105,20 +109,21 @@ class ModelRemovalService:
                         RemovalOutcome.BUSY,
                         "Model is busy. Wait for its download or update to finish and retry deletion.",
                     )
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if prevalidate is not None:
+                    with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=False):
+                        prevalidate(model_name)
                 active_model_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(state_dir / "active-model")))
                 selected_model_file, serving_disabled_file = ms.control_files(state_dir)
                 public_name = ms.public_model_name(model_name, state_dir)
                 if ms.read_first_line(active_model_file) == model_name:
                     selected_model_file.unlink(missing_ok=True)
                     ms.atomic_write_text(serving_disabled_file, "")
-                    subprocess.run([str(self.planner_bin), "--require-reconcile"], capture_output=True, text=True, check=True)
+                    subprocess.run([str(self.planner_bin), "--require-reconcile"], env=planner_env, capture_output=True, text=True, check=True)
                 elif ms.read_first_line(selected_model_file) in (model_name, public_name):
                     selected_model_file.unlink(missing_ok=True)
 
-                state_dir.mkdir(parents=True, exist_ok=True)
-                STATUS_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-                with (state_dir / "planner.lock").open("a") as lock, (STATUS_PATH.parent / "lock").open("a") as gpu_lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
+                with (STATUS_PATH.parent / "lock").open("a") as gpu_lock:
                     fcntl.flock(gpu_lock, fcntl.LOCK_EX)
                     with ms.preseed_publish_lock(ms.MODELS_DIR, exclusive=True):
                         if ms.read_first_line(active_model_file) == model_name:
@@ -215,7 +220,7 @@ class ModelRemovalService:
                             or any(item.get("name") == model_name for item in metadata)
                             or ms.parse_env_file(state_dir / "default-model.env").get("PUU_VLLM_MODEL_NAME") == model_name):
                         raise ValueError("Deleted model remains in the catalog; discovery did not finish")
-                subprocess.run([str(self.planner_bin), "--require-reconcile"], capture_output=True, text=True, check=True)
+                subprocess.run([str(self.planner_bin), "--require-reconcile"], env=planner_env, capture_output=True, text=True, check=True)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             detail = (exc.stderr or exc.stdout or str(exc)).strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
             if deleted:
