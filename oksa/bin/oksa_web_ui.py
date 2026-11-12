@@ -267,6 +267,15 @@ class _OksaPage:
     def _render_all(self) -> None:
         if self.client.is_deleted:
             return
+        if not self.status_stale and self.status is not None:
+            try:
+                max_age = float(self.snapshot.get("max_age_seconds") or 10.0)
+                base_age = float(self.snapshot.get("age_seconds") or 0.0)
+            except (TypeError, ValueError):
+                max_age = 10.0
+                base_age = 0.0
+            if self.status_received <= 0 or (base_age + max(0.0, time.monotonic() - self.status_received)) > max_age:
+                self.status_stale = True
         self._render_shell()
         if self._active_updater is not None:
             self._active_updater()
@@ -370,10 +379,11 @@ class _OksaPage:
         self.snapshot = snap
         if isinstance(data.get("status"), dict):
             self.status = data["status"]
-            self.status_received = time.monotonic()
-        self.status_failed = False
-        self.status_stale = bool(snap.get("stale")) or self.status is None
         self.monitoring_error_text = str(snap.get("error") or "")
+        self.status_failed = bool(self.monitoring_error_text)
+        self.status_stale = bool(snap.get("stale")) or self.status is None or self.status_failed
+        if not self.status_stale and isinstance(data.get("status"), dict):
+            self.status_received = time.monotonic()
 
     async def _refresh_models(self) -> None:
         reply = await self._load("models", "ListModels")
