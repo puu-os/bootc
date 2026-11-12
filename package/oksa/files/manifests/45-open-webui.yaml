@@ -24,6 +24,10 @@ spec:
           env:
             - name: WEBUI_NAME
               value: Puu AI
+            - name: ENABLE_PERSISTENT_CONFIG
+              value: "False"
+            - name: ENABLE_SIGNUP
+              value: "False"
             - name: ENABLE_OLLAMA_API
               value: "False"
             - name: ENABLE_OPENAI_API
