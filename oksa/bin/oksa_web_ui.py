@@ -416,8 +416,11 @@ class _OksaPage:
         updated: dict[str, dict] = {}
         for path in paths:
             snap_reply = await self._call(self.service.get_job, path)
-            if self._success(snap_reply):
-                updated[path] = snap_reply[1]
+            if not self._success(snap_reply):
+                self.jobs_failed = True
+                self.activity_error_text = self._error(snap_reply)
+                return
+            updated[path] = snap_reply[1]
         self.jobs = updated
         self.jobs_loaded = True
         self.jobs_failed = False
