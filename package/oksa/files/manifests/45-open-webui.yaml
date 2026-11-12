@@ -1,3 +1,120 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: open-webui-search
+  namespace: oksa
+  labels:
+    app.kubernetes.io/name: open-webui
+data:
+  web-search.py: |
+    import json
+    import logging
+    import re
+    import urllib.parse
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from itertools import chain, islice
+
+    from ddgs import DDGS
+
+    IMAGE_QUERY = re.compile(
+        r"\b(images?|photos?|pictures?|pics?|illustrations?|diagrams?|visuals?"
+        r"|kuva|kuvat|valokuva|valokuvat|bild|bilder)\b|\blooks?\s+like\b",
+        re.IGNORECASE,
+    )
+    IMAGE_QUERY_FILLER = re.compile(
+        r"\b(show\s+me|find\s+me|give\s+me|search\s+for|look\s+up|images?|photos?|pictures?|pics?"
+        r"|illustrations?|diagrams?|visuals?|kuva|kuvat|valokuva|valokuvat|bild|bilder"
+        r"|from|on|in|of|the|a|an|internet|web|online)\b|\blooks?\s+like\b",
+        re.IGNORECASE,
+    )
+    MEDIAWIKI_HEADERS = {"User-Agent": "Puu-OpenWebUI-Search/1.0"}
+
+
+    def result(link: str, title: str, snippet: str) -> dict:
+        return {"link": link, "title": title, "snippet": snippet}
+
+
+    def mediawiki_pages(host: str, params: dict) -> list[dict]:
+        query = urllib.parse.urlencode({"action": "query", "format": "json", "generator": "search", **params})
+        request = urllib.request.Request(f"https://{host}/w/api.php?{query}", headers=MEDIAWIKI_HEADERS)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            pages = json.load(response).get("query", {}).get("pages", {})
+        return sorted(pages.values(), key=lambda page: page["index"])
+
+
+    def image_term(query: str) -> str:
+        return " ".join(IMAGE_QUERY_FILLER.sub(" ", query).split()) or query
+
+
+    def commons_images(query: str, count: int) -> list[dict]:
+        pages = mediawiki_pages("commons.wikimedia.org", {
+            "gsrnamespace": 6,
+            "gsrsearch": f"filetype:bitmap {image_term(query)}",
+            "gsrlimit": count,
+            "prop": "imageinfo",
+            "iiprop": "url",
+            "iiurlwidth": 1280,
+        })
+        results = []
+        for page in pages:
+            title = page["title"].removeprefix("File:").rsplit(".", 1)[0]
+            image = page["imageinfo"][0]
+            results.append(result(image["descriptionurl"], title, f"![{title}]({image['thumburl']})"))
+        return results
+
+
+    def wikipedia_images(query: str, count: int) -> list[dict]:
+        pages = mediawiki_pages("en.wikipedia.org", {
+            "gsrsearch": image_term(query),
+            "gsrlimit": count,
+            "prop": "pageimages|extracts|info",
+            "inprop": "url",
+            "piprop": "thumbnail",
+            "pithumbsize": 1280,
+            "exintro": 1,
+            "explaintext": 1,
+            "exchars": 200,
+        })
+        return [
+            result(page["fullurl"], page["title"], f"![{page['title']}]({page['thumbnail']['source']})\n{page['extract']}")
+            for page in pages
+            if "thumbnail" in page
+        ]
+
+
+    def web_results(query: str, count: int) -> list[dict]:
+        with DDGS() as ddgs:
+            hits = ddgs.text(query, safesearch="moderate", max_results=count)
+        return [result(hit["href"], hit["title"], hit["body"]) for hit in hits]
+
+
+    def search(query: str, count: int) -> list[dict]:
+        sources = (commons_images, wikipedia_images, web_results) if IMAGE_QUERY.search(query) else (web_results,)
+        return list(islice(chain.from_iterable(source(query, count) for source in sources), count))
+
+
+    class SearchHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            if self.path != "/search":
+                self.send_error(404)
+                return
+            try:
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                body = json.dumps(search(request["query"], request["count"])).encode()
+            except Exception as error:
+                logging.exception("Search failed")
+                self.send_error(500, explain=str(error))
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+
+    ThreadingHTTPServer(("127.0.0.1", 8081), SearchHandler).serve_forever()
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,6 +145,8 @@ spec:
               value: "False"
             - name: ENABLE_SIGNUP
               value: "False"
+            - name: REFERRER_POLICY
+              value: no-referrer
             - name: ENABLE_OLLAMA_API
               value: "False"
             - name: ENABLE_OPENAI_API
@@ -51,13 +170,40 @@ spec:
             - name: ENABLE_WEB_SEARCH
               value: "True"
             - name: WEB_SEARCH_ENGINE
-              value: "duckduckgo"
+              value: "external"
+            - name: EXTERNAL_WEB_SEARCH_URL
+              value: http://127.0.0.1:8081/search
             - name: BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
+              value: "True"
+            - name: BYPASS_WEB_SEARCH_WEB_LOADER
               value: "True"
             - name: USER_AGENT
               value: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
             - name: DEFAULT_MODEL_METADATA
               value: '{"capabilities":{"web_search":true},"defaultFeatureIds":["web_search"]}'
+            - name: RAG_TEMPLATE
+              value: |
+                ### Task:
+                Respond to the user query using the provided context, incorporating inline citations in the format [id] **only when the <source> tag includes an explicit id attribute** (e.g., <source id="1">).
+
+                ### Guidelines:
+                - If you don't know the answer, clearly state that.
+                - If uncertain, ask the user for clarification.
+                - Respond in the same language as the user's query.
+                - If the context is unreadable or of poor quality, inform the user and provide the best possible answer.
+                - If the answer isn't present in the context but you possess the knowledge, explain this to the user and provide the answer using your own understanding.
+                - When the user asks for an image, photo, or picture and <context> contains markdown images (such as ![title](https://...)), include the markdown image ![title](https://...) directly in your response so the image is displayed. Never say you cannot display or show images when markdown images are present in <context>.
+                - **Only include inline citations using [id] (e.g., [1], [2]) when the <source> tag includes an id attribute.**
+                - Do not cite if the <source> tag does not contain an id attribute.
+                - Do not use XML tags in your response.
+                - Ensure citations are concise and directly related to the information provided.
+
+                ### Output:
+                Provide a clear and direct response to the user's query, including inline citations in the format [id] only when the <source> tag with id attribute is present in the context.
+
+                <context>
+                {{CONTEXT}}
+                </context>
             - name: QUERY_GENERATION_PROMPT_TEMPLATE
               value: |
                 ### Task:
@@ -72,6 +218,7 @@ spec:
                 - Be concise and focused on composing high-quality search queries, avoiding unnecessary elaboration, commentary, or assumptions.
                 - Today's date is: {{CURRENT_DATE}}.
                 - Always prioritize providing actionable and broad queries that maximize informational coverage.
+                - When the user requests images, photos, or pictures, explicitly include "photo" or "picture" in the search query.
 
                 ### Output:
                 Strictly return in JSON format: 
@@ -101,11 +248,38 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /app/backend/data
+        - name: web-search
+          image: ghcr.io/open-webui/open-webui@sha256:46b59158e6558eeb980bc828e0f1b30238ad24d82ed84d5e5eda1dab2a082f14
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /opt/web-search/web-search.py
+          securityContext:
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: web-search
+              mountPath: /opt/web-search
+              readOnly: true
       volumes:
         - name: data
           hostPath:
             path: /var/lib/puu/open-webui
             type: DirectoryOrCreate
+        - name: web-search
+          configMap:
+            name: open-webui-search
 ---
 apiVersion: v1
 kind: Service
