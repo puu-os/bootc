@@ -540,10 +540,7 @@ class OksaDBusService:
         self.workers: list[Invocation] = []
         self.registrations: dict[str, int] = {}
         self.closed = False
-        try:
-            self.frontend_uid = pwd.getpwnam("oksa").pw_uid
-        except KeyError:
-            self.frontend_uid = None
+        self.frontend_uid = pwd.getpwnam("oksa").pw_uid
         self.store = JobStore(Path(job_dir or os.environ.get("OKSA_JOB_DIR", "/var/lib/oksa/jobs")))
         self.monitoring = StatusSampler(ms.collect_serving_status)
         self.context = multiprocessing.get_context("spawn")
@@ -822,7 +819,7 @@ class OksaDBusService:
             if uid != 0:
                 raise OksaError("AccessDenied", "Only root may reconcile unresolved operation state")
             return
-        if uid != 0 and (self.frontend_uid is None or uid != self.frontend_uid):
+        if uid not in (0, self.frontend_uid):
             raise OksaError("AccessDenied", "Only root or the dedicated oksa frontend may call this service")
 
     @staticmethod
