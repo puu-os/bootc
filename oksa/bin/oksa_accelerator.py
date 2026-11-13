@@ -208,52 +208,7 @@ class AcceleratorDiscovery:
                     )
                 )
 
-        if not devices:
-            devices = cls._fallback_device_scan(nvidia_info)
-
         return devices
-
-    @classmethod
-    def _fallback_device_scan(
-        cls,
-        nvidia_info: dict[str, tuple[str, int]] | None = None,
-    ) -> list[AcceleratorDevice]:
-        devices: list[AcceleratorDevice] = []
-        nvidia_devs = sorted(Path("/dev").glob("nvidia[0-9]*"))
-        if nvidia_devs:
-            nv_values = list((nvidia_info or {}).values())
-            for idx, _ in enumerate(nvidia_devs):
-                name, mem_bytes = nv_values[idx] if idx < len(nv_values) else ("", 0)
-                devices.append(
-                    AcceleratorDevice(
-                        index=idx,
-                        vendor=AcceleratorVendor.NVIDIA,
-                        pci_id=f"nvidia-{idx}",
-                        name=name,
-                        memory_total_bytes=mem_bytes,
-                        driver="nvidia",
-                    )
-                )
-        elif Path("/dev/kfd").exists():
-            devices.append(
-                AcceleratorDevice(
-                    index=0,
-                    vendor=AcceleratorVendor.AMD,
-                    pci_id="kfd-0",
-                    driver="amdgpu",
-                )
-            )
-        elif list(Path("/dev/dri").glob("renderD*")):
-            devices.append(
-                AcceleratorDevice(
-                    index=0,
-                    vendor=AcceleratorVendor.UNKNOWN,
-                    pci_id="renderD-0",
-                    driver="drm",
-                )
-            )
-        return devices
-
     @classmethod
     def has_accelerators(cls) -> bool:
         return len(cls.scan_devices()) > 0
