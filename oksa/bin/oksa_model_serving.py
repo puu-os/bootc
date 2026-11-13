@@ -150,6 +150,7 @@ def collect_models_list(
             "storage_mib": meta.get("storage_mib") or 0,
             "quantization": meta.get("quantization") or "none",
             "capabilities": "ok" if capable else "insufficient",
+            "calibration": state.calibration_readiness(name),
             "active": (name == active_model),
             "selected": (name == selected_model),
         })
@@ -795,6 +796,8 @@ class WorkloadState:
     snapshot: "WorkloadSnapshot | None"
     catalogue: tuple[tuple[str, str], ...]
     capability_error: OSError | ValueError | None = None
+    hardware: dict | None = None
+    hardware_error: OSError | ValueError | subprocess.SubprocessError | None = None
 
     @classmethod
     def load(
@@ -903,10 +906,40 @@ class WorkloadState:
 
         catalogue = tuple((name, public_names[name]) for name, _ in catalogue)
         snapshot = WorkloadSnapshot(tuple(models), node, models_dir) if capability_error is None else None
-        return cls(snapshot, catalogue, capability_error)
+        return cls(snapshot, catalogue, capability_error, hardware, hardware_error)
 
     def resolve_model_name(self, name: str) -> str:
         return resolve_model_name(name, catalogue=self.catalogue)
+
+    def calibration_readiness(self, name: str) -> str:
+        """How serving a model obtains calibrated limits.
+
+        "measured" or "zero-limits" when an applied or reusable recorded profile supplies them, "required" when
+        GPU measurement must run first, and "unavailable" when that cannot be determined.
+        """
+        from oksa_calibration_state import CalibrationStore, read_record, result_path
+
+        model = next((m for m in self.snapshot.models if m.spec.name == name), None) if self.snapshot else None
+        if model is None:
+            return "unavailable"
+        max_sequences = model.calibration.applied_max_sequences
+        if max_sequences is None:
+            try:
+                result = read_record(result_path(name))
+            except (FileNotFoundError, ValueError):
+                return "required"
+            except OSError:
+                return "unavailable"
+            if self.hardware_error is not None:
+                return "unavailable"
+            try:
+                identity = CalibrationStore.identity(model.spec, hardware=self.hardware)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return "unavailable"
+            if not CalibrationStore.reusable(result, name, identity):
+                return "required"
+            max_sequences = result["limits"]["max_num_seqs"]
+        return "measured" if max_sequences > 0 else "zero-limits"
 
     def public_model_name(self, name: str, state_dir: Path = STATE_DIR) -> str:
         for internal, public_name in self.catalogue:

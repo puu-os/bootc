@@ -179,7 +179,8 @@ class Contract:
     MODEL = RecordSchema(
         {
             "name": "s", "id": "s", "repo_id": "s", "revision": "s", "provenance": "s", "path": "s",
-            "storage_mib": "x", "quantization": "s", "capabilities": "s", "active": "b", "selected": "b",
+            "storage_mib": "x", "quantization": "s", "capabilities": "s", "calibration": "s",
+            "active": "b", "selected": "b",
         },
         frozenset({"revision", "provenance", "path"}),
     )
