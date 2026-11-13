@@ -93,8 +93,9 @@ while IFS=$'\t' read -r dest_name src_name sha256 url; do
 done < "${oksa_src}/crds.manifest"
 
 for file in "${oksa_src}"/bin/*; do
+  [[ -f "${file}" ]] || continue
   name="${file##*/}"
-  if [[ "${name}" == oksa_*.py ]]; then
+  if [[ "${name}" == oksa_*.py || "${name}" == oksa_*.css ]]; then
     install -D -m 0644 "${file}" "${stage}/usr/libexec/puu/${name}"
   else
     install -D -m 0755 "${file}" "${stage}/usr/libexec/puu/${name}"
@@ -156,7 +157,8 @@ if [ -d "${web_rootfs}/usr/lib" ]; then
 fi
 install -d -m 0755 "${web_rootfs}/usr/libexec/puu"
 install -m 0755 "${stage}/usr/libexec/puu/oksa-web" "${web_rootfs}/usr/libexec/puu/"
-install -m 0644 "${stage}/usr/libexec/puu"/oksa_*.py "${web_rootfs}/usr/libexec/puu/"
+install -m 0644 "${stage}/usr/libexec/puu"/oksa_*.py "${stage}/usr/libexec/puu"/oksa_*.css \
+  "${web_rootfs}/usr/libexec/puu/"
 
 tar -C "${web_rootfs}" --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
   --owner=0 --group=0 --numeric-owner -cf "${work}/web-rootfs.tar" .

@@ -1,440 +1,15 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import html
+import json
 import math
+import shlex
 from urllib.parse import quote
 
-
-OKSA_CSS = """
-* { box-sizing: border-box; }
-:root {
-  color-scheme: light;
-  --ink: #20262d;
-  --muted: #52606d;
-  --line: #d4d9df;
-  --paper: #fff;
-  --green: #174ea6;
-  --pale: #eaf1fc;
-  --amber: #785000;
-  --red: #a32121;
-}
-html, body, #app, .q-layout, .q-page-container, .q-page, .nicegui-content {
-  margin: 0 !important;
-  padding: 0 !important;
-  height: 100dvh;
-  width: 100%;
-  overflow: hidden;
-  background: var(--paper);
-  color: var(--ink);
-  font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-.nicegui-content {
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 0 !important;
-}
-.nicegui-sub-pages {
-  display: block;
-  width: 100%;
-  min-width: 0;
-}
-.skip-link {
-  position: absolute;
-  left: 16px;
-  top: -100px;
-  z-index: 100;
-  padding: 10px 16px;
-  background: #fff;
-  color: var(--ink);
-  border: 2px solid var(--green);
-  font-weight: 600;
-}
-.skip-link:focus { top: 8px; }
-main:focus-visible { outline: 3px solid #8a4700; outline-offset: -3px; }
-a { color: var(--green); text-decoration: underline; text-underline-offset: 3px; }
-a:hover { color: #103b7c; }
-button, input, select, textarea { font: inherit; }
-button, .button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 38px;
-  padding: 8px 14px;
-  border: 1px solid #8c9aa6;
-  border-radius: 3px;
-  background: #fff;
-  color: var(--ink);
-  text-decoration: none;
-  font-weight: 600;
-  cursor: pointer;
-  line-height: 1.35;
-}
-button:hover, .button:hover { background: #eef2f6; color: var(--ink); border-color: #5d6d7e; }
-.primary { background: var(--green); border-color: var(--green); color: #fff; }
-.primary:hover { background: #103b7c; border-color: #103b7c; color: #fff; }
-.danger { color: var(--red); border-color: #c98a82; background: #fff; }
-.danger:hover { background: #f9ece9; color: var(--red); border-color: var(--red); }
-button:disabled, input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
-button:disabled:hover { background: #fff; }
-.primary:disabled:hover { background: var(--green); }
-:focus-visible { outline: 3px solid #8a4700; outline-offset: 3px; }
-.nav-link:focus-visible { outline-offset: -3px; }
-.topbar {
-  flex: none;
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 0 24px;
-  border-bottom: 1px solid #313b47;
-  background: #202a35;
-  color: #fff;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 17px;
-  font-weight: 700;
-  color: #fff;
-  text-decoration: none;
-}
-.brand:hover { color: #fff; }
-.topbar :focus-visible { outline-color: #ffcf80; }
-.host {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  color: #c6d2de;
-  font-size: 12px;
-}
-.host strong {
-  color: #f6faf5;
-  font-weight: 600;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-.host-divider { width: 1px; height: 18px; background: #486062; }
-.app {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 192px minmax(0, 1fr);
-}
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  padding: 16px 8px;
-  border-right: 1px solid var(--line);
-  background: #f5f6f8;
-  min-width: 0;
-  overflow-y: auto;
-}
-.nav-label {
-  margin: 0 12px 12px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-.sidebar nav { display: flex; flex-direction: column; gap: 4px; }
-.nav-link {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  color: #36454f;
-  text-decoration: none;
-  border-left: 2px solid transparent;
-  font-weight: 550;
-}
-.nav-link:hover { background: #e8ecf2; color: var(--ink); }
-.nav-link[aria-current="page"] {
-  color: #103b7c;
-  background: #e5edf9;
-  border-left-color: var(--green);
-  font-weight: 700;
-}
-.sidebar-foot {
-  margin-top: auto;
-  padding: 20px 12px 0;
-  color: var(--muted);
-  font-size: 12px;
-  border-top: 1px solid var(--line);
-}
-.sidebar-foot p { margin: 0 0 6px; }
-main {
-  min-width: 0;
-  min-height: 0;
-  padding: 20px 24px 32px;
-  overflow-y: auto;
-}
-.breadcrumbs {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 12px;
-  margin-bottom: 16px;
-}
-.breadcrumbs a { color: var(--muted); text-decoration: none; }
-.breadcrumbs a:hover { text-decoration: underline; }
-.breadcrumbs span[aria-current="page"] { color: var(--ink); font-weight: 600; }
-.page-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-h1 { font-size: 20px; font-weight: 650; line-height: 1.3; margin: 0 0 6px; overflow-wrap: anywhere; }
-h2 { font-size: 16px; font-weight: 650; margin: 0; }
-h3 { font-size: 14px; font-weight: 650; margin: 0 0 8px; }
-p { margin: 0 0 12px; }
-.subtitle { margin: 0; color: var(--muted); font-size: 13px; max-width: 76ch; }
-.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--green);
-  background: var(--pale);
-  border: 1px solid #b8d0f2;
-  padding: 2px 7px;
-  border-radius: 2px;
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-.status::before { content: ''; width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
-.status.neutral { color: #435359; background: #eef1f1; border-color: #cfd6d8; }
-.status.warning { color: var(--amber); background: #f9efdc; border-color: #e0c389; }
-.status.error { color: var(--red); background: #f9eae7; border-color: #e2b4ac; }
-.notice {
-  padding: 14px 16px;
-  background: #edf3ee;
-  border-left: 3px solid #4e7a56;
-  margin-bottom: 20px;
-  font-size: 13px;
-}
-.notice p:last-child { margin-bottom: 0; }
-.notice.warning { background: #fbf3e4; border-color: #b48a40; }
-.notice.error { background: #fbede9; border-color: #b76252; }
-.notice strong { font-weight: 650; }
-.section { margin-top: 28px; }
-.section-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-.section-head p, .section-head a { margin: 0; font-size: 12px; }
-.muted, .help { color: var(--muted); }
-.help { font-size: 12px; margin-top: 7px; }
-.small { font-size: 12px; }
-.metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  margin: 16px 0 8px;
-}
-.metric { padding: 10px 14px 10px 0; }
-.metric + .metric { border-left: 1px solid var(--line); padding-left: 14px; }
-.metric-label { color: var(--muted); font-size: 12px; font-weight: 500; }
-.metric-value {
-  display: block;
-  font-size: 16px;
-  line-height: 1.5;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  margin: 3px 0;
-}
-.metric-value small { color: var(--muted); font-size: 13px; font-weight: 450; }
-.metric-note { font-size: 12px; color: var(--muted); }
-.table-scroll {
-  overflow-x: auto;
-  max-width: 100%;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-}
-table { width: 100%; border-collapse: collapse; text-align: left; white-space: nowrap; font-size: 13px; }
-th { color: #3b4652; font-size: 12px; font-weight: 650; background: #f1f3f6; }
-th, td { padding: 9px 12px; border-bottom: 1px solid #e0e4e9; vertical-align: middle; }
-th:first-child, td:first-child { padding-left: 14px; }
-tr:last-child td { border-bottom: 0; }
-td strong { font-weight: 650; }
-td .sub { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
-td a { font-weight: 600; }
-.numeric { text-align: right; font-variant-numeric: tabular-nums; }
-.mono, code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.93em; }
-code { overflow-wrap: anywhere; }
-.toolbar {
-  display: flex;
-  gap: 16px;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  padding: 14px 0;
-  border-top: 1px solid var(--line);
-}
-.toolbar-field { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
-.toolbar-field label { margin: 0; font-size: 11px; font-weight: 600; }
-.toolbar .count { margin-left: auto; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
-label, legend { display: block; font-weight: 600; font-size: 12px; margin-bottom: 6px; }
-input:not([type=radio]):not([type=checkbox]), select, textarea {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  border: 1px solid #6c7a86;
-  background: #fff;
-  color: var(--ink);
-  border-radius: 3px;
-  padding: 8px 11px;
-  min-height: 38px;
-}
-input[readonly] { background: #f1f4ef; color: #52635e; }
-input[type=checkbox], input[type=radio] { accent-color: var(--green); width: 16px; height: 16px; }
-.form-width { max-width: 760px; }
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 14px;
-  align-items: end;
-}
-.field { margin: 18px 0; }
-.field .help { margin-bottom: 0; }
-fieldset { border: 0; padding: 0; margin: 18px 0; min-width: 0; }
-.option {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  border-top: 1px solid var(--line);
-  padding: 12px 0;
-  font-weight: 400;
-  margin: 0;
-  cursor: pointer;
-}
-.option:last-child { border-bottom: 1px solid var(--line); }
-.option input { margin-top: 3px; }
-.option strong { display: block; font-size: 13px; font-weight: 600; }
-.option small { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
-.form-footer {
-  border-top: 1px solid var(--line);
-  margin-top: 24px;
-  padding-top: 16px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-}
-.facts {
-  display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
-  margin: 0;
-  border-top: 1px solid var(--line);
-}
-.facts dt, .facts dd {
-  margin: 0;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-  font-size: 13px;
-}
-.facts dt { color: var(--muted); font-weight: 500; padding-right: 12px; }
-.facts dd { overflow-wrap: anywhere; }
-.fact-actions { margin-top: 16px; }
-.progress-text {
-  border: 1px solid var(--line);
-  background: #f5f7f9;
-  padding: 16px;
-  margin: 14px 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.page-foot {
-  color: var(--muted);
-  font-size: 11px;
-  border-top: 1px solid var(--line);
-  padding-top: 14px;
-  margin-top: 32px;
-  display: flex;
-  justify-content: space-between;
-  gap: 15px;
-  flex-wrap: wrap;
-}
-.empty { padding: 18px 14px; color: var(--muted); border-bottom: 1px solid var(--line); font-size: 13px; }
-[hidden] { display: none !important; }
-dialog.oksa-modal {
-  border: 1px solid #8c9aa6;
-  border-radius: 4px;
-  padding: 24px;
-  max-width: 540px;
-  width: calc(100% - 32px);
-  color: var(--ink);
-  background: var(--paper);
-  box-shadow: 0 18px 60px rgba(18, 47, 52, 0.25);
-  max-height: calc(100dvh - 40px);
-  overflow-y: auto;
-}
-dialog.oksa-modal::backdrop { background: rgba(23, 43, 48, 0.5); }
-dialog.oksa-modal h2 { font-size: 18px; margin: 0 0 12px; line-height: 1.3; }
-dialog.oksa-modal p { font-size: 13px; }
-dialog.oksa-modal .dialog-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  margin-top: 20px;
-}
-dialog.oksa-modal code.secret-box {
-  display: block;
-  background: #edf1f7;
-  border: 1px solid #b8c4d0;
-  padding: 12px;
-  margin: 12px 0;
-  font-size: 12px;
-  user-select: all;
-  overflow-wrap: anywhere;
-}
-@media (max-width: 1000px) {
-  .app { grid-template-columns: 174px minmax(0, 1fr); }
-  main { padding: 20px 24px 32px; }
-  .page-heading { flex-wrap: wrap; gap: 14px; }
-}
-@media (max-width: 680px) {
-  .topbar { height: 48px; padding: 0 16px; gap: 10px; }
-  .brand { font-size: 17px; }
-  .host { font-size: 12px; gap: 8px; }
-  .host .host-extra, .host-divider { display: none; }
-  .app { display: flex; flex-direction: column; }
-  .sidebar { flex: none; padding: 0; border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; }
-  .nav-label, .sidebar-foot { display: none; }
-  .sidebar nav { flex-direction: row; overflow-x: auto; gap: 0; }
-  .nav-link {
-    white-space: nowrap;
-    flex: 1 0 auto;
-    justify-content: center;
-    padding: 10px 12px;
-    font-size: 13px;
-    border-left: 0;
-    border-bottom: 2px solid transparent;
-  }
-  .nav-link[aria-current="page"] { border-left: 0; border-bottom-color: var(--green); }
-  main { flex: 1; padding: 16px; }
-  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metric, .metric + .metric { padding: 10px; border-left: 0; }
-  .metric:nth-child(even) { border-left: 1px solid var(--line); }
-  .metric:nth-child(n+3) { border-top: 1px solid var(--line); }
-  .facts { grid-template-columns: 112px minmax(0, 1fr); gap: 0 12px; }
-  .toolbar-field { flex: 1 1 150px; min-width: 0; }
-  .toolbar .count { margin-left: 0; }
-}
-"""
+from oksa_web_kit import Kit, Tone
 
 
 def esc(value: object) -> str:
@@ -445,10 +20,48 @@ def url_part(value: str) -> str:
     return quote(str(value or ""), safe="")
 
 
+def _valid_time(timestamp: object) -> bool:
+    return type(timestamp) in (int, float) and math.isfinite(timestamp) and timestamp > 0
+
+
 def fmt_utc(timestamp: float | int | None) -> str:
-    if type(timestamp) not in (int, float) or not math.isfinite(timestamp) or timestamp <= 0:
+    if not _valid_time(timestamp):
         return "Unknown time"
     return datetime.fromtimestamp(float(timestamp), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def fmt_ago(timestamp: float | int | None, now: float) -> str:
+    """A moment relative to now, to the minute: "just now", "5 min ago", "in 2 h", "3 days ago"."""
+    if not _valid_time(timestamp):
+        return "at an unknown time"
+    delta = now - timestamp
+    minutes = int(abs(delta) // 60)
+    if minutes == 0:
+        return "just now"
+    if minutes < 60:
+        amount = f"{minutes} min"
+    elif minutes < 24 * 60:
+        amount = f"{minutes // 60} h"
+    else:
+        days = minutes // (24 * 60)
+        amount = f"{days} day" if days == 1 else f"{days} days"
+    return f"{amount} ago" if delta > 0 else f"in {amount}"
+
+
+def fmt_time(timestamp: float | int | None, now: float) -> str:
+    """Markup for a moment relative to now, carrying the exact UTC time as tooltip and machine value."""
+    if not _valid_time(timestamp):
+        return esc(fmt_ago(timestamp, now))
+    exact = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    return (
+        f'<time datetime="{exact.isoformat(timespec="seconds")}" title="{esc(fmt_utc(timestamp))}">'
+        f"{esc(fmt_ago(timestamp, now))}</time>"
+    )
+
+
+def disclosure(summary: str, body_html: str) -> str:
+    """Supporting explanation folded behind a one-line summary."""
+    return f'<details class="disclosure"><summary>{esc(summary)}</summary>{body_html}</details>'
 
 
 def fmt_mib(value: int | float | None) -> str:
@@ -465,6 +78,84 @@ def job_short_id(path: str | None) -> str:
     return path.rsplit("/", 1)[-1]
 
 
+def fmt_bytes(value: int | float) -> str:
+    for unit, size in (("GiB", 1024**3), ("MiB", 1024**2), ("KiB", 1024)):
+        if value >= size:
+            return f"{value / size:.1f} {unit}"
+    return f"{int(value)} B"
+
+
+def fmt_duration(seconds: float) -> str:
+    hours, rest = divmod(max(0, int(seconds)), 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
+
+
+@dataclass(frozen=True)
+class ProgressReading:
+    """A job's reported progress as the phase, the completed fraction (None if unknown) and its figures."""
+
+    phase: str
+    message: str
+    fraction: float | None
+    percent: str
+    figures: str
+
+    @classmethod
+    def of(cls, progress: dict | None, now: float) -> "ProgressReading":
+        if not isinstance(progress, dict):
+            return cls("Starting", "", None, "", "Waiting for the first progress report")
+        phase, message = str(progress.get("phase") or "Working"), str(progress.get("message") or "")
+        started = progress.get("phase_started_at") or now
+        done, total = progress.get("bytes_done"), progress.get("bytes_total")
+        rate, deadline = progress.get("bytes_per_second"), progress.get("deadline_at")
+        if isinstance(done, int) and isinstance(total, int) and total > 0:
+            figures = [f"{fmt_bytes(done)} of {fmt_bytes(total)}"]
+            if isinstance(rate, (int, float)) and rate > 0:
+                figures += [f"{fmt_bytes(rate)}/s", f"about {fmt_duration((total - done) / rate)} left"]
+            fraction = done / total
+            return cls(phase, message, fraction, f"{math.floor(fraction * 100)}%", " · ".join(figures))
+        if isinstance(deadline, (int, float)) and deadline > started:
+            elapsed, budget = now - started, deadline - started
+            return cls(phase, message, min(max(elapsed / budget, 0.0), 1.0), "",
+                       f"{fmt_duration(elapsed)} elapsed of {fmt_duration(budget)} budget")
+        return cls(phase, message, None, "", f"{fmt_duration(now - started)} elapsed")
+
+
+def render_job_progress(progress: dict | None, now: float, *, compact: bool = False) -> str:
+    reading = ProgressReading.of(progress, now)
+    value = "" if reading.fraction is None else f' value="{reading.fraction:.4f}"'
+    percent = f'<span class="job-progress-percent">{esc(reading.percent)}</span>' if reading.percent else ""
+    message = (f'<div class="job-progress-message mono">{esc(reading.message)}</div>'
+               if reading.message and not compact else "")
+    return (
+        f'<div class="job-progress{" compact" if compact else ""}">'
+        f'<div class="job-progress-head"><span class="job-progress-phase">{esc(reading.phase)}</span>{percent}</div>'
+        f'<progress max="1"{value} aria-label="{esc(reading.phase)}"></progress>'
+        f'<div class="job-progress-figures">{esc(reading.figures)}</div>{message}</div>'
+    )
+
+
+def render_activity(jobs: list[dict], now: float) -> str:
+    """The header indicator naming the oldest running job and its progress, linked to its detail page."""
+    running = sorted((job for job in jobs if job.get("state") == "running"),
+                     key=lambda job: float(job.get("started_at") or 0.0))
+    if not running:
+        return ""
+    job = running[0]
+    reading = ProgressReading.of(job.get("progress"), now)
+    label = operation_label(str(job.get("operation") or ""))
+    more = f'<span class="activity-more">+{len(running) - 1}</span>' if len(running) > 1 else ""
+    return (
+        f'<a class="activity" href="/operations/{url_part(job_short_id(job.get("path")))}" '
+        f'title="{esc(reading.phase)} · {esc(reading.figures)}">'
+        f'<span class="activity-pulse" aria-hidden="true"></span>'
+        f'<span class="activity-label">{esc(label)}</span>'
+        f'<strong>{esc(reading.percent or reading.phase)}</strong>{more}</a>'
+    )
+
 def operation_label(operation: str) -> str:
     labels = {
         "DownloadModel": "Download model",
@@ -479,11 +170,6 @@ def operation_label(operation: str) -> str:
         "RevokeKey": "Revoke API key",
     }
     return labels.get(operation, operation or "Operation")
-
-
-def status_badge(text: str, tone: str = "neutral") -> str:
-    tone_cls = f" {tone}" if tone in ("neutral", "warning", "error") else ""
-    return f'<span class="status{tone_cls}">{esc(text)}</span>'
 
 
 def render_breadcrumbs(items: list[tuple[str, str | None]]) -> str:
@@ -505,53 +191,150 @@ def render_facts(rows: list[tuple[str, str]]) -> str:
     return f'<dl class="facts">{items}</dl>'
 
 
-def render_unresolved_banner(unresolved: list[dict]) -> str:
+API_KEY_ENV = "OKSA_API_KEY"
+
+
+def quickstart_model(active: str, scope: list[str], installed: list[str]) -> str | None:
+    """The public model name a first request should use; an empty scope permits every model."""
+    if active and (not scope or active in scope):
+        return active
+    if scope:
+        return scope[0]
+    return installed[0] if installed else None
+
+
+def quickstart_snippets(base_url: str, model: str, api_key: str | None = None) -> dict[str, str]:
+    """Ready-to-run chat requests; without a key they read it from the environment."""
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "Hello"}]})
+    auth = shlex.quote(f"Authorization: Bearer {api_key}") if api_key else f'"Authorization: Bearer ${API_KEY_ENV}"'
+    curl = "\n".join([
+        f"curl {shlex.quote(base_url.rstrip('/') + '/chat/completions')} \\",
+        f"  -H {auth} \\",
+        '  -H "Content-Type: application/json" \\',
+        f"  -d {shlex.quote(body)}",
+    ])
+    key_expr = json.dumps(api_key) if api_key else f'os.environ["{API_KEY_ENV}"]'
+    python = "\n".join([
+        "# pip install openai",
+        *([] if api_key else ["import os"]),
+        "from openai import OpenAI",
+        "",
+        "client = OpenAI(",
+        f"    base_url={json.dumps(base_url)},",
+        f"    api_key={key_expr},",
+        ")",
+        "reply = client.chat.completions.create(",
+        f"    model={json.dumps(model)},",
+        '    messages=[{"role": "user", "content": "Hello"}],',
+        ")",
+        "print(reply.choices[0].message.content)",
+    ])
+    return {"curl": curl, "Python": python}
+
+
+@dataclass(frozen=True)
+class Reading:
+    """One aspect of the appliance's current state."""
+
+    label: str
+    text: str
+    tone: Tone
+    detail: str = ""
+    href: str = field(kw_only=True)
+
+
+@dataclass(frozen=True)
+class Health:
+    """Readings rolled up so that the most urgent one speaks for the appliance."""
+
+    readings: tuple[Reading, ...]
+
+    @property
+    def worst(self) -> Reading:
+        return max(self.readings, key=lambda reading: reading.tone.severity)
+
+    @property
+    def headline(self) -> str:
+        worst = self.worst
+        return "Healthy" if worst.tone is Tone.OK else f"{worst.label}: {worst.text}"
+
+    def summary_html(self) -> str:
+        return Kit.status(self.headline, self.worst.tone)
+
+    def panel_html(self) -> str:
+        rows = [
+            (
+                reading.label,
+                Kit.status(reading.text, reading.tone)
+                + (f'<div class="small muted">{esc(reading.detail)}</div>' if reading.detail else ""),
+            )
+            for reading in self.readings
+        ]
+        return f'<h2 id="health-heading">System health</h2>{render_facts(rows)}'
+
+    def tiles_html(self) -> str:
+        """Every reading as a tile linking to the page that explains it."""
+        tiles = "".join(
+            f'<li><a class="tile {reading.tone.name.lower()}" href="{esc(reading.href)}">'
+            f'<span class="tile-label">{esc(reading.label)}</span>'
+            f"{Kit.status(reading.text, reading.tone)}"
+            + (f'<span class="tile-detail">{esc(reading.detail)}</span>' if reading.detail else "")
+            + "</a></li>"
+            for reading in self.readings
+        )
+        return f'<ul class="tiles">{tiles}</ul>'
+
+
+def render_unresolved_banner(unresolved: list[dict], now: float) -> str:
     if not unresolved:
         return ""
     blocks = []
     for item in unresolved:
         req_id = esc(item.get("request_id") or "unknown")
         op = esc(operation_label(str(item.get("operation") or "")))
-        scope = esc(item.get("scope") or "unknown")
+        changes = {"model": "model", "user": "API user and key"}.get(str(item.get("scope")), "related")
         target = esc(item.get("target") or "unknown")
         err_code = esc(item.get("error_code") or "Unconfirmed")
         err_msg = esc(item.get("error_message") or item.get("summary") or "Outcome could not be verified.")
-        updated = esc(fmt_utc(item.get("updated_at")))
         job_path = item.get("job_path")
-        job_link = ""
+        rows = [("Request ID", f"<code>{req_id}</code>")]
         if isinstance(job_path, str) and job_path.strip():
             jid = job_short_id(job_path)
-            job_link = f' · Job <a href="/operations/{url_part(jid)}" class="mono">{esc(jid)}</a>'
+            rows.append(("Operation", f'<a href="/operations/{url_part(jid)}" class="mono">{esc(jid)}</a>'))
+        rows += [
+            ("Recorded", fmt_time(item.get("updated_at"), now)),
+            ("Last reported", f"{err_msg} <code>{err_code}</code>"),
+        ]
         blocks.append(
             f'<div class="notice error" role="alert">'
-            f"<p><strong>Unresolved {scope} operation guard · {op} on <code>{target}</code></strong></p>"
-            f"<p>Request ID: <code>{req_id}</code>{job_link} · Recorded: {updated} · Code: <code>{err_code}</code></p>"
-            f"<p>Last reported detail: {err_msg}</p>"
-            f"<p class=\"small\">Conflicting {scope} mutations remain blocked across tabs and reloads until state is verified. "
-            f"After settling work and inspecting the affected resources on the appliance host, a root maintainer can clear this guard with: "
-            f"<code>sudo /usr/libexec/puu/oksa-daemon --reconcile {req_id}</code></p>"
+            f"<p><strong>Outcome unknown · {op} on <code>{target}</code></strong></p>"
+            f"{render_facts(rows)}"
+            f"<p>Other {changes} changes stay blocked until this is resolved. "
+            f"After checking the affected resources on the host, resolve it as root with:</p>"
+            f'<pre class="mono">sudo /usr/libexec/puu/oksa-daemon --reconcile {req_id}</pre>'
             f"</div>"
         )
     return "".join(blocks)
 
 
-def render_serving_observations(
+def render_serving_status(
     status: dict | None,
     snapshot: dict,
     models: list[dict],
     *,
     disconnected: bool,
     status_failed: bool,
+    now: float,
 ) -> str:
     if status is None:
-        reason = snapshot.get("error") or ("Daemon connection unavailable." if disconnected else "Waiting for initial status observation.")
+        reason = snapshot.get("error") or ("Daemon connection unavailable." if disconnected else "Waiting for the first status update.")
         return (
             f'<div class="notice {"error" if status_failed or disconnected else "warning"}">'
-            f"<strong>Serving observations are currently unavailable.</strong> {esc(reason)} "
-            f"Unknown state is not reported as stopped or healthy."
+            f"<strong>Serving status is unavailable.</strong> {esc(reason)} "
+            f"An unknown state is never shown as stopped or healthy."
             f"</div>"
         )
-    sampled_at = snapshot.get("sampled_at") or "Unknown sample time"
+    sampled_at = fmt_time(snapshot.get("sampled_at"), now)
     stale = bool(snapshot.get("stale")) or status_failed or disconnected
     serving_enabled = status.get("serving_enabled") is True
     selected_name = str(status.get("selected_model") or "-")
@@ -561,7 +344,7 @@ def render_serving_observations(
     installed_ids = {m.get("id") for m in models if isinstance(m, dict)}
 
     if not serving_enabled:
-        desired_html = f'{status_badge("Serving disabled", "neutral")} <span class="muted">· StopServing is active</span>'
+        desired_html = f'{Kit.status("Serving disabled", Tone.NEUTRAL)} <span class="muted">· stopped with Stop serving</span>'
     elif selected_id != "-" and selected_id in installed_ids:
         desired_html = f'<a href="/models/{url_part(selected_id)}">{esc(selected_id)}</a> <span class="muted">· public name <code>{esc(selected_name)}</code></span>'
     elif selected_id != "-":
@@ -570,115 +353,76 @@ def render_serving_observations(
         desired_html = '<span class="muted">No explicit model pinned · planner uses autostart policy</span>'
 
     if active_id != "-" and active_id in installed_ids:
-        observed_html = f'<a href="/models/{url_part(active_id)}">{esc(active_id)}</a> <span class="muted">· public inference name <code>{esc(active_name)}</code></span>'
+        running_html = f'<a href="/models/{url_part(active_id)}">{esc(active_id)}</a> <span class="muted">· public name <code>{esc(active_name)}</code></span>'
     elif active_id != "-":
-        observed_html = f"<code>{esc(active_id)}</code> <span class=\"muted\">· public inference name <code>{esc(active_name)}</code></span>"
+        running_html = f"<code>{esc(active_id)}</code> <span class=\"muted\">· public name <code>{esc(active_name)}</code></span>"
     else:
-        observed_html = "None observed active"
+        running_html = "None running"
 
     model_status = str(status.get("model_status") or "unavailable")
     if stale:
-        health_html = f'{status_badge(f"Stale ({model_status})", "warning")} <span class="muted">· last sample {esc(sampled_at)}</span>'
+        health_html = f'{Kit.status(f"Stale ({model_status})", Tone.WARNING)} <span class="muted">· last updated {sampled_at}</span>'
     elif model_status == "ready":
-        health_html = f'{status_badge("Healthy (vLLM /health 200)", "")} <span class="muted">· observed {esc(sampled_at)}</span>'
+        health_html = f'{Kit.status("Healthy (vLLM /health 200)")} <span class="muted">· checked {sampled_at}</span>'
     elif model_status == "not-ready":
-        health_html = f'{status_badge("Starting / not ready", "warning")} <span class="muted">· observed {esc(sampled_at)}</span>'
+        health_html = f'{Kit.status("Starting / not ready", Tone.BUSY)} <span class="muted">· checked {sampled_at}</span>'
     elif model_status == "stopped":
-        health_html = f'{status_badge("Stopped", "neutral")} <span class="muted">· observed {esc(sampled_at)}</span>'
+        health_html = f'{Kit.status("Stopped", Tone.NEUTRAL)} <span class="muted">· checked {sampled_at}</span>'
     else:
-        health_html = f'{status_badge("Unavailable", "error")} <span class="muted">· observed {esc(sampled_at)}</span>'
+        health_html = f'{Kit.status("Unavailable", Tone.ERROR)} <span class="muted">· checked {sampled_at}</span>'
 
     gw = str(status.get("gateway_status") or "unreachable")
     if gw == "ready":
-        gw_badge = status_badge("Ready", "warning" if stale else "")
+        gw_badge = Kit.status("Ready", Tone.WARNING if stale else Tone.OK)
     elif gw == "authentication-required":
-        gw_badge = status_badge("Reachable (auth required)", "warning" if stale else "")
+        gw_badge = Kit.status("Reachable (auth required)", Tone.WARNING if stale else Tone.OK)
     else:
-        gw_badge = status_badge("Unreachable", "error")
-    gw_html = f'{gw_badge} <span class="muted">· readiness probe only; does not certify end-to-end inference</span>'
+        gw_badge = Kit.status("Unreachable", Tone.ERROR)
+    gw_html = f'{gw_badge} <span class="muted">· responds to health checks; API requests are not tested</span>'
 
     auth = str(status.get("auth_enforcement") or "unknown")
     if auth == "enforced":
-        auth_html = f'{status_badge("Enforced", "")} <span class="muted">· anonymous /v1/models probe rejected</span>'
+        auth_html = f'{Kit.status("Enforced")} <span class="muted">· requests without a key are rejected</span>'
     elif auth == "keyless":
         auth_html = (
-            f'{status_badge("Keyless access enabled", "warning")} '
+            f'{Kit.status("Keyless access enabled", Tone.WARNING)} '
             f'<span class="muted">· anonymous requests are accepted until litellm-master-key is configured</span>'
         )
     else:
         auth_html = (
-            f'{status_badge("Enforcement not verified", "neutral")} '
+            f'{Kit.status("Enforcement not verified", Tone.NEUTRAL)} '
             f'<span class="muted">· keyless access may be possible</span>'
         )
 
     api_url = str(status.get("api_base_url") or "http://api.puu.local/v1")
     prep = status.get("preparation")
     rows = [
-        ("Desired model", desired_html),
-        ("Observed model", observed_html),
+        ("Selected model", desired_html),
+        ("Running model", running_html),
         ("Model health", health_html),
         ("Gateway readiness", gw_html),
         ("Gateway authentication", auth_html),
-        ("Applied configuration", "Unknown with the current API. Recorded calibration limits are not verified live runtime settings."),
+        ("Applied configuration", "Not reported. Recorded calibration limits may differ from the running settings."),
         ("API base URL", f"<code>{esc(api_url)}</code>"),
     ]
     if isinstance(prep, dict) and prep.get("model"):
         p_model = str(prep.get("model") or "")
         p_state = str(prep.get("state") or "")
         p_msg = str(prep.get("message") or "")
-        p_time = fmt_utc(prep.get("updated_at"))
-        tone = "warning" if p_state == "running" else ("error" if p_state == "error" else "neutral")
+        tone = Tone.BUSY if p_state == "running" else (Tone.ERROR if p_state == "error" else Tone.NEUTRAL)
         rows.append((
-            "Observed calibration state",
-            f'{status_badge(f"{p_state} ({p_model})", tone)} <span class="muted">· {esc(p_msg)} ({esc(p_time)})</span>',
+            "Calibration",
+            f'{Kit.status(f"{p_state} ({p_model})", tone)} <span class="muted">· {esc(p_msg)} ({fmt_time(prep.get("updated_at"), now)})</span>',
         ))
     return render_facts(rows)
 
 
-def render_serving_metrics(status: dict | None, snapshot: dict, *, stale: bool) -> str:
-    mem = (status or {}).get("host_memory") if isinstance(status, dict) else {}
-    metrics = (status or {}).get("metrics") if isinstance(status, dict) else {}
-    mem = mem if isinstance(mem, dict) else {}
-    metrics = metrics if isinstance(metrics, dict) else {}
-
-    used_mib = mem.get("used_mib")
-    total_mib = mem.get("total_mib")
-    if isinstance(used_mib, int) and isinstance(total_mib, int) and total_mib > 0:
-        mem_val = f'{used_mib / 1024:.1f} <small>/ {total_mib / 1024:.1f} GiB</small>'
-        mem_note = f"{mem.get('used_pct', 0)}% host RAM used"
-    else:
-        mem_val = "Unavailable"
-        mem_note = "Host memory reading unavailable"
-
-    running_req = metrics.get("running_requests")
-    waiting_req = metrics.get("waiting_requests")
-    kv_pct = metrics.get("kv_cache_usage_pct")
-
-    run_val = str(running_req) if isinstance(running_req, int) else "Unavailable"
-    wait_val = str(waiting_req) if isinstance(waiting_req, int) else "Unavailable"
-    kv_val = f"{kv_pct:g} <small>%</small>" if isinstance(kv_pct, (int, float)) and math.isfinite(kv_pct) else "Unavailable"
-    sample_note = "Stale sample" if stale else "Current sample"
-
-    return (
-        f'<div class="metrics">'
-        f'<div class="metric"><span class="metric-label">Host memory used / total</span>'
-        f'<strong class="metric-value">{mem_val}</strong><span class="metric-note">{esc(mem_note)} · {sample_note}</span></div>'
-        f'<div class="metric"><span class="metric-label">Running requests</span>'
-        f'<strong class="metric-value">{esc(run_val)}</strong><span class="metric-note">Active vLLM requests, not a slot limit</span></div>'
-        f'<div class="metric"><span class="metric-label">Queued requests</span>'
-        f'<strong class="metric-value">{esc(wait_val)}</strong><span class="metric-note">Waiting inference requests, not daemon jobs</span></div>'
-        f'<div class="metric"><span class="metric-label">KV cache usage</span>'
-        f'<strong class="metric-value">{kv_val}</strong><span class="metric-note">Reported vLLM cache usage</span></div>'
-        f"</div>"
-    )
-
-
 def render_gpus_table(status: dict | None) -> str:
     if not isinstance(status, dict) or status.get("gpus") is None:
-        return '<div class="table-scroll"><div class="empty">GPU telemetry is unavailable for this sample.</div></div>'
+        return Kit.empty("GPU telemetry is unavailable.")
     gpus = status.get("gpus") or []
     if not gpus:
-        return '<div class="table-scroll"><div class="empty">No supported GPU devices detected on this host.</div></div>'
+        return Kit.empty("No supported GPU devices detected on this host.")
     rows = []
     for gpu in gpus:
         if not isinstance(gpu, dict):
@@ -700,7 +444,7 @@ def render_gpus_table(status: dict | None) -> str:
             f"<td class=\"numeric\">{esc(power)}</td></tr>"
         )
     return (
-        '<div class="table-scroll" tabindex="0" role="region" aria-label="GPU observations">'
+        '<div class="table-scroll" tabindex="0" role="region" aria-label="GPUs">'
         '<table><thead><tr><th scope="col">Index</th><th scope="col">Name</th>'
         '<th scope="col" class="numeric">Utilization</th><th scope="col" class="numeric">Memory used / total</th>'
         '<th scope="col" class="numeric">Temperature</th><th scope="col" class="numeric">Power</th></tr></thead>'
@@ -710,10 +454,10 @@ def render_gpus_table(status: dict | None) -> str:
 
 def render_workloads_table(status: dict | None) -> str:
     if not isinstance(status, dict) or status.get("workloads") is None:
-        return '<div class="table-scroll"><div class="empty">Kubernetes workload observations are unavailable for this sample.</div></div>'
+        return Kit.empty("Kubernetes workload status is unavailable.")
     workloads = status.get("workloads") or []
     if not workloads:
-        return '<div class="table-scroll"><div class="empty">No pods observed in namespace oksa.</div></div>'
+        return Kit.empty("No pods are running in namespace oksa.")
     rows = []
     for item in workloads:
         if not isinstance(item, dict):
@@ -728,11 +472,58 @@ def render_workloads_table(status: dict | None) -> str:
             f'<td class="numeric">{esc(restarts)}</td></tr>'
         )
     return (
-        '<div class="table-scroll" tabindex="0" role="region" aria-label="Workload pod observations">'
+        '<div class="table-scroll" tabindex="0" role="region" aria-label="Workload pods">'
         '<table><thead><tr><th scope="col">Pod name</th><th scope="col">Phase</th>'
         '<th scope="col">Ready</th><th scope="col" class="numeric">Restarts</th></tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table></div>'
     )
+
+
+def model_serving_state(model: dict, model_status: str) -> tuple[str, Tone]:
+    """How the shared runtime currently relates to one installed model."""
+    active = model.get("active") is True
+    selected = model.get("selected") is True
+    if active and selected:
+        return {
+            "ready": ("Serving", Tone.OK),
+            "not-ready": ("Starting", Tone.BUSY),
+        }.get(model_status, ("Not ready", Tone.ERROR))
+    if active:
+        return "Active · not selected", Tone.WARNING
+    if selected:
+        return "Selected · not active", Tone.WARNING
+    if model.get("capabilities") != "ok":
+        return "Exceeds host capabilities", Tone.NEUTRAL
+    return "Installed", Tone.NEUTRAL
+
+
+def model_calibration_state(model: dict) -> tuple[str, Tone]:
+    """Whether serving a model can use recorded calibration limits or must measure first."""
+    return {
+        "measured": ("Calibrated", Tone.OK),
+        "zero-limits": ("Zero usable limits", Tone.ERROR),
+        "required": ("Needs measurement", Tone.WARNING),
+    }.get(str(model.get("calibration")), ("Unknown", Tone.NEUTRAL))
+
+
+def model_unservable_reason(model: dict) -> str:
+    """Why serving a model cannot succeed; empty when it can."""
+    if model.get("capabilities") != "ok":
+        return "This model exceeds detected host capabilities and cannot be started."
+    if model.get("calibration") == "zero-limits":
+        return "Calibration found no usable limits on this hardware; measure again before serving."
+    return ""
+
+
+def model_action(model: dict) -> tuple[str, str] | None:
+    """The serving action that fits a model's state, as (method, label)."""
+    if model.get("active") is True and model.get("selected") is True:
+        return "StopServing", "Stop…"
+    if model_unservable_reason(model):
+        return None
+    if model.get("selected") is True:
+        return "RestartModel", "Restart…"
+    return "StartModel", "Serve…"
 
 
 def render_models_table(
@@ -741,77 +532,78 @@ def render_models_table(
     loaded: bool,
     error_text: str,
     filtered: bool,
+    model_status: str,
+    block_reason: str,
 ) -> str:
     if not loaded and not error_text:
-        return '<div class="table-scroll"><div class="empty">Loading local model inventory…</div></div>'
+        return Kit.empty("Loading local model inventory…", icon="hourglass_empty")
     if not models:
         if error_text:
-            return f'<div class="table-scroll"><div class="empty">Inventory could not be read: {esc(error_text)}</div></div>'
+            return Kit.empty(f"Inventory could not be read: {error_text}", icon=Tone.ERROR.icon)
         msg = (
             "No installed models match the current filter."
             if filtered
             else "No models are installed on this appliance. Choose Download model to acquire one."
         )
-        return f'<div class="table-scroll"><div class="empty">{esc(msg)}</div></div>'
+        return Kit.empty(msg)
+    disabled = ' disabled aria-describedby="models-block-reason"' if block_reason else ""
     rows = []
-    for m in models:
+    for index, m in enumerate(models):
         mid = str(m.get("id") or "")
         pub_name = str(m.get("name") or mid)
         repo_id = str(m.get("repo_id") or "-")
         rev = str(m.get("revision") or "")
         prov = str(m.get("provenance") or "unknown")
-        active = m.get("active") is True
-        selected = m.get("selected") is True
-        cap = str(m.get("capabilities") or "insufficient")
-        size_str = fmt_mib(m.get("storage_mib"))
-
-        if active and selected:
-            obs = status_badge("Observed serving", "")
-        elif active:
-            obs = status_badge("Observed active (unselected)", "warning")
-        elif selected:
-            obs = status_badge("Desired · not active", "warning")
-        else:
-            obs = '<span class="muted">Not observed serving</span>'
+        size, _, exact = fmt_mib(m.get("storage_mib")).partition(" (")
+        size_html = esc(size) + (f'<span class="sub">{esc(exact.rstrip(")"))}</span>' if exact else "")
 
         if prov == "verified" and rev:
-            prov_html = f'<code>{esc(rev[:12])}</code><span class="sub">Verified manifest</span>'
+            prov_html = f'<code>{esc(rev[:12])}</code> · Verified manifest'
         elif prov == "catalog" and rev:
-            prov_html = f'<code>{esc(rev[:12])}</code><span class="sub">Catalog metadata</span>'
+            prov_html = f'<code>{esc(rev[:12])}</code> · Catalog metadata'
         else:
-            prov_html = '<span class="muted">Unknown revision</span><span class="sub">Unverified provenance</span>'
+            prov_html = "Unknown revision · Unverified provenance"
 
-        cap_html = "Capable" if cap == "ok" else '<span class="muted">Insufficient host capabilities</span>'
+        action = model_action(m)
+        if action is None:
+            action_html = ""
+        else:
+            method, label = action
+            danger = " danger" if method == "StopServing" else ""
+            action_html = (
+                f'<button type="button" class="row-action{danger}" id="model-action-{index}" '
+                f'data-model="{esc(mid)}" aria-label="{esc(label.rstrip("…"))} {esc(mid)}"{disabled}>{esc(label)}</button>'
+            )
         rows.append(
             f"<tr>"
-            f'<td><a href="/models/{url_part(mid)}">{esc(mid)}</a><span class="sub">{esc(repo_id)}</span></td>'
-            f"<td><code>{esc(pub_name)}</code></td>"
-            f"<td>{prov_html}</td>"
-            f"<td>{obs}</td>"
-            f"<td>{cap_html}</td>"
-            f'<td class="numeric">{esc(size_str)}</td>'
+            f'<td><a href="/models/{url_part(mid)}">{esc(mid)}</a><span class="sub">Serves as <code>{esc(pub_name)}</code></span></td>'
+            f'<td>{esc(repo_id)}<span class="sub">{prov_html}</span></td>'
+            f"<td>{Kit.status(*model_serving_state(m, model_status))}</td>"
+            f"<td>{Kit.status(*model_calibration_state(m))}</td>"
+            f'<td class="numeric">{size_html}</td>'
+            f'<td class="numeric">{action_html}</td>'
             f"</tr>"
         )
     return (
         '<div class="table-scroll" tabindex="0" role="region" aria-label="Installed local models">'
         '<table><thead><tr>'
-        '<th scope="col">Model / local storage ID</th>'
-        '<th scope="col">Public inference name</th>'
-        '<th scope="col">Revision / provenance</th>'
-        '<th scope="col">Serving observation</th>'
-        '<th scope="col">Compatibility</th>'
-        '<th scope="col" class="numeric">Aggregate local size</th>'
+        '<th scope="col">Model / public name</th>'
+        '<th scope="col">Source / provenance</th>'
+        '<th scope="col">Serving</th>'
+        '<th scope="col">Calibration</th>'
+        '<th scope="col" class="numeric">Local size</th>'
+        '<th scope="col" class="numeric"><span class="visually-hidden">Action</span></th>'
         f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
     )
 
 
 def render_search_results_table(results: list[dict], *, searched: bool, error_text: str) -> str:
     if error_text:
-        return f'<div class="table-scroll"><div class="empty">Search failed: {esc(error_text)}</div></div>'
+        return Kit.empty(f"Search failed: {error_text}", icon=Tone.ERROR.icon)
     if not searched:
-        return '<div class="table-scroll"><div class="empty">Enter a search term above or specify a direct repository ID to review.</div></div>'
+        return Kit.empty("Enter a search term above or specify a direct repository ID to review.")
     if not results:
-        return '<div class="table-scroll"><div class="empty">No matching text-generation repositories found on Hugging Face.</div></div>'
+        return Kit.empty("No matching text-generation repositories found on Hugging Face.")
     rows = []
     for item in results:
         repo = str(item.get("repo_id") or "")
@@ -820,12 +612,12 @@ def render_search_results_table(results: list[dict], *, searched: bool, error_te
         dl_text = f"{downloads:,}" if isinstance(downloads, int) else "—"
         gated = item.get("gated") is True
         if gated:
-            access_html = status_badge("Gated · unsupported in UI", "warning")
+            access_html = Kit.status("Gated · unsupported in UI", Tone.WARNING)
             action_html = '<span class="muted">Requires host HF token</span>'
         else:
-            access_html = status_badge("Public", "neutral")
+            access_html = Kit.status("Public", Tone.NEUTRAL)
             href = f"/models/download/review?repo={url_part(repo)}&revision=main"
-            action_html = f'<a class="button" href="{esc(href)}">Review source →</a>'
+            action_html = f'<a href="{esc(href)}">Review source →</a>'
         rows.append(
             f"<tr>"
             f"<td><code>{esc(repo)}</code></td>"
@@ -849,8 +641,9 @@ def render_key_lookup_table(
     query: str,
     *,
     verified: bool,
-    sampled_at: str,
+    sampled_at: float | None,
     error_text: str,
+    now: float,
 ) -> str:
     raw_q = query.strip()
     if raw_q.startswith("sk-") and "..." not in raw_q and len(raw_q) >= 20:
@@ -862,10 +655,9 @@ def render_key_lookup_table(
         )
     if not verified:
         detail = error_text or "Cross-owner key index has not been loaded."
-        return (
-            f'<div class="table-scroll"><div class="empty">'
-            f"Key index is incomplete or unavailable ({esc(detail)}). Absence of a match is not proof that a key does not exist."
-            f"</div></div>"
+        return Kit.empty(
+            f"Key index is incomplete or unavailable ({detail}). Absence of a match is not proof that a key does not exist.",
+            icon=Tone.WARNING.icon,
         )
     q_fold = raw_q.casefold()
     matched = []
@@ -879,12 +671,12 @@ def render_key_lookup_table(
             matched.append(k)
     if not matched:
         msg = (
-            f"No indexed keys matched '{raw_q}' (index sampled at {sampled_at}). "
-            "Verify owner records directly if a key was created after this sample."
+            f"No keys match '{raw_q}' in the index read {fmt_ago(sampled_at, now)}. "
+            "A key created since then appears on its owner's page."
             if raw_q
-            else f"No user API keys exist in the index (sampled at {sampled_at})."
+            else f"No user API keys existed when the index was read {fmt_ago(sampled_at, now)}."
         )
-        return f'<div class="table-scroll"><div class="empty">{esc(msg)}</div></div>'
+        return Kit.empty(msg)
     rows = []
     for k in matched:
         alias = str(k.get("key_alias") or "Unnamed key")
@@ -928,10 +720,10 @@ def render_users_table(
 ) -> str:
     if not users_verified and not users:
         msg = f"API users could not be read: {error_text}" if error_text else "Loading API users…"
-        return f'<div class="table-scroll"><div class="empty">{esc(msg)}</div></div>'
+        return Kit.empty(msg)
     if not users:
         msg = "No API users match the current filter." if filtered else "No API users exist in the gateway database."
-        return f'<div class="table-scroll"><div class="empty">{esc(msg)}</div></div>'
+        return Kit.empty(msg)
     counts: dict[str, int] = {}
     if keys_verified:
         for k in keys:
@@ -963,13 +755,47 @@ def render_users_table(
     )
 
 
-def render_operations_table(jobs: list[dict], *, loaded: bool, error_text: str, filtered: bool) -> str:
+def render_user_keys_table(keys: list[dict], *, verified: bool, blocked: bool) -> str:
+    if not verified:
+        return Kit.empty("Loading user keys…")
+    if not keys:
+        return Kit.empty("No editable API keys exist for this user.")
+    disabled = " disabled" if blocked else ""
+    rows = []
+    for k in keys:
+        kid = str(k.get("key_id") or "")
+        alias = str(k.get("key_alias") or "Unnamed key")
+        models = k.get("models") if isinstance(k.get("models"), list) else []
+        scope = ", ".join(str(m) for m in models) if models else "All models (including future)"
+        rows.append(
+            f"<tr>"
+            f"<td><strong>{esc(alias)}</strong></td>"
+            f'<td class="mono">{esc(kid)}</td>'
+            f'<td class="mono">{esc(k.get("key_prefix") or "—")}</td>'
+            f"<td>{esc(scope)}</td>"
+            f"<td>{esc(k.get('expires') or 'No expiration')}</td>"
+            f"<td>{esc(k.get('created_at') or '—')}</td>"
+            f'<td><button type="button" class="row-action danger" id="btn-revoke-{esc(kid)}" '
+            f'data-key="{esc(kid)}" aria-label="Revoke {esc(alias)}"{disabled}>Revoke…</button></td>'
+            f"</tr>"
+        )
+    return (
+        '<div class="table-scroll" tabindex="0" role="region" aria-label="User API keys">'
+        "<table><thead><tr>"
+        '<th scope="col">Key alias</th><th scope="col">Key ID</th>'
+        '<th scope="col">Displayed prefix</th><th scope="col">Model scope</th>'
+        '<th scope="col">Expires</th><th scope="col">Created</th><th scope="col">Action</th>'
+        f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+    )
+
+
+def render_operations_table(jobs: list[dict], *, loaded: bool, error_text: str, filtered: bool, now: float) -> str:
     if not loaded and not jobs:
-        msg = f"Operations could not be read: {error_text}" if error_text else "Loading retained daemon operations…"
-        return f'<div class="table-scroll"><div class="empty">{esc(msg)}</div></div>'
+        msg = f"Operations could not be read: {error_text}" if error_text else "Loading operations…"
+        return Kit.empty(msg)
     if not jobs:
-        msg = "No retained operations match the current filter." if filtered else "No daemon jobs have been recorded yet."
-        return f'<div class="table-scroll"><div class="empty">{esc(msg)}</div></div>'
+        msg = "No operations match the filter." if filtered else "No operations have been recorded yet."
+        return Kit.empty(msg)
     rows = []
     for job in jobs:
         jid = job_short_id(job.get("path"))
@@ -994,40 +820,41 @@ def render_operations_table(jobs: list[dict], *, loaded: bool, error_text: str, 
             or (op == "DeleteUser" and res.get("outcome") in ("key_revocation_unconfirmed", "user_deletion_unconfirmed"))
         )
         if state == "running":
-            badge = status_badge("Running", "warning")
+            badge = Kit.status("Running", Tone.BUSY)
         elif state == "succeeded":
-            badge = status_badge("Succeeded", "")
+            badge = Kit.status("Succeeded")
         elif partial:
-            badge = status_badge("Failed · partial effect", "error")
+            badge = Kit.status("Failed · partial effect", Tone.ERROR)
         elif state == "canceled":
-            badge = status_badge("Canceled", "neutral")
+            badge = Kit.status("Canceled", Tone.NEUTRAL)
         else:
-            badge = status_badge("Failed", "error")
+            badge = Kit.status("Failed", Tone.ERROR)
 
-        latest = (
-            str(err.get("message") or "")
-            or str(res.get("warning") or "")
-            or str(res.get("message") or "")
-            or str(job.get("progress") or "")
-            or "No status message reported"
-        )
-        if len(latest) > 96:
-            latest = latest[:93] + "…"
+        if state == "running":
+            latest_html = render_job_progress(job.get("progress"), now, compact=True)
+        else:
+            latest = (
+                str(err.get("message") or "")
+                or str(res.get("warning") or "")
+                or str(res.get("message") or "")
+                or "No status message reported"
+            )
+            latest_html = esc(latest if len(latest) <= 96 else latest[:93] + "…")
         rows.append(
             f"<tr>"
             f'<td><a href="/operations/{url_part(jid)}" class="mono">{esc(jid)}</a></td>'
             f"<td>{esc(operation_label(op))}</td>"
             f"<td>{target_html}</td>"
             f"<td>{badge}</td>"
-            f"<td>{esc(fmt_utc(job.get('started_at')))}</td>"
-            f"<td>{esc(latest)}</td>"
+            f"<td>{fmt_time(job.get('started_at'), now)}</td>"
+            f"<td>{latest_html}</td>"
             f"</tr>"
         )
     return (
-        '<div class="table-scroll" tabindex="0" role="region" aria-label="Retained daemon operations">'
+        '<div class="table-scroll" tabindex="0" role="region" aria-label="Operations">'
         '<table><thead><tr>'
         '<th scope="col">Operation ID</th><th scope="col">Kind</th><th scope="col">Target</th>'
-        '<th scope="col">State</th><th scope="col">Started</th><th scope="col">Latest reported status</th>'
+        '<th scope="col">State</th><th scope="col">Started</th><th scope="col">Status</th>'
         f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
     )
 
@@ -1038,7 +865,7 @@ def render_download_review_facts(
     existing_model: dict | None,
 ) -> str:
     if not isinstance(inspection, dict) or not isinstance(inspection.get("metadata"), dict):
-        return '<div class="empty">No remote source metadata loaded yet.</div>'
+        return Kit.empty("No remote source metadata loaded yet.")
     meta = inspection["metadata"]
     fits = inspection.get("fits") is True
     reason = str(inspection.get("reason") or "")
@@ -1054,13 +881,13 @@ def render_download_review_facts(
     gated = meta.get("gated") is True
     files = meta.get("files") if isinstance(meta.get("files"), list) else []
 
-    fit_badge = status_badge("Fits total host RAM estimate", "") if fits else status_badge("Exceeds total host RAM estimate", "warning")
-    fit_html = (
-        f"{fit_badge} · {esc(fmt_mib(est_mem_mib))} ({esc(reason)}). "
-        f'<span class="muted">Compares estimated model memory against total host RAM, not free RAM, GPU VRAM fit, or disk space.</span>'
+    fit_badge = Kit.status("Fits total host RAM estimate") if fits else Kit.status("Exceeds total host RAM estimate", Tone.WARNING)
+    fit_html = f"{fit_badge} · {esc(fmt_mib(est_mem_mib))} ({esc(reason)})" + disclosure(
+        "What this checks",
+        "<p>Estimated model memory is compared with total host RAM. Free RAM, GPU memory and disk space are not checked.</p>",
     )
     if existing_model is None:
-        collision_html = f'{status_badge("New local installation", "neutral")} · No existing model at <code>{esc(effective_name)}</code>'
+        collision_html = f'{Kit.status("New local installation", Tone.NEUTRAL)} · No existing model at <code>{esc(effective_name)}</code>'
     else:
         ex_repo = str(existing_model.get("repo_id") or "-")
         ex_rev = str(existing_model.get("revision") or "")
@@ -1074,13 +901,13 @@ def render_download_review_facts(
         )
         if ex_prov == "unknown":
             collision_html = (
-                f'{status_badge("Replacement blocked · unknown provenance", "error")} · '
+                f'{Kit.status("Replacement blocked · unknown provenance", Tone.ERROR)} · '
                 f"Existing installation at <code>{esc(effective_name)}</code> ({esc(serving_note)}) has unverified provenance. "
-                "Inspect storage or enter a different local storage ID."
+                "Check the files on the host or enter a different local storage ID."
             )
         else:
             collision_html = (
-                f'{status_badge("Replacement required", "warning")} · '
+                f'{Kit.status("Replacement required", Tone.WARNING)} · '
                 f"Existing installation at <code>{esc(effective_name)}</code>: source <code>{esc(ex_repo)}</code>, "
                 f"revision <code>{esc(ex_rev[:12] if ex_rev else 'unknown')}</code> ({esc(ex_prov)}, {esc(serving_note)})."
             )
@@ -1095,17 +922,16 @@ def render_download_review_facts(
         ("Estimated download size", f"{esc(fmt_mib(storage_mib))} across {len(files)} verified files (config.json + weights)"),
         ("Host RAM capacity check", fit_html),
         ("Architecture / dtype", f"{esc(archs)} · quantization <code>{esc(quant)}</code> · dtype <code>{esc(dtype)}</code> · max context {esc(max_ctx)}"),
-        ("Access policy", status_badge("Gated · unsupported without host token", "error") if gated else status_badge("Public repository", "neutral")),
+        ("Access policy", Kit.status("Gated · unsupported without host token", Tone.ERROR) if gated else Kit.status("Public repository", Tone.NEUTRAL)),
         (
-            "Planner & serving disclosure",
-            "Download completion publishes files, runs model discovery, and notifies the background planner. "
-            "Existing selection or autostart policy can affect serving; download completion is not itself serving readiness.",
+            "After download",
+            "The model appears in Models. Serving changes only if the model is already selected or the autostart policy picks it.",
         ),
     ]
     return render_facts(rows)
 
 
-def render_model_detail_facts(model: dict) -> str:
+def render_model_detail_facts(model: dict, model_status: str) -> str:
     mid = str(model.get("id") or "")
     pub = str(model.get("name") or mid)
     repo = str(model.get("repo_id") or "-")
@@ -1115,25 +941,15 @@ def render_model_detail_facts(model: dict) -> str:
     size = fmt_mib(model.get("storage_mib"))
     quant = str(model.get("quantization") or "none")
     cap = str(model.get("capabilities") or "insufficient")
-    active = model.get("active") is True
-    selected = model.get("selected") is True
-
-    if active and selected:
-        state_html = f'{status_badge("Observed serving (desired & active)", "")} · <a href="/serving">Inspect Serving →</a>'
-    elif active:
-        state_html = f'{status_badge("Observed active (unselected)", "warning")} · <a href="/serving">Inspect Serving →</a>'
-    elif selected:
-        state_html = f'{status_badge("Desired · not observed active", "warning")} · <a href="/serving">Inspect Serving →</a>'
-    else:
-        state_html = f'{status_badge("Not serving", "neutral")} · Global stop is controlled on <a href="/serving">Serving</a>'
+    state_html = f'{Kit.status(*model_serving_state(model, model_status))} · <a href="/serving">Open Serving →</a>'
 
     prov_badge = (
-        status_badge("Verified manifest", "")
+        Kit.status("Verified manifest")
         if prov == "verified"
-        else (status_badge("Catalog metadata", "neutral") if prov == "catalog" else status_badge("Unknown provenance", "warning"))
+        else (Kit.status("Catalog metadata", Tone.NEUTRAL) if prov == "catalog" else Kit.status("Unknown provenance", Tone.WARNING))
     )
     rev_html = f"<code>{esc(rev)}</code> · {prov_badge}" if rev else f"Unknown revision · {prov_badge}"
-    cap_html = status_badge("Capable", "") if cap == "ok" else status_badge("Insufficient host capabilities", "error")
+    cap_html = Kit.status("Capable") if cap == "ok" else Kit.status("Insufficient host capabilities", Tone.ERROR)
 
     return render_facts([
         ("Local storage ID", f"<code>{esc(mid)}</code>"),
@@ -1144,39 +960,35 @@ def render_model_detail_facts(model: dict) -> str:
         ("Aggregate local size", esc(size)),
         ("Quantization", f"<code>{esc(quant)}</code>"),
         ("Host compatibility", cap_html),
-        ("Serving observation", state_html),
+        ("Calibration", f'{Kit.status(*model_calibration_state(model))} · <a href="#calibration">Profile ↓</a>'),
+        ("Serving", state_html),
     ])
 
 
-def render_calibration_summary(cal: dict | None, *, error_text: str) -> str:
+def render_calibration_summary(cal: dict | None, *, error_text: str, running_job: dict | None, now: float) -> str:
     if error_text:
         return (
             f'<div class="notice error"><strong>Calibration record could not be read.</strong> '
             f"{esc(error_text)}</div>"
         )
     if not isinstance(cal, dict):
-        return '<div class="empty">Loading calibration record…</div>'
+        return Kit.empty("Loading calibration record…", icon="hourglass_empty")
     result = cal.get("result") if isinstance(cal.get("result"), dict) else None
     status = cal.get("status") if isinstance(cal.get("status"), dict) else None
 
-    rows: list[tuple[str, str]] = [
-        (
-            "Applied runtime status",
-            "Recorded profile only — not verified as currently applied to the live vLLM runtime.",
-        )
-    ]
+    notes = ""
     if status is not None:
         st_state = str(status.get("state") or "unknown")
         st_msg = str(status.get("message") or "No message")
-        st_time = fmt_utc(status.get("updated_at"))
-        tone = "warning" if st_state == "running" else ("error" if st_state == "error" else "neutral")
-        rows.append((
-            "Current boot calibration status",
-            f'{status_badge(st_state, tone)} · {esc(st_msg)} ({esc(st_time)})',
-        ))
+        tone = Tone.BUSY if st_state == "running" else (Tone.ERROR if st_state == "error" else Tone.NEUTRAL)
+        notes = f'<p class="small">This boot: {Kit.status(st_state, tone)} · {esc(st_msg)} ({fmt_time(status.get("updated_at"), now)})</p>'
+        if st_state == "running" and running_job is not None:
+            notes = render_job_progress(running_job.get("progress"), now)
     if result is None:
-        rows.append(("Recorded profile", status_badge("No recorded profile", "neutral") + " · Calibration will run automatically before serving or when requested below."))
-        return render_facts(rows)
+        return (
+            f'<div class="profile"><div class="profile-head">{Kit.status("No recorded profile", Tone.NEUTRAL)}</div>{notes}'
+            '<p class="small muted">Calibration runs automatically before serving, or when requested below.</p></div>'
+        )
 
     limits = result.get("limits") if isinstance(result.get("limits"), dict) else {}
     max_seqs = limits.get("max_num_seqs", 0)
@@ -1187,31 +999,42 @@ def render_calibration_summary(cal: dict | None, *, error_text: str) -> str:
     search_complete = result.get("search_complete") is True
     inc_reasons = result.get("incomplete_reasons") if isinstance(result.get("incomplete_reasons"), list) else []
     reason = str(result.get("reason") or "unknown")
-    completed_at = fmt_utc(result.get("completed_at"))
     fp = str(result.get("fingerprint") or "")
 
     if isinstance(max_seqs, int) and max_seqs > 0 and search_complete:
-        outcome_html = f'{status_badge("Usable measured profile · complete search", "")} · recorded {esc(completed_at)}'
+        outcome = Kit.status("Usable measured profile · complete search")
     elif isinstance(max_seqs, int) and max_seqs > 0:
         inc_str = ", ".join(str(r) for r in inc_reasons) or "incomplete search"
-        outcome_html = f'{status_badge(f"Usable limits · incomplete search ({inc_str})", "warning")} · recorded {esc(completed_at)}'
+        outcome = Kit.status(f"Usable limits · incomplete search ({inc_str})", Tone.WARNING)
     else:
-        outcome_html = f'{status_badge(f"Zero usable limits ({reason})", "error")} · recorded {esc(completed_at)}'
+        outcome = Kit.status(f"Zero usable limits ({reason})", Tone.ERROR)
+
+    def count(value: object) -> str:
+        return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else "Unavailable"
 
     mem_mib = mem_bytes / (1024 * 1024) if isinstance(mem_bytes, int) and mem_bytes > 0 else 0
-    rows.extend([
-        ("Profile outcome", outcome_html),
-        ("Measured max context (max_model_len)", f"<code>{esc(max_len)}</code> tokens"),
-        ("Measured concurrency (max_num_seqs)", f"<code>{esc(max_seqs)}</code> sequences"),
-        ("Max batched tokens", f"<code>{esc(max_batched)}</code>"),
-        ("GPU memory utilization target", f"<code>{gpu_util:.2f}</code>" if isinstance(gpu_util, (int, float)) else "Unavailable"),
-        ("Host memory budget", esc(fmt_mib(mem_mib))),
-        ("Hardware/runtime fingerprint", f"<code>{esc(fp[:24])}…</code>" if len(fp) > 24 else f"<code>{esc(fp)}</code>"),
-    ])
-    return render_facts(rows)
+    stats = (
+        ("Context", count(max_len), "tokens · max_model_len"),
+        ("Concurrency", count(max_seqs), "sequences · max_num_seqs"),
+        ("Batched tokens", count(max_batched), "max_num_batched_tokens"),
+        ("GPU memory", f"{gpu_util:.0%}" if isinstance(gpu_util, (int, float)) else "Unavailable", "utilization target"),
+        ("Host memory", fmt_mib(mem_mib), "budget"),
+    )
+    stats_html = "".join(
+        f'<div><dt>{esc(label)}</dt><dd class="profile-value">{esc(value)}</dd><dd class="profile-unit">{esc(unit)}</dd></div>'
+        for label, value, unit in stats
+    )
+    fp_html = f"{esc(fp[:24])}…" if len(fp) > 24 else esc(fp)
+    return (
+        f'<div class="profile"><div class="profile-head">{outcome}'
+        f'<span class="small muted">Recorded {fmt_time(result.get("completed_at"), now)}</span></div>{notes}'
+        f'<dl class="profile-stats">{stats_html}</dl>'
+        f'<p class="small muted">Recorded limits, not verified as applied to the live runtime · '
+        f"fingerprint <code>{fp_html}</code></p></div>"
+    )
 
 
-def render_operation_detail(job: dict) -> tuple[str, str, str]:
+def render_operation_detail(job: dict, now: float) -> tuple[str, str, str]:
     jid = job_short_id(job.get("path"))
     op = str(job.get("operation") or "")
     state = str(job.get("state") or "unknown")
@@ -1228,15 +1051,15 @@ def render_operation_detail(job: dict) -> tuple[str, str, str]:
         or (op == "DeleteUser" and res.get("outcome") in ("key_revocation_unconfirmed", "user_deletion_unconfirmed"))
     )
     if state == "running":
-        badge = status_badge("Running", "warning")
+        badge = Kit.status("Running", Tone.BUSY)
     elif state == "succeeded":
-        badge = status_badge("Succeeded", "")
+        badge = Kit.status("Succeeded")
     elif partial:
-        badge = status_badge("Failed · partial effect", "error")
+        badge = Kit.status("Failed · partial effect", Tone.ERROR)
     elif state == "canceled":
-        badge = status_badge("Canceled", "neutral")
+        badge = Kit.status("Canceled", Tone.NEUTRAL)
     else:
-        badge = status_badge("Failed", "error")
+        badge = Kit.status("Failed", Tone.ERROR)
 
     if model_name:
         target_html = f'<a href="/models/{url_part(model_name)}" class="mono">{esc(model_name)}</a>'
@@ -1255,88 +1078,92 @@ def render_operation_detail(job: dict) -> tuple[str, str, str]:
         ("Target", target_html),
         ("Repository / source", f"<code>{esc(repo_id)}</code>" if repo_id else '<span class="muted">Not applicable</span>'),
         ("Pinned commit / revision", f"<code>{esc(commit)}</code>" if commit else '<span class="muted">Not recorded</span>'),
-        ("Started", esc(fmt_utc(job.get("started_at")))),
-        ("Ended", esc(fmt_utc(job.get("ended_at"))) if job.get("ended_at") else "Still running"),
+        ("Started", fmt_time(job.get("started_at"), now)),
+        ("Ended", fmt_time(job.get("ended_at"), now) if job.get("ended_at") else "Still running"),
     ]
     facts_html = render_facts(fact_rows)
 
     lines = []
-    if job.get("progress"):
-        lines.append(f"Progress: {job['progress']}")
     if res.get("message"):
         lines.append(f"Result: {res['message']}")
     if res.get("warning"):
         lines.append(f"Warning: {res['warning']}")
     if err.get("message"):
         lines.append(f"Error ({err.get('code', 'OperationFailed')}): {err['message']}")
-    status_text = "\n".join(lines) if lines else "No status text reported yet."
-    status_html = (
-        f'<div class="progress-text"><div class="mono">{esc(status_text)}</div>'
-        f'<p class="help">Latest reported status message only (not retained full output or an audit log; no numeric percentage or ETA).</p></div>'
-    )
+    if state == "running":
+        status_html = render_job_progress(job.get("progress"), now)
+    else:
+        status_text = "\n".join(lines) if lines else "No status text reported."
+        status_html = f'<div class="progress-text"><div class="mono">{esc(status_text)}</div></div>'
 
     if state == "running":
         recovery_html = (
             '<div class="notice warning">'
-            "<p><strong>Operation is currently running in the daemon.</strong> Navigating away or reloading does not cancel or resubmit this job.</p>"
-            "<p>Cancellation requests termination (SIGTERM) and may race completion; it does not roll back published files, calibration records, or runtime changes.</p>"
-            "</div>"
+            "<p><strong>Running in the background.</strong> Leaving or reloading this page does not cancel it.</p>"
+            + disclosure(
+                "About canceling",
+                "<p>Cancel asks the operation to stop (SIGTERM) and can race its completion. Published files, "
+                "calibration records and runtime changes are not rolled back.</p>",
+            )
+            + "</div>"
         )
     elif op == "RemoveModel" and partial:
         recovery_html = (
             '<div class="notice error">'
-            f"<p><strong>Partial outcome · files deleted, catalog/workload reconciliation failed.</strong></p>"
-            f"<p>Confirmed effect: local files for <code>{esc(model_name)}</code> were deleted. Failed effect: catalog or workload reconciliation ({esc(res.get('warning') or err.get('message') or '')}). "
-            "Saved calibration records are not deleted by model removal.</p>"
-            "<p><strong>Safe next step:</strong> Do not repeat model deletion to repair reconciliation. Inspect <a href=\"/serving\">Serving</a> and <a href=\"/models\">Models</a>, "
-            "and complete operator reconciliation before starting another model mutation.</p>"
+            "<p><strong>Partly done · files deleted, cleanup failed.</strong></p>"
+            f"<p>The files of <code>{esc(model_name)}</code> were deleted. Updating the model catalog or workloads failed: "
+            f"{esc(res.get('warning') or err.get('message') or 'no reason reported')}</p>"
+            "<p>Saved calibration records are kept.</p>"
+            '<p><strong>Next:</strong> do not remove the model again. Check <a href="/serving">Serving</a> and '
+            '<a href="/models">Models</a>, and finish the cleanup on the host before changing models.</p>'
             "</div>"
         )
     elif op == "DeleteUser" and partial:
         revoked_cnt = res.get("confirmed_revoked_keys", 0)
         recovery_html = (
             '<div class="notice error">'
-            f"<p><strong>Partial outcome · {esc(res.get('outcome'))}.</strong></p>"
-            f"<p>Confirmed revoked keys: <code>{esc(revoked_cnt)}</code>. {esc(res.get('warning') or err.get('message') or '')}</p>"
-            f"<p><strong>Safe next step:</strong> Open <a href=\"/access/user?id={url_part(user_id)}\">API user {esc(user_id)}</a> to inspect surviving keys, "
-            "and complete operator reconciliation before retrying deletion.</p>"
+            f"<p><strong>Partly done · {esc(str(res.get('outcome')).replace('_', ' '))}.</strong></p>"
+            f"<p>Keys confirmed revoked: <code>{esc(revoked_cnt)}</code>. {esc(res.get('warning') or err.get('message') or '')}</p>"
+            f"<p><strong>Next:</strong> open <a href=\"/access/user?id={url_part(user_id)}\">API user {esc(user_id)}</a> to check "
+            "the remaining keys, and finish the cleanup before deleting again.</p>"
             "</div>"
         )
     elif op == "DownloadModel":
         if state == "succeeded":
             recovery_html = (
                 '<div class="notice">'
-                f"<p><strong>Download published.</strong> Discovery and the background planner were notified. Download completion is not itself serving readiness.</p>"
-                f'<p><a class="button" href="/models/{url_part(model_name)}">Inspect model {esc(model_name)} →</a> '
-                f'<a class="button" href="/serving">Observe Serving →</a></p>'
+                "<p><strong>Download published.</strong> The model is listed in Models; downloading does not start serving it.</p>"
+                f'<p><a href="/models/{url_part(model_name)}">Open model {esc(model_name)} →</a> '
+                f'<a href="/serving">Open Serving →</a></p>'
                 "</div>"
             )
         else:
             recovery_html = (
                 '<div class="notice warning">'
-                f"<p><strong>Download did not complete ({esc(state)}).</strong> Absent or failed job completion is not proof of an untouched destination until inventory is re-read.</p>"
-                f'<p><a class="button" href="/models">Inspect Models inventory →</a></p>'
+                f"<p><strong>Download did not complete ({esc(state)}).</strong> Files may still have changed; check Models to confirm.</p>"
+                f'<p><a href="/models">Open Models →</a></p>'
                 "</div>"
             )
     elif op in ("StartModel", "RestartModel", "StopServing"):
         recovery_html = (
             f'<div class="notice {"" if state == "succeeded" else "warning"}">'
-            f"<p><strong>{esc(operation_label(op))} {esc(state)}.</strong> Desired selection and live runtime readiness are separate observations; do not assume previous availability after a failed or canceled transition.</p>"
-            f'<p><a class="button" href="/serving">Observe Serving →</a></p>'
+            f"<p><strong>{esc(operation_label(op))} {esc(state)}.</strong> Serving shows what is running now. "
+            "After a failed or canceled change, the earlier model may not be running.</p>"
+            f'<p><a href="/serving">Open Serving →</a></p>'
             "</div>"
         )
     elif op == "Calibrate":
         recovery_html = (
             f'<div class="notice {"" if state == "succeeded" else "warning"}">'
-            f"<p><strong>Calibration {esc(state)}.</strong> Inspect the model's calibration section to verify whether a usable profile was recorded, and check Serving for current runtime health.</p>"
-            f'<p><a class="button" href="/models/{url_part(model_name)}#calibration">Inspect {esc(model_name)} calibration →</a> '
-            f'<a class="button" href="/serving">Observe Serving →</a></p>'
+            f"<p><strong>Calibration {esc(state)}.</strong> The model's calibration profile shows whether usable limits were recorded.</p>"
+            f'<p><a href="/models/{url_part(model_name)}#calibration">Open {esc(model_name)} calibration →</a> '
+            f'<a href="/serving">Open Serving →</a></p>'
             "</div>"
         )
     else:
         recovery_html = (
             f'<div class="notice {"" if state == "succeeded" else "warning"}">'
-            f"<p><strong>{esc(operation_label(op))} {esc(state)}.</strong> Refresh affected resources to verify current state.</p>"
+            f"<p><strong>{esc(operation_label(op))} {esc(state)}.</strong> Refresh the affected pages to confirm the current state.</p>"
             "</div>"
         )
     return facts_html, status_html, recovery_html

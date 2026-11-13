@@ -4,6 +4,7 @@
 import asyncio
 from collections.abc import Callable
 import json
+import math
 import re
 import time
 from urllib.parse import urlencode
@@ -14,6 +15,7 @@ from nicegui import core, run, ui
 from oksa_client import OksaClient, OksaClientError
 from oksa_control import Contract
 import oksa_model_serving as ms
+from oksa_web_kit import Emphasis, Kit, Meter, Tone
 import oksa_web_views as views
 
 
@@ -22,19 +24,33 @@ class OksaWebUI:
         self.service = service
 
     def mount(self) -> None:
+        ui.add_css(Kit.STYLESHEET, shared=True)
         self._configure_root()
         core.app.on_startup(self._configure_root)
         for path in ("/", "/index.html"):
-            ui.page(path, title="OKSA", language="en-US")(self._page)
+            ui.page(path, title="OKSA", language="en-US", dark=None)(self._page)
 
     def _configure_root(self) -> None:
         core.app.config.language = "en-US"
+        core.app.colors(
+            primary="var(--brand)", secondary="var(--ink-muted)", accent="var(--brand)",
+            positive="var(--ok)", negative="var(--error)", warning="var(--warning)", info="var(--brand)",
+            dark="var(--surface-alt)", dark_page="var(--surface)", on_primary="var(--on-brand)",
+        )
         core.root = self._page
 
     def _page(self) -> None:
         _OksaPage(self.service).build()
 
 class _OksaPage:
+    NAVIGATION = (
+        ("overview", "/", "Overview", "dashboard"),
+        ("serving", "/serving", "Serving", "dns"),
+        ("models", "/models", "Models", "inventory_2"),
+        ("access", "/access", "API access", "vpn_key"),
+        ("operations", "/operations", "Operations", "pending_actions"),
+    )
+
     def __init__(self, service: OksaClient) -> None:
         self.service = service
         self.client = ui.context.client
@@ -73,7 +89,7 @@ class _OksaPage:
         self.users_error_text = ""
         self.all_keys: list[dict] = []
         self.all_keys_verified = False
-        self.all_keys_sampled_at = ""
+        self.all_keys_sampled_at: float | None = None
         self.all_keys_error_text = ""
         self.protected_users: set[str] = set()
 
@@ -100,7 +116,7 @@ class _OksaPage:
         self.secret_meta: dict = {}
 
         self._active_updater: Callable[[], None] | None = None
-        self._current_nav_section: str = "serving"
+        self._current_nav_section: str = "overview"
 
         # Pending modal state
         self._modal_action: dict = {}
@@ -120,36 +136,54 @@ class _OksaPage:
         self._cancel_job_path: str = ""
 
     def build(self) -> None:
-        ui.dark_mode(False)
-        ui.add_head_html(f"<style>{views.OKSA_CSS}</style>")
-        self.client.content.classes("p-0 gap-0 h-screen overflow-hidden")
-
-        ui.html('<a class="skip-link" href="#main">Skip to content</a>', sanitize=False)
-        self.topbar = ui.html(self._render_topbar(), sanitize=False, tag="header").classes("topbar").props('id="topbar"')
-
-        with ui.element("div").classes("app"):
-            self.sidebar = (
-                ui.html(self._render_sidebar(), sanitize=False, tag="aside")
-                .classes("sidebar")
-                .props('id="sidebar"')
+        with ui.header(wrap=False).classes("masthead"):
+            ui.button(icon="menu", color=None, on_click=lambda: self.drawer.toggle()).props(
+                'flat round dense aria-label="Toggle navigation"'
             )
-            with ui.element("main").props('id="main" tabindex="-1"'):
-                self.global_banners = ui.html("", sanitize=False)
-                self.sub_pages = ui.sub_pages(
-                    {
-                        "/": self._route_serving,
-                        "/index.html": self._route_serving,
-                        "/serving": self._route_serving,
-                        "/models": self._route_models,
-                        "/models/download": self._route_download_search,
-                        "/models/download/review": self._route_download_review,
-                        "/models/{storage_id}": self._route_model_detail,
-                        "/access": self._route_access,
-                        "/access/user": self._route_user_detail,
-                        "/operations": self._route_operations,
-                        "/operations/{job_id}": self._route_operation_detail,
-                    },
-                )
+            ui.link("OKSA", "/").classes(replace="brand")
+            self.host = ui.html("", sanitize=False).classes("host")
+            ui.space()
+            self.activity = ui.html("", sanitize=False).classes("activity-slot")
+            with ui.button(color=None).props("flat no-caps").classes("health"):
+                self.health_summary = ui.html("", sanitize=False)
+                with ui.menu().props('anchor="bottom right" self="top right"'):
+                    self.health_panel = (
+                        ui.html("", sanitize=False, tag="section")
+                        .classes("health-panel")
+                        .props('aria-labelledby="health-heading"')
+                    )
+
+        self.nav_items: dict[str, ui.item] = {}
+        with ui.left_drawer(bordered=True).props(":width=208") as self.drawer:
+            with ui.element("nav").classes("nav").props('aria-label="Primary"'), ui.list():
+                for key, href, label, icon in self.NAVIGATION:
+                    with ui.item().props(f'href="{href}"') as self.nav_items[key]:
+                        with ui.item_section().props("avatar"):
+                            ui.icon(icon)
+                        ui.item_section(label)
+                        if key == "operations":
+                            with ui.item_section().props("side"):
+                                self.running_badge = ui.badge().props("text-color=on-primary")
+
+        self.main = ui.element("div").classes("page").props('tabindex="-1"')
+        ui.skip_link("Skip to content", target=self.main)
+        with self.main:
+            self.global_banners = ui.html("", sanitize=False)
+            self.sub_pages = ui.sub_pages(
+                {
+                    "/": self._route_overview,
+                    "/index.html": self._route_overview,
+                    "/serving": self._route_serving,
+                    "/models": self._route_models,
+                    "/models/download": self._route_download_search,
+                    "/models/download/review": self._route_download_review,
+                    "/models/{storage_id}": self._route_model_detail,
+                    "/access": self._route_access,
+                    "/access/user": self._route_user_detail,
+                    "/operations": self._route_operations,
+                    "/operations/{job_id}": self._route_operation_detail,
+                },
+            )
 
         self._build_modals()
         self.client.sub_pages_router.on_path_changed(self._on_path_changed)
@@ -188,81 +222,116 @@ class _OksaPage:
                 return item
         return None
 
-    def _render_topbar(self) -> str:
-        host = views.esc(self._host_name())
-        return (
-            f'<a class="brand" href="/serving">OKSA</a>'
-            f'<div class="host">'
-            f"<span>HOST <strong>{host}</strong></span>"
-            f'<span class="host-divider" aria-hidden="true"></span>'
-            f'<span class="host-extra">Local inference administration</span>'
-            f"</div>"
-        )
+    def _model_block_reason(self) -> str:
+        """Why model changes cannot be submitted now; empty when they can."""
+        if self.disconnected or not self.models_verified or self.status is None or self.status_stale:
+            return "Waiting for current serving status and model inventory before allowing changes."
+        unresolved = self._unresolved_for_scope("model")
+        if unresolved is not None:
+            return f"Blocked until the unknown outcome of request {unresolved.get('request_id')} is resolved."
+        running = self._running_model_job()
+        if running is not None:
+            return f"Blocked while {views.job_short_id(running.get('path'))} is running."
+        return ""
 
-    def _render_sidebar(self) -> str:
-        running_cnt = len(self._running_jobs())
-        op_label = f"Operations ({running_cnt} running job{'s' if running_cnt != 1 else ''})"
-        nav_items = (
-            ("serving", "/serving", "Serving"),
-            ("models", "/models", "Models"),
-            ("access", "/access", "API access"),
-            ("operations", "/operations", op_label),
-        )
-        links = []
-        for key, href, label in nav_items:
-            current = ' aria-current="page"' if self._current_nav_section == key else ""
-            links.append(f'<a class="nav-link" href="{views.esc(href)}"{current}><span>{views.esc(label)}</span></a>')
+    def _model_state(self) -> tuple[str, Tone]:
+        return {
+            "ready": ("Healthy", Tone.OK),
+            "not-ready": ("Starting", Tone.BUSY),
+            "stopped": ("Stopped", Tone.NEUTRAL),
+        }.get(str((self.status or {}).get("model_status")), ("Unavailable", Tone.ERROR))
 
-        sampled = self.snapshot.get("sampled_at") or "No sample yet"
-        conn_state = (
-            "Disconnected"
-            if self.disconnected
-            else ("Stale sample" if self.status_stale else "Connected")
-        )
-        inv_state = (
-            f"{len(self.models)} installed"
-            if self.models_loaded and not self.models_error_text
-            else ("Read error" if self.models_error_text else "Loading…")
-        )
-        return (
-            f'<p class="nav-label">Workspace</p>'
-            f'<nav aria-label="Primary">{"".join(links)}</nav>'
-            f'<div class="sidebar-foot">'
-            f"<p><strong>Observation status</strong></p>"
-            f"<p>Runtime: {views.esc(conn_state)} ({views.esc(sampled)})</p>"
-            f"<p>Inventory: {views.esc(inv_state)}</p>"
-            f"<p>Tracked jobs: {len(self.jobs)} retained / 64 max</p>"
-            f"</div>"
-        )
+    def _health(self) -> views.Health:
+        status = self.status if isinstance(self.status, dict) else None
+        updated = f"Updated {views.fmt_ago(self.snapshot.get('sampled_at'), time.time())}"
+        readings = []
+        if self.unresolved:
+            readings.append(views.Reading(
+                "Blocked operations", f"{len(self.unresolved)} unresolved", Tone.ERROR,
+                "Related changes stay blocked until each is resolved.", href="/operations",
+            ))
+        if self.disconnected or self.status_failed:
+            detail = self.monitoring_error_text or updated
+            readings.append(views.Reading("Status", "Unavailable", Tone.ERROR, detail, href="/serving"))
+        elif status is None:
+            readings.append(views.Reading("Status", "Waiting for first update", Tone.NEUTRAL, href="/serving"))
+        elif self.status_stale:
+            readings.append(views.Reading("Status", "Out of date", Tone.WARNING, updated, href="/serving"))
+        else:
+            readings.append(views.Reading("Status", "Current", Tone.OK, updated, href="/serving"))
+
+        if status is not None:
+            readings.append(views.Reading(
+                "Model", *self._model_state(), str(status.get("active_model") or ""), href="/serving",
+            ))
+            gateway = {
+                "ready": ("Ready", Tone.OK),
+                "authentication-required": ("Reachable", Tone.OK),
+            }.get(str(status.get("gateway_status")), ("Unreachable", Tone.ERROR))
+            readings.append(views.Reading("Gateway", *gateway, href="/serving"))
+            authentication = {
+                "enforced": ("Enforced", Tone.OK),
+                "keyless": ("Keyless access", Tone.WARNING),
+            }.get(str(status.get("auth_enforcement")), ("Not verified", Tone.WARNING))
+            readings.append(views.Reading("Authentication", *authentication, href="/access"))
+
+        if self.models_error_text:
+            readings.append(views.Reading("Inventory", "Read error", Tone.WARNING, self.models_error_text, href="/models"))
+        elif self.models_loaded:
+            readings.append(views.Reading("Inventory", f"{len(self.models)} installed", Tone.OK, href="/models"))
+        else:
+            readings.append(views.Reading("Inventory", "Loading…", Tone.NEUTRAL, href="/models"))
+
+        running = len(self._running_jobs())
+        retained = f"{len(self.jobs)} recent"
+        if self.jobs_failed:
+            readings.append(views.Reading(
+                "Operations", "Read error", Tone.WARNING, self.activity_error_text, href="/operations",
+            ))
+        elif running:
+            readings.append(views.Reading("Operations", f"{running} running", Tone.BUSY, retained, href="/operations"))
+        elif not self.jobs_loaded:
+            readings.append(views.Reading("Operations", "Loading…", Tone.NEUTRAL, href="/operations"))
+        else:
+            readings.append(views.Reading("Operations", "Idle", Tone.OK, retained, href="/operations"))
+        return views.Health(tuple(readings))
 
     def _render_global_banners(self) -> str:
         parts = []
+        now = time.time()
         if self.disconnected or self.status_failed:
-            last_time = self.snapshot.get("sampled_at") or "none"
             err = self.monitoring_error_text or self.snapshot.get("error") or "Daemon connection interrupted."
             parts.append(
                 f'<div class="notice error" role="alert">'
-                f"<p><strong>Service observation degraded or disconnected.</strong> {views.esc(err)}</p>"
-                f"<p class=\"small\">Last runtime sample: {views.esc(last_time)}. Last-known values remain visible with staleness markers; "
-                "mutations whose safety preconditions cannot be verified are disabled.</p>"
+                f"<p><strong>Status updates are interrupted.</strong> {views.esc(err)}</p>"
+                f'<p class="small">Last update {views.fmt_time(self.snapshot.get("sampled_at"), now)}. '
+                "The values shown may be out of date, and changes that depend on them are disabled.</p>"
                 f"</div>"
             )
         if self.unresolved:
-            parts.append(views.render_unresolved_banner(self.unresolved))
+            parts.append(views.render_unresolved_banner(self.unresolved, now))
         return "".join(parts)
 
     def _render_shell(self) -> None:
         if self.client.is_deleted:
             return
-        top_html = self._render_topbar()
-        if self.topbar.content != top_html:
-            self.topbar.content = top_html
-        side_html = self._render_sidebar()
-        if self.sidebar.content != side_html:
-            self.sidebar.content = side_html
-        banner_html = self._render_global_banners()
-        if self.global_banners.content != banner_html:
-            self.global_banners.content = banner_html
+        health = self._health()
+        self.host.content = f"Host <strong>{views.esc(self._host_name())}</strong>"
+        self.health_summary.content = f'<span class="visually-hidden">System health: </span>{health.summary_html()}'
+        self.health_panel.content = health.panel_html()
+        running = len(self._running_jobs())
+        self.running_badge.set_text(str(running))
+        self.running_badge.props["aria-label"] = f"{running} running operations"
+        self.running_badge.set_visibility(running > 0)
+        self.activity.content = views.render_activity(
+            [job for job in self.jobs.values() if isinstance(job, dict)], time.time()
+        )
+        for key, item in self.nav_items.items():
+            if key == self._current_nav_section:
+                item.props('aria-current="page"')
+            else:
+                item.props(remove="aria-current")
+        self.global_banners.content = self._render_global_banners()
 
     def _render_all(self) -> None:
         if self.client.is_deleted:
@@ -289,11 +358,14 @@ class _OksaPage:
             self._current_nav_section = "access"
         elif clean.startswith("/operations"):
             self._current_nav_section = "operations"
-        else:
+        elif clean.startswith("/serving"):
             self._current_nav_section = "serving"
+        else:
+            self._current_nav_section = "overview"
         self._render_shell()
         self.client.run_javascript(
-            "requestAnimationFrame(() => { const m = document.getElementById('main'); if (m) m.focus({preventScroll: true}); });"
+            f"if (Quasar.Screen.lt.md) getElement({self.drawer.id}).hide();"
+            f"requestAnimationFrame(() => getHtmlElement({self.main.id})?.focus({{preventScroll: true}}));"
         )
 
     def _set_page_title(self, title: str) -> None:
@@ -441,7 +513,7 @@ class _OksaPage:
         if self._success(k_reply):
             self.all_keys = [k for k in (k_reply[1].get("keys") or []) if isinstance(k, dict)]
             self.all_keys_verified = k_reply[1].get("complete") is not False
-            self.all_keys_sampled_at = str(k_reply[1].get("sampled_at") or "just now")
+            self.all_keys_sampled_at = k_reply[1].get("sampled_at")
             self.protected_users = {str(u) for u in (k_reply[1].get("protected_users") or []) if u}
             self.all_keys_error_text = ""
         else:
@@ -500,7 +572,7 @@ class _OksaPage:
             await self._refresh_daemon_state()
             await self._refresh_status()
             await self._refresh_jobs()
-            if not self.models_loaded or self._current_nav_section in ("models", "serving", "access"):
+            if not self.models_loaded or self._current_nav_section in ("overview", "models", "serving", "access"):
                 await self._refresh_models()
             if self._current_nav_section == "access":
                 await self._refresh_access()
@@ -550,12 +622,12 @@ class _OksaPage:
                         False,
                         rec,
                         f"Key creation completed on the gateway ({rec.get('summary')}), but the one-time secret response was lost in transit. "
-                        "Inspect the user's keys, revoke that key, and create a replacement.",
+                        "Open the user's keys, revoke that key, and create a replacement.",
                     )
             return (
                 False,
                 reply[1],
-                f"Outcome unknown (request {request_id}): {err_msg}. Automatic retry is blocked; unresolved guard recorded.",
+                f"Outcome unknown (request {request_id}): {err_msg}. Related changes stay blocked until it is resolved.",
             )
 
         if reply[1].get("code") == "ExpiredNamespace":
@@ -563,6 +635,107 @@ class _OksaPage:
             return False, reply[1], "Request namespace rotated; review current state and submit again."
 
         return False, reply[1], self._error(reply)
+
+    async def _copy_text(self, text: str) -> bool:
+        """Copy through Quasar, which falls back to execCommand outside secure contexts."""
+        try:
+            return bool(await self.client.run_javascript(
+                f"return Quasar.copyToClipboard({json.dumps(text)}).then(() => true, () => false);"
+            ))
+        except TimeoutError:
+            return False
+
+    async def _copy_api_base_url(self) -> None:
+        if await self._copy_text(self._api_base_url()):
+            ui.notify("API base URL copied", type="positive")
+        else:
+            ui.notify("The browser refused clipboard access; copy the URL manually", type="warning")
+
+    def _request_metrics(self) -> dict:
+        metrics = (self.status or {}).get("metrics")
+        return metrics if isinstance(metrics, dict) else {}
+
+    def _show_memory(self, meter: Meter) -> None:
+        memory = (self.status or {}).get("host_memory")
+        memory = memory if isinstance(memory, dict) else {}
+        used, total = memory.get("used_mib"), memory.get("total_mib")
+        if isinstance(used, int) and isinstance(total, int) and total > 0:
+            sample_note = "out of date" if self.status_stale else "current"
+            meter.show(
+                f"{used / 1024:.1f} / {total / 1024:.1f} GiB",
+                f"{used / total:.0%} host RAM used · {sample_note}",
+                used / total,
+            )
+        else:
+            meter.show("Unavailable", "Host memory reading unavailable")
+
+    def _show_kv_cache(self, meter: Meter) -> None:
+        cache_pct = self._request_metrics().get("kv_cache_usage_pct")
+        if isinstance(cache_pct, (int, float)) and math.isfinite(cache_pct):
+            meter.show(f"{cache_pct:g} %", "Reported vLLM cache usage", cache_pct / 100)
+        else:
+            meter.show("Unavailable", "Reported vLLM cache usage")
+
+    def _route_overview(self) -> None:
+        self._current_nav_section = "overview"
+        self._set_page_title("Overview")
+
+        with ui.element("header").classes("page-heading"):
+            with ui.element("div"):
+                ui.html("<h1>Overview</h1>", sanitize=False)
+                ui.html('<p class="subtitle">Appliance status at a glance. Each item links to its details.</p>', sanitize=False)
+            with ui.element("div").classes("actions"):
+                Kit.button("Refresh", self._poll, icon="refresh")
+
+        with ui.element("section").props('aria-labelledby="status-heading"'):
+            ui.html('<div class="section-head"><h2 id="status-heading">Status</h2></div>', sanitize=False)
+            tiles = ui.html("", sanitize=False)
+
+        with ui.element("section").classes("section").props('aria-labelledby="glance-heading"'):
+            ui.html('<div class="section-head"><h2 id="glance-heading">Serving &amp; resources</h2></div>', sanitize=False)
+            with ui.element("div").classes("metrics"):
+                with Kit.card("Serving model", icon="dns"):
+                    model_box = ui.html("", sanitize=False)
+                    ui.link("Manage serving →", "/serving").classes("card-link")
+                with Kit.card("API endpoint", icon="api"):
+                    endpoint_box = ui.html("", sanitize=False)
+                    with ui.element("div").classes("actions"):
+                        Kit.button("Copy", self._copy_api_base_url, icon="content_copy").props(
+                            'dense aria-label="Copy API base URL"'
+                        )
+                        ui.link("API keys →", "/access").classes("card-link")
+                with Kit.card("Host memory", icon="memory"):
+                    memory_meter = Kit.meter("Host memory used")
+                    ui.link("Serving details →", "/serving").classes("card-link")
+                with Kit.card("KV cache", icon="storage"):
+                    cache_meter = Kit.meter("KV cache usage")
+                    ui.link("Serving details →", "/serving").classes("card-link")
+
+        def update() -> None:
+            health = self._health()
+            tiles.content = health.tiles_html()
+            status = self.status if isinstance(self.status, dict) else None
+            if status is None:
+                model_box.content = f'<p class="meter-value">Unknown</p><p class="meter-note">{views.esc(health.worst.text)}</p>'
+            else:
+                active_id = str(status.get("active_model_id") or "")
+                installed = {m.get("id") for m in self.models}
+                if not active_id:
+                    name_html = "None active"
+                elif active_id in installed:
+                    name_html = f'<a href="/models/{views.url_part(active_id)}">{views.esc(active_id)}</a>'
+                else:
+                    name_html = f"<code>{views.esc(active_id)}</code>"
+                model_box.content = (
+                    f'<p class="meter-value">{name_html}</p>'
+                    f'<p class="meter-note">{Kit.status(*self._model_state())}</p>'
+                )
+            endpoint_box.content = f'<p class="meter-value"><code>{views.esc(self._api_base_url())}</code></p>'
+            self._show_memory(memory_meter)
+            self._show_kv_cache(cache_meter)
+
+        self._active_updater = update
+        update()
 
     def _route_serving(self) -> None:
         self._current_nav_section = "serving"
@@ -573,41 +746,42 @@ class _OksaPage:
             with ui.element("div"):
                 ui.html("<h1>Serving</h1>", sanitize=False)
                 ui.html(
-                    '<p class="subtitle">Desired and observed serving state, host observations and workloads.</p>',
+                    '<p class="subtitle">Selected and running model, host resources and workloads.</p>',
                     sanitize=False,
                 )
             with ui.element("div").classes("actions"):
-                btn_refresh = ui.element("button")
-                with btn_refresh:
-                    ui.html("Refresh observations", sanitize=False)
-                btn_refresh.on("click", self._poll)
-                ui.html('<a class="button" href="/models">Choose model →</a>', sanitize=False)
+                Kit.button("Refresh", self._poll, icon="refresh")
+                Kit.button("Choose model", href="/models")
 
         conflict_banner = ui.html("", sanitize=False)
 
         with ui.element("section").props('aria-labelledby="runtime-heading"'):
             ui.html(
-                '<div class="section-head"><h2 id="runtime-heading">Serving observations</h2></div>',
+                '<div class="section-head"><h2 id="runtime-heading">Serving status</h2></div>',
                 sanitize=False,
             )
-            obs_box = ui.html("", sanitize=False)
+            status_box = ui.html("", sanitize=False)
             with ui.element("div").classes("fact-actions actions"):
-                btn_restart = ui.element("button").props('id="btn-serving-restart"')
-                with btn_restart:
-                    ui.html("Review global restart…", sanitize=False)
-                btn_stop = ui.element("button").classes("danger").props('id="btn-serving-stop"')
-                with btn_stop:
-                    ui.html("Review global stop…", sanitize=False)
+                btn_restart = Kit.button("Review global restart…", icon="restart_alt").props('id="btn-serving-restart"')
+                btn_stop = Kit.button("Review global stop…", emphasis=Emphasis.DANGER, icon="stop_circle").props('id="btn-serving-stop"')
             controls_help = ui.html("", sanitize=False)
 
         with ui.element("section").classes("section").props('aria-labelledby="metrics-heading"'):
             metrics_head = ui.html("", sanitize=False)
-            metrics_box = ui.html("", sanitize=False)
+            with ui.element("div").classes("metrics"):
+                with Kit.card("Host memory", icon="memory"):
+                    memory_meter = Kit.meter("Host memory used")
+                with Kit.card("Running requests", icon="bolt"):
+                    running_meter = Kit.meter("Running requests")
+                with Kit.card("Queued requests", icon="hourglass_empty"):
+                    queued_meter = Kit.meter("Queued requests")
+                with Kit.card("KV cache", icon="storage"):
+                    cache_meter = Kit.meter("KV cache usage")
 
         with ui.element("section").classes("section").props('aria-labelledby="gpu-heading"'):
             ui.html(
                 '<div class="section-head"><h2 id="gpu-heading">GPUs</h2>'
-                '<p class="muted">Device readings, not model placement</p></div>',
+                '<p class="muted">All GPUs on the host, not only those serving the model</p></div>',
                 sanitize=False,
             )
             gpu_box = ui.html("", sanitize=False)
@@ -615,7 +789,7 @@ class _OksaPage:
         with ui.element("section").classes("section").props('aria-labelledby="workload-heading"'):
             ui.html(
                 '<div class="section-head"><h2 id="workload-heading">Workload pods</h2>'
-                '<p class="muted">Pod state is not proof of end-to-end external inference</p></div>',
+                '<p class="muted">Running pods do not guarantee that API requests succeed</p></div>',
                 sanitize=False,
             )
             workload_box = ui.html("", sanitize=False)
@@ -629,6 +803,7 @@ class _OksaPage:
             host = self._host_name()
             crumbs.content = views.render_breadcrumbs([(host, None), ("Serving", "/serving")])
 
+            now = time.time()
             running_job = self._running_model_job()
             unresolved_model = self._unresolved_for_scope("model")
             prep = (self.status or {}).get("preparation") if isinstance(self.status, dict) else None
@@ -640,28 +815,29 @@ class _OksaPage:
                 target = running_job.get("model_name") or "runtime"
                 notices.append(
                     f'<div class="notice warning">'
-                    f"<strong>{views.esc(op_name)} ({views.esc(jid)}) is running on <code>{views.esc(target)}</code>.</strong> "
-                    f"All model mutations, including global restart and stop, are blocked until it settles. "
-                    f'<a href="/operations/{views.url_part(jid)}">Inspect running job →</a>'
-                    f"</div>"
+                    f"<strong>{views.esc(op_name)} is running on <code>{views.esc(target)}</code>.</strong> "
+                    f"Model changes, including restart and stop, wait until it finishes. "
+                    f'<a href="/operations/{views.url_part(jid)}">Open operation →</a>'
+                    f"{views.render_job_progress(running_job.get('progress'), now, compact=True)}</div>"
                 )
             elif isinstance(prep, dict) and prep.get("state") == "running":
                 p_model = views.esc(prep.get("model") or "")
                 p_msg = views.esc(prep.get("message") or "Calibrating")
                 notices.append(
                     f'<div class="notice warning">'
-                    f"<strong>Background planner calibration is running for <code>{p_model}</code>.</strong> "
-                    f"Latest status: {p_msg}. This activity is owned by the background planner outside daemon job history."
+                    f"<strong>Calibration is running for <code>{p_model}</code>.</strong> {p_msg}. "
+                    f"It started automatically before serving, so it is not listed in Operations."
                     f"</div>"
                 )
             conflict_banner.content = "".join(notices)
 
-            obs_box.content = views.render_serving_observations(
+            status_box.content = views.render_serving_status(
                 self.status,
                 self.snapshot,
                 self.models,
                 disconnected=self.disconnected,
                 status_failed=self.status_failed,
+                now=now,
             )
 
             serving_enabled = isinstance(self.status, dict) and self.status.get("serving_enabled") is True
@@ -671,16 +847,16 @@ class _OksaPage:
 
             block_reason = ""
             if self.disconnected or self.status is None or self.status_stale:
-                block_reason = "Runtime observations are stale or unavailable; refresh before mutating serving state."
+                block_reason = "Waiting for current serving status before allowing changes."
             elif unresolved_model is not None:
-                block_reason = f"Blocked by unresolved model guard {unresolved_model.get('request_id')}."
+                block_reason = f"Blocked until the unknown outcome of request {unresolved_model.get('request_id')} is resolved."
             elif running_job is not None:
                 block_reason = f"Blocked while {views.job_short_id(running_job.get('path'))} is running."
 
             can_restart = not block_reason and target_restart != "-"
             can_stop = not block_reason and (serving_enabled or active_id != "-" or selected_id != "-")
-            self._set_button_disabled(btn_restart, not can_restart)
-            self._set_button_disabled(btn_stop, not can_stop)
+            btn_restart.set_enabled(can_restart)
+            btn_stop.set_enabled(can_stop)
 
             if block_reason:
                 controls_help.content = f'<p class="help">{views.esc(block_reason)}</p>'
@@ -689,20 +865,31 @@ class _OksaPage:
             else:
                 controls_help.content = '<p class="help">Both actions affect the shared appliance runtime, not an individual model installation.</p>'
 
-            sampled = self.snapshot.get("sampled_at") or "No sample timestamp"
+            updated = views.fmt_time(self.snapshot.get("sampled_at"), now)
             metrics_head.content = (
-                f'<div class="section-head"><h2 id="metrics-heading">Host &amp; request observations</h2>'
-                f'<p class="muted">Sampled · {views.esc(sampled)}</p></div>'
+                f'<div class="section-head"><h2 id="metrics-heading">Host &amp; requests</h2>'
+                f'<p class="muted">Updated {updated}</p></div>'
             )
-            metrics_box.content = views.render_serving_metrics(self.status, self.snapshot, stale=self.status_stale)
+            self._show_memory(memory_meter)
+            requests = self._request_metrics()
+            running_requests, waiting_requests = requests.get("running_requests"), requests.get("waiting_requests")
+            running_meter.show(
+                str(running_requests) if isinstance(running_requests, int) else "Unavailable",
+                "Active vLLM requests, not a slot limit",
+            )
+            queued_meter.show(
+                str(waiting_requests) if isinstance(waiting_requests, int) else "Unavailable",
+                "Waiting inference requests, not operations",
+            )
+            self._show_kv_cache(cache_meter)
             gpu_box.content = views.render_gpus_table(self.status)
             workload_box.content = views.render_workloads_table(self.status)
 
             run_cnt = len(self._running_jobs())
             foot_box.content = (
                 f'<footer class="page-foot">'
-                f"<span>Sampled: {views.esc(sampled)}</span>"
-                f'<a href="/operations">{run_cnt} running daemon job{"s" if run_cnt != 1 else ""} →</a>'
+                f"<span>Updated {updated}</span>"
+                f'<a href="/operations">{run_cnt} running operation{"s" if run_cnt != 1 else ""} →</a>'
                 f"</footer>"
             )
 
@@ -720,15 +907,13 @@ class _OksaPage:
             with ui.element("div"):
                 ui.html("<h1>Models</h1>", sanitize=False)
                 ui.html(
-                    '<p class="subtitle">Installed model files, public inference names, provenance and recorded calibration.</p>',
+                    '<p class="subtitle">Installed models, their public names, sources and calibration.</p>',
                     sanitize=False,
                 )
             with ui.element("div").classes("actions"):
-                btn_refresh = ui.element("button")
-                with btn_refresh:
-                    ui.html("Refresh inventory", sanitize=False)
+                btn_refresh = Kit.button("Refresh inventory", icon="refresh")
                 btn_refresh.on("click", self._poll)
-                ui.html('<a class="button primary" href="/models/download">Download model →</a>', sanitize=False)
+                Kit.button("Download model", href="/models/download", emphasis=Emphasis.PRIMARY, icon="download")
 
         notice_box = ui.html("", sanitize=False)
 
@@ -744,25 +929,21 @@ class _OksaPage:
                         )
                     )
                 with ui.element("div").classes("toolbar-field"):
-                    ui.html('<label for="models-filter-state">Serving observation</label>', sanitize=False)
+                    ui.html('<label for="models-filter-state">Serving</label>', sanitize=False)
                     sel_state = ui.element("select").props('id="models-filter-state"')
                     with sel_state:
                         for val, label in (
                             ("", "All installations"),
-                            ("active", "Observed serving"),
-                            ("selected", "Desired / selected"),
-                            ("idle", "Not observed serving"),
+                            ("active", "Running"),
+                            ("selected", "Selected"),
+                            ("idle", "Not running"),
                         ):
                             selected_attr = " selected" if filter_state == val else ""
                             ui.html(f'<option value="{views.esc(val)}"{selected_attr}>{views.esc(label)}</option>', sanitize=False)
                 count_box = ui.html("", sanitize=False).classes("count")
 
             table_box = ui.html("", sanitize=False)
-            ui.html(
-                '<p class="help">Downloaded models are local inventory; serving is one shared runtime. '
-                "Open a model to inspect its calibration profile, provenance, or serving controls.</p>",
-                sanitize=False,
-            )
+            action_help = ui.html("", sanitize=False).classes("help").props('id="models-block-reason"')
 
         partial_box = ui.html("", sanitize=False)
 
@@ -789,6 +970,23 @@ class _OksaPage:
         inp_q.on("input", on_q_input, js_handler="(e) => emit(e.target.value)")
         sel_state.on("change", on_state_change, js_handler="(e) => emit(e.target.value)")
 
+        async def on_row_action(event) -> None:
+            args = event.args if isinstance(event.args, dict) else {}
+            model = next((m for m in self.models if m.get("id") == args.get("model")), None)
+            action = views.model_action(model) if model is not None else None
+            if action is None or self._model_block_reason():
+                return
+            await self._open_serving_modal(action[0], str(args.get("id") or ""), model_id=str(model.get("id")))
+
+        table_box.on(
+            "click",
+            on_row_action,
+            js_handler=(
+                "(e) => { const b = e.target.closest('button[data-model]');"
+                " if (b && !b.disabled) emit({id: b.id, model: b.dataset.model}); }"
+            ),
+        )
+
         def update() -> None:
             crumbs.content = views.render_breadcrumbs([(self._host_name(), None), ("Models", "/models")])
             running_job = self._running_model_job()
@@ -797,9 +995,9 @@ class _OksaPage:
                 op_name = views.operation_label(str(running_job.get("operation") or ""))
                 notice_box.content = (
                     f'<div class="notice warning">'
-                    f"<strong>{views.esc(op_name)} ({views.esc(jid)}) is running.</strong> "
-                    f"Model mutation submissions remain disabled until it settles. "
-                    f'<a href="/operations/{views.url_part(jid)}">Inspect {views.esc(jid)} →</a>'
+                    f"<strong>{views.esc(op_name)} is running.</strong> "
+                    f"Model changes wait until it finishes. "
+                    f'<a href="/operations/{views.url_part(jid)}">Open operation →</a>'
                     f"</div>"
                 )
             elif self.models_error_text and self.models_loaded:
@@ -835,11 +1033,17 @@ class _OksaPage:
                 filtered_models.append(m)
 
             count_box.content = f"{len(filtered_models)} of {len(self.models)} shown"
+            block_reason = self._model_block_reason()
             table_box.content = views.render_models_table(
                 filtered_models,
                 loaded=self.models_loaded,
                 error_text=self.models_error_text,
                 filtered=bool(q_fold or filter_state),
+                model_status=str((self.status or {}).get("model_status") or ""),
+                block_reason=block_reason,
+            )
+            action_help.content = views.esc(
+                block_reason or "Serving is one shared runtime: serving a model replaces the active one."
             )
 
             partial_removals = [
@@ -857,11 +1061,11 @@ class _OksaPage:
                 partial_box.content = (
                     f'<section class="section" aria-labelledby="partial-rem-heading">'
                     f'<div class="section-head"><h2 id="partial-rem-heading">Partial removal · {pm}</h2>'
-                    f'{views.status_badge("Reconciliation failed", "error")}</div>'
-                    f"<p>Confirmed: <code>{pm}</code> files were deleted. Catalog/workload reconciliation failed. "
-                    f"Saved calibration records are not deleted by removal. Never repeat deletion to repair reconciliation.</p>"
-                    f'<div class="actions"><a class="button" href="/operations/{views.url_part(pjid)}">Inspect operation {views.esc(pjid)} →</a>'
-                    f'<a class="button" href="/serving">Inspect Serving →</a></div></section>'
+                    f'{Kit.status("Cleanup failed", Tone.ERROR)}</div>'
+                    f"<p>The files of <code>{pm}</code> were deleted, but updating the model catalog or workloads failed. "
+                    f"Saved calibration records are kept. Do not remove the model again.</p>"
+                    f'<div class="actions"><a href="/operations/{views.url_part(pjid)}">Open operation {views.esc(pjid)} →</a>'
+                    f'<a href="/serving">Open Serving →</a></div></section>'
                 )
             else:
                 partial_box.content = ""
@@ -886,7 +1090,7 @@ class _OksaPage:
                     sanitize=False,
                 )
             with ui.element("div").classes("actions"):
-                ui.html('<a class="button" href="/models">← Back to Models</a>', sanitize=False)
+                Kit.button("Back to Models", href="/models", icon="arrow_back")
 
         # Direct repository entry
         with ui.element("section").classes("form-width").props('aria-labelledby="direct-source-heading"'):
@@ -910,9 +1114,7 @@ class _OksaPage:
                     ui.html('<label for="direct-name-input">Local storage ID (optional override)</label>', sanitize=False)
                     inp_name = ui.element("input").props('id="direct-name-input" type="text" placeholder="Derived from repository basename"')
             with ui.element("div").classes("fact-actions actions"):
-                btn_review_direct = ui.element("button").classes("primary")
-                with btn_review_direct:
-                    ui.html("Review source →", sanitize=False)
+                btn_review_direct = Kit.button("Review source →", emphasis=Emphasis.PRIMARY)
 
         def open_direct_review() -> None:
             repo_val = direct_State["repo"].strip()
@@ -946,9 +1148,7 @@ class _OksaPage:
                     inp_search = ui.element("input").props(
                         f'id="hf-search-input" type="search" placeholder="Model family or repository name" value="{views.esc(initial_q)}"'
                     )
-                btn_search = ui.element("button")
-                with btn_search:
-                    ui.html("Search", sanitize=False)
+                btn_search = Kit.button("Search", icon="search")
             results_box = ui.html("", sanitize=False)
             ui.html(
                 '<p class="help">Gated or private repositories require a host-configured Hugging Face token and cannot be unlocked from the browser.</p>',
@@ -960,7 +1160,7 @@ class _OksaPage:
             self.search_query = q_clean
             self.search_error = ""
             self.search_done = False
-            results_box.content = '<div class="table-scroll"><div class="empty">Searching Hugging Face…</div></div>'
+            results_box.content = Kit.empty("Searching Hugging Face…", icon="search")
             reply = await self._load("search", "SearchModels", q_clean)
             if reply is None:
                 return
@@ -1006,7 +1206,7 @@ class _OksaPage:
         effective_name = ms.normalize_storage_id(repo_clean, name_clean or None) if repo_clean else ""
         self._set_page_title(f"Review {effective_name or repo_clean or 'download'}")
 
-        crumbs = ui.html(
+        ui.html(
             views.render_breadcrumbs([
                 ("Models", "/models"),
                 ("Download model", "/models/download"),
@@ -1023,7 +1223,7 @@ class _OksaPage:
                 )
             with ui.element("div").classes("actions"):
                 back_href = "/models/download" + ("?" + urlencode({"q": repo_clean}) if repo_clean else "")
-                ui.html(f'<a class="button" href="{views.esc(back_href)}">← Change source</a>', sanitize=False)
+                Kit.button("Change source", href=back_href, icon="arrow_back")
 
         if not repo_clean:
             ui.html(
@@ -1047,9 +1247,7 @@ class _OksaPage:
                     inp_local_id = ui.element("input").props(
                         f'id="review-local-id" type="text" value="{views.esc(name_clean or effective_name)}" style="max-width: 320px;"'
                     )
-                    btn_apply_id = ui.element("button")
-                    with btn_apply_id:
-                        ui.html("Re-evaluate local ID", sanitize=False)
+                    btn_apply_id = Kit.button("Re-evaluate local ID")
                 ui.html(
                     '<p class="help">Changing the local storage ID re-runs collision and replacement checks before submission.</p>',
                     sanitize=False,
@@ -1063,7 +1261,7 @@ class _OksaPage:
             force_row = ui.element("label").classes("option")
             with force_row:
                 chk_force = ui.element("input").props('type="checkbox" id="chk-force-capacity"')
-                force_text = ui.html(
+                ui.html(
                     "<div><strong>Override host RAM capacity estimate (--force)</strong>"
                     "<small>Proceed even though estimated model memory exceeds total host RAM (for multi-node QSFP clustering).</small></div>",
                     sanitize=False,
@@ -1071,10 +1269,8 @@ class _OksaPage:
 
             submit_err = ui.html("", sanitize=False)
             with ui.element("div").classes("form-footer"):
-                btn_submit = ui.element("button").classes("primary").props('id="btn-submit-download"')
-                with btn_submit:
-                    ui.html("Start download", sanitize=False)
-                ui.html('<a class="button" href="/models">Cancel</a>', sanitize=False)
+                btn_submit = Kit.button("Start download", emphasis=Emphasis.PRIMARY, icon="download").props('id="btn-submit-download"')
+                Kit.button("Cancel", href="/models")
                 submit_help = ui.html("", sanitize=False).classes("help")
 
         def on_change_local_id() -> None:
@@ -1121,7 +1317,7 @@ class _OksaPage:
                 exp_repo = ""
             exp_rev = str(existing.get("revision") or "") if existing else ""
 
-            self._set_button_disabled(btn_submit, True)
+            btn_submit.disable()
             submit_err.content = ""
             ok, res, err_msg = await self._submit_mutation(
                 self._review_request_id,
@@ -1154,11 +1350,11 @@ class _OksaPage:
             unresolved_model = self._unresolved_for_scope("model")
 
             if self.inspect_loading:
-                status_notice.content = '<div class="notice">Inspecting remote repository and resolving immutable commit…</div>'
+                status_notice.content = '<div class="notice">Checking the repository and pinning the exact commit…</div>'
                 facts_box.content = ""
                 replace_row.set_visibility(False)
                 force_row.set_visibility(False)
-                self._set_button_disabled(btn_submit, True)
+                btn_submit.disable()
                 submit_help.content = "Waiting for repository metadata…"
                 return
 
@@ -1170,7 +1366,7 @@ class _OksaPage:
                 facts_box.content = ""
                 replace_row.set_visibility(False)
                 force_row.set_visibility(False)
-                self._set_button_disabled(btn_submit, True)
+                btn_submit.disable()
                 submit_help.content = "Source metadata is required before download submission."
                 return
 
@@ -1201,7 +1397,7 @@ class _OksaPage:
             elif not self.models_verified:
                 block_reason = "Local model inventory must be verified before download submission."
             elif unresolved_model is not None:
-                block_reason = f"Blocked by unresolved model guard {unresolved_model.get('request_id')}."
+                block_reason = f"Blocked until the unknown outcome of request {unresolved_model.get('request_id')} is resolved."
             elif running_job is not None:
                 block_reason = f"Blocked while {views.job_short_id(running_job.get('path'))} is running."
             elif gated:
@@ -1213,7 +1409,7 @@ class _OksaPage:
             elif not fits and not consent_state["force"]:
                 block_reason = "Confirm host RAM capacity override (--force) to continue."
 
-            self._set_button_disabled(btn_submit, bool(block_reason))
+            btn_submit.set_enabled(not block_reason)
             submit_help.content = views.esc(block_reason or f"Pins commit {str(meta.get('resolved_revision') or '')[:12]} into /var/lib/vllm/models/{effective_name}.")
 
         self._active_updater = update
@@ -1230,16 +1426,10 @@ class _OksaPage:
         with header_box:
             title_box = ui.html("", sanitize=False)
             with ui.element("div").classes("actions"):
-                btn_refresh = ui.element("button")
-                with btn_refresh:
-                    ui.html("Refresh model", sanitize=False)
-                btn_serve = ui.element("button").classes("primary").props('id="btn-model-serve"')
-                with btn_serve:
-                    ui.html("Serve this model…", sanitize=False)
-                btn_restart = ui.element("button").props('id="btn-model-restart"')
-                with btn_restart:
-                    ui.html("Restart model…", sanitize=False)
-                ui.html('<a class="button" href="/models">← All models</a>', sanitize=False)
+                btn_refresh = Kit.button("Refresh model", icon="refresh")
+                btn_serve = Kit.button("Serve this model…", emphasis=Emphasis.PRIMARY, icon="play_arrow").props('id="btn-model-serve"')
+                btn_restart = Kit.button("Restart model…", icon="restart_alt").props('id="btn-model-restart"')
+                Kit.button("All models", href="/models", icon="arrow_back")
 
         missing_box = ui.html("", sanitize=False)
         detail_container = ui.element("div")
@@ -1263,24 +1453,21 @@ class _OksaPage:
                         with ui.element("label").classes("option"):
                             rad_reuse = ui.element("input").props('type="radio" name="cal-mode" value="reuse" checked')
                             ui.html(
-                                "<div><strong>Calibrate; reuse matching results if possible</strong>"
-                                "<small>Uses a matching recorded profile for the current hardware/runtime fingerprint if one exists; "
-                                "otherwise initiates GPU measurement (up to a 4-hour search budget plus setup/cleanup, interrupting shared inference).</small></div>",
+                                "<div><strong>Reuse a matching profile if possible</strong>"
+                                "<small>Uses saved limits for this hardware and runtime. Otherwise measures the GPU, "
+                                "which stops serving for up to 4 hours plus setup.</small></div>",
                                 sanitize=False,
                             )
                         with ui.element("label").classes("option"):
                             rad_force = ui.element("input").props('type="radio" name="cal-mode" value="force"')
                             ui.html(
-                                "<div><strong>Measure again (force=True)</strong>"
-                                "<small>Forces fresh GPU benchmark measurement even when a matching profile exists. "
-                                "Shared inference stops during measurement (up to a 4-hour search budget plus setup/cleanup).</small></div>",
+                                "<div><strong>Measure again</strong>"
+                                "<small>Ignores saved limits and measures the GPU. Serving stops for up to 4 hours plus setup.</small></div>",
                                 sanitize=False,
                             )
                     cal_err = ui.html("", sanitize=False)
                     with ui.element("div").classes("actions"):
-                        btn_calibrate = ui.element("button").props('id="btn-model-calibrate"')
-                        with btn_calibrate:
-                            ui.html("Start calibration", sanitize=False)
+                        btn_calibrate = Kit.button("Start calibration").props('id="btn-model-calibrate"')
                         cal_help = ui.html("", sanitize=False).classes("help")
 
             with ui.element("section").classes("section").props('aria-labelledby="model-ops-heading"'):
@@ -1295,9 +1482,7 @@ class _OksaPage:
                     sanitize=False,
                 )
                 with ui.element("div").classes("actions"):
-                    btn_delete = ui.element("button").classes("danger").props('id="btn-model-delete"')
-                    with btn_delete:
-                        ui.html("Delete model installation…", sanitize=False)
+                    btn_delete = Kit.button("Delete model installation…", emphasis=Emphasis.DANGER, icon="delete").props('id="btn-model-delete"')
                     delete_help = ui.html("", sanitize=False).classes("help")
 
         rad_reuse.on("change", lambda _: setattr(self, "_cal_force", False))
@@ -1314,7 +1499,7 @@ class _OksaPage:
             update()
 
         async def submit_calibration() -> None:
-            self._set_button_disabled(btn_calibrate, True)
+            btn_calibrate.disable()
             cal_err.content = ""
             sel_id = str((self.status or {}).get("selected_model_id") or "-")
             act_id = str((self.status or {}).get("active_model_id") or "-")
@@ -1347,8 +1532,8 @@ class _OksaPage:
             model = next((m for m in self.models if m.get("id") == model_id), None) if valid_id else None
             if model is None:
                 detail_container.set_visibility(False)
-                self._set_button_disabled(btn_serve, True)
-                self._set_button_disabled(btn_restart, True)
+                btn_serve.disable()
+                btn_restart.disable()
                 title_box.content = f"<h1>{views.esc(model_id or 'Unknown model')}</h1><p class=\"subtitle\">Model detail</p>"
                 if valid_id and not self.models_loaded:
                     missing_box.content = '<div class="notice">Loading local model inventory…</div>'
@@ -1360,12 +1545,12 @@ class _OksaPage:
                     op_link = ""
                     if rem_job:
                         rjid = views.job_short_id(rem_job.get("path"))
-                        op_link = f' <a href="/operations/{views.url_part(rjid)}">Inspect operation {views.esc(rjid)} →</a>'
+                        op_link = f' <a href="/operations/{views.url_part(rjid)}">Open operation {views.esc(rjid)} →</a>'
                     missing_box.content = (
                         f'<div class="notice error" role="alert">'
                         f"<p><strong>Model <code>{views.esc(model_id)}</code> is not installed.</strong> "
                         f"It may have been removed or never downloaded.{op_link}</p>"
-                        f'<p><a class="button" href="/models">← Return to Models inventory</a></p>'
+                        f'<p><a href="/models">← Return to Models inventory</a></p>'
                         f"</div>"
                     )
                 return
@@ -1379,50 +1564,49 @@ class _OksaPage:
             )
 
             running_job = self._running_model_job()
-            unresolved_model = self._unresolved_for_scope("model")
             if running_job is not None:
                 jid = views.job_short_id(running_job.get("path"))
                 op_name = views.operation_label(str(running_job.get("operation") or ""))
                 conflict_box.content = (
                     f'<div class="notice warning">'
-                    f"<strong>{views.esc(op_name)} ({views.esc(jid)}) is running.</strong> "
-                    f"Model mutations are blocked until it finishes. "
-                    f'<a href="/operations/{views.url_part(jid)}">Inspect {views.esc(jid)} →</a></div>'
+                    f"<strong>{views.esc(op_name)} is running.</strong> "
+                    f"Model changes wait until it finishes. "
+                    f'<a href="/operations/{views.url_part(jid)}">Open operation →</a></div>'
                 )
             else:
                 conflict_box.content = ""
 
-            identity_facts.content = views.render_model_detail_facts(model)
+            identity_facts.content = views.render_model_detail_facts(
+                model, str((self.status or {}).get("model_status") or "")
+            )
 
-            block_reason = ""
-            if self.disconnected or not self.models_verified or self.status is None or self.status_stale:
-                block_reason = "Runtime and inventory observations must be fresh before mutating model state."
-            elif unresolved_model is not None:
-                block_reason = f"Blocked by unresolved model guard {unresolved_model.get('request_id')}."
-            elif running_job is not None:
-                block_reason = f"Blocked while {views.job_short_id(running_job.get('path'))} is running."
+            block_reason = self._model_block_reason()
 
-            capable = model.get("capabilities") == "ok"
-            can_serve = not block_reason and capable
-            can_restart = not block_reason and capable and (model.get("active") is True or model.get("selected") is True)
+            unservable = views.model_unservable_reason(model)
+            can_serve = not block_reason and not unservable
+            can_restart = not block_reason and not unservable and (model.get("active") is True or model.get("selected") is True)
             can_cal = not block_reason
             can_del = not block_reason
 
-            self._set_button_disabled(btn_serve, not can_serve)
-            self._set_button_disabled(btn_restart, not can_restart)
-            self._set_button_disabled(btn_calibrate, not can_cal)
-            self._set_button_disabled(btn_delete, not can_del)
+            btn_serve.set_enabled(can_serve)
+            btn_restart.set_enabled(can_restart)
+            btn_calibrate.set_enabled(can_cal)
+            btn_delete.set_enabled(can_del)
 
             if block_reason:
                 action_reason.content = views.esc(block_reason)
-            elif not capable:
-                action_reason.content = "This model exceeds detected host capabilities and cannot be started."
+            elif unservable:
+                action_reason.content = views.esc(unservable)
             else:
                 action_reason.content = "Serving this model updates the shared appliance runtime selection."
 
             cal_data = self.calibration_data if self.calibration_model == model_id else None
             cal_err_txt = self.calibration_error if self.calibration_model == model_id else ""
-            cal_summary.content = views.render_calibration_summary(cal_data, error_text=cal_err_txt)
+            running = self._running_model_job()
+            cal_summary.content = views.render_calibration_summary(
+                cal_data, error_text=cal_err_txt, now=time.time(),
+                running_job=running if running is not None and running.get("model_name") == model_id else None,
+            )
             cal_help.content = views.esc(block_reason or "4-hour search budget maximum; not an ETA.")
             delete_help.content = views.esc(block_reason or f"Removes /var/lib/vllm/models/{model_id}.")
 
@@ -1432,7 +1616,7 @@ class _OksaPage:
                 reverse=True,
             )
             related_ops_box.content = views.render_operations_table(
-                rel_jobs, loaded=self.jobs_loaded, error_text=self.activity_error_text, filtered=True
+                rel_jobs, loaded=self.jobs_loaded, error_text=self.activity_error_text, filtered=True, now=time.time()
             )
 
         self._active_updater = update
@@ -1454,12 +1638,8 @@ class _OksaPage:
                     sanitize=False,
                 )
             with ui.element("div").classes("actions"):
-                btn_refresh = ui.element("button")
-                with btn_refresh:
-                    ui.html("Refresh access", sanitize=False)
-                btn_create_user = ui.element("button").classes("primary").props('id="btn-open-create-user"')
-                with btn_create_user:
-                    ui.html("Create API user…", sanitize=False)
+                btn_refresh = Kit.button("Refresh access", icon="refresh")
+                btn_create_user = Kit.button("Create API user…", emphasis=Emphasis.PRIMARY, icon="person_add").props('id="btn-open-create-user"')
 
         auth_notice = ui.html("", sanitize=False)
 
@@ -1517,6 +1697,7 @@ class _OksaPage:
         btn_create_user.on("click", lambda: self._open_create_user_modal("btn-open-create-user"))
 
         def update() -> None:
+            now = time.time()
             crumbs.content = views.render_breadcrumbs([(self._host_name(), None), ("API access", "/access")])
             auth = str((self.status or {}).get("auth_enforcement") or "unknown")
             if auth == "enforced":
@@ -1543,15 +1724,15 @@ class _OksaPage:
 
             unresolved_user = self._unresolved_for_scope("user")
             can_create = not self.disconnected and self.users_verified and unresolved_user is None
-            self._set_button_disabled(btn_create_user, not can_create)
+            btn_create_user.set_enabled(can_create)
 
             cov = (
-                f"Complete index · {len(self.all_keys)} keys sampled at {self.all_keys_sampled_at}"
+                f"{len(self.all_keys)} keys · read {views.fmt_ago(self.all_keys_sampled_at, now)}"
                 if self.all_keys_verified
-                else "Incomplete / unverified index — absence of a match is not proof of absence"
+                else "Index incomplete: a key missing here may still exist"
             )
             lookup_head.content = (
-                f'<div class="section-head"><h2 id="key-lookup-heading">Cross-owner key lookup</h2>'
+                f'<div class="section-head"><h2 id="key-lookup-heading">Find a key</h2>'
                 f'<p class="muted">{views.esc(cov)}</p></div>'
             )
             lookup_table.content = views.render_key_lookup_table(
@@ -1560,6 +1741,7 @@ class _OksaPage:
                 verified=self.all_keys_verified,
                 sampled_at=self.all_keys_sampled_at,
                 error_text=self.all_keys_error_text,
+                now=now,
             )
 
             users_head.content = (
@@ -1596,13 +1778,9 @@ class _OksaPage:
         with ui.element("header").classes("page-heading"):
             title_box = ui.html("", sanitize=False)
             with ui.element("div").classes("actions"):
-                btn_refresh = ui.element("button")
-                with btn_refresh:
-                    ui.html("Refresh user", sanitize=False)
-                btn_create_key = ui.element("button").classes("primary").props('id="btn-open-create-key"')
-                with btn_create_key:
-                    ui.html("Create API key…", sanitize=False)
-                ui.html('<a class="button" href="/access">← All API users</a>', sanitize=False)
+                btn_refresh = Kit.button("Refresh user", icon="refresh")
+                btn_create_key = Kit.button("Create API key…", emphasis=Emphasis.PRIMARY, icon="key").props('id="btn-open-create-key"')
+                Kit.button("All API users", href="/access", icon="arrow_back")
 
         missing_box = ui.html("", sanitize=False)
         detail_container = ui.element("div")
@@ -1611,34 +1789,49 @@ class _OksaPage:
                 ui.html('<div class="section-head"><h2 id="user-identity-heading">Consumer identity &amp; handoff context</h2></div>', sanitize=False)
                 user_facts = ui.html("", sanitize=False)
 
+            with ui.element("section").classes("section").props('aria-labelledby="user-quickstart-heading"'):
+                ui.html('<div class="section-head"><h2 id="user-quickstart-heading">Quick start</h2></div>', sanitize=False)
+                quickstart_note = ui.html("", sanitize=False)
+                quickstart = Kit.code_example(self._copy_text)
+
             with ui.element("section").classes("section").props('aria-labelledby="user-keys-heading"'):
                 keys_head = ui.html("", sanitize=False)
                 keys_notice = ui.html("", sanitize=False)
-                with ui.element("div").classes("table-scroll").props('tabindex="0" role="region" aria-label="User API keys"'):
-                    with ui.element("table"):
-                        ui.html(
-                            "<thead><tr>"
-                            '<th scope="col">Key alias</th><th scope="col">Key ID</th>'
-                            '<th scope="col">Displayed prefix</th><th scope="col">Model scope</th>'
-                            '<th scope="col">Expires</th><th scope="col">Created</th><th scope="col">Action</th>'
-                            "</tr></thead>",
-                            sanitize=False,
-                        )
-                        keys_tbody = ui.element("tbody")
+                keys_table = ui.html("", sanitize=False)
 
             with ui.element("section").classes("section").props('aria-labelledby="user-danger-heading"'):
                 ui.html('<div class="section-head"><h2 id="user-danger-heading">Danger zone · Delete API user</h2></div>', sanitize=False)
                 with ui.element("div").classes("actions"):
-                    btn_delete_user = ui.element("button").classes("danger").props('id="btn-delete-user"')
-                    with btn_delete_user:
-                        ui.html("Delete user and revoke keys…", sanitize=False)
+                    btn_delete_user = Kit.button("Delete user and revoke keys…", emphasis=Emphasis.DANGER, icon="delete").props('id="btn-delete-user"')
                     delete_user_help = ui.html("", sanitize=False).classes("help")
-
-        keys_sig: list = [None]
 
         btn_refresh.on("click", lambda: asyncio.create_task(self._refresh_user_detail(user_id)))
         btn_create_key.on("click", lambda: self._open_create_key_modal(user_id, "btn-open-create-key"))
         btn_delete_user.on("click", lambda: self._open_delete_user_modal(user_id, "btn-delete-user"))
+
+        def block_reason() -> str:
+            if self.disconnected or not self.users_verified or not self.user_detail_keys_verified:
+                return "User and key records must be verified before mutating keys or deleting this user."
+            unresolved_user = self._unresolved_for_scope("user")
+            if unresolved_user is not None:
+                return f"Blocked until the unknown outcome of request {unresolved_user.get('request_id')} is resolved."
+            return ""
+
+        async def on_key_action(event) -> None:
+            args = event.args if isinstance(event.args, dict) else {}
+            key = next((k for k in self.user_detail_keys if k.get("key_id") == args.get("key")), None)
+            if key is None or block_reason():
+                return
+            await self._open_revoke_key_modal(dict(key), str(args.get("id") or ""))
+
+        keys_table.on(
+            "click",
+            on_key_action,
+            js_handler=(
+                "(e) => { const b = e.target.closest('button[data-key]');"
+                " if (b && !b.disabled) emit({id: b.id, key: b.dataset.key}); }"
+            ),
+        )
 
         def update() -> None:
             crumbs.content = views.render_breadcrumbs([
@@ -1648,8 +1841,8 @@ class _OksaPage:
             user_obj = next((u for u in self.users if u.get("user_id") == user_id), None)
             if not user_id or (self.users_verified and user_obj is None):
                 detail_container.set_visibility(False)
-                self._set_button_disabled(btn_create_key, True)
-                title_box.content = f"<h1>{views.esc(user_id or 'Unknown user')}</h1><p class=\"subtitle\">API consumer detail</p>"
+                btn_create_key.disable()
+                title_box.content = f"<h1>{views.esc(user_id or 'Unknown user')}</h1><p class=\"subtitle\">API user</p>"
                 del_job = next(
                     (j for j in self.jobs.values() if isinstance(j, dict) and j.get("user_id") == user_id),
                     None,
@@ -1657,11 +1850,11 @@ class _OksaPage:
                 job_link = ""
                 if del_job:
                     djid = views.job_short_id(del_job.get("path"))
-                    job_link = f' <a href="/operations/{views.url_part(djid)}">Inspect deletion job {views.esc(djid)} →</a>'
+                    job_link = f' <a href="/operations/{views.url_part(djid)}">Open deletion {views.esc(djid)} →</a>'
                 missing_box.content = (
                     f'<div class="notice error" role="alert">'
                     f"<p><strong>API user <code>{views.esc(user_id or 'unspecified')}</code> was not found.</strong>{job_link}</p>"
-                    f'<p><a class="button" href="/access">← Return to API access</a></p></div>'
+                    f'<p><a href="/access">← Return to API access</a></p></div>'
                 )
                 return
 
@@ -1681,29 +1874,31 @@ class _OksaPage:
                 ("Privilege scope", "Inference API consumer only (no OKSA admin or host privileges)"),
                 (
                     "Protected service key",
-                    views.status_badge("Owns Open WebUI service key (blocks user deletion)", "warning")
+                    Kit.status("Owns Open WebUI service key (blocks user deletion)", Tone.WARNING)
                     if owns_service
                     else "None",
                 ),
                 ("API base URL", f"<code>{views.esc(self._api_base_url())}</code>"),
-                ("Observed public inference model", f"<code>{views.esc(active_pub)}</code>"),
+                ("Running model", f"<code>{views.esc(active_pub)}</code>"),
             ])
 
-            unresolved_user = self._unresolved_for_scope("user")
-            block_reason = ""
-            if self.disconnected or not self.users_verified or not self.user_detail_keys_verified:
-                block_reason = "User and key records must be verified before mutating keys or deleting this user."
-            elif unresolved_user is not None:
-                block_reason = f"Blocked by unresolved user/key guard {unresolved_user.get('request_id')}."
+            scopes = [k.get("models") or [] for k in self.user_detail_keys]
+            scope = sorted({m for sc in scopes for m in sc}) if scopes and all(scopes) else []
+            model = views.quickstart_model(str((self.status or {}).get("active_model") or ""), scope, self._model_names())
+            quickstart_note.content = self._quickstart_note(
+                model, f"Set <code>{views.API_KEY_ENV}</code> to one of this user's keys first. "
+            )
+            quickstart.show(views.quickstart_snippets(self._api_base_url(), model) if model else {})
 
-            self._set_button_disabled(btn_create_key, bool(block_reason))
-            can_del_user = not block_reason and not owns_service
-            self._set_button_disabled(btn_delete_user, not can_del_user)
+            reason = block_reason()
+            btn_create_key.set_enabled(not reason)
+            can_del_user = not reason and not owns_service
+            btn_delete_user.set_enabled(can_del_user)
             if owns_service:
                 delete_user_help.content = "Protected: this user owns the Open WebUI service key and cannot be deleted."
             else:
                 delete_user_help.content = views.esc(
-                    block_reason or f"Revokes all {len(self.user_detail_keys)} key(s) owned by {user_id}, then deletes the user record."
+                    reason or f"Revokes all {len(self.user_detail_keys)} key(s) owned by {user_id}, then deletes the user record."
                 )
 
             keys_head.content = (
@@ -1715,41 +1910,9 @@ class _OksaPage:
             else:
                 keys_notice.content = ""
 
-            new_sig = (self.user_detail_keys_verified, bool(block_reason), json.dumps(self.user_detail_keys, sort_keys=True))
-            if keys_sig[0] != new_sig:
-                keys_sig[0] = new_sig
-                keys_tbody.clear()
-                with keys_tbody:
-                    if not self.user_detail_keys_verified:
-                        ui.html('<tr><td colspan="7" class="muted">Loading user keys…</td></tr>', sanitize=False)
-                    elif not self.user_detail_keys:
-                        ui.html('<tr><td colspan="7" class="muted">No editable API keys exist for this user.</td></tr>', sanitize=False)
-                    else:
-                        for k in self.user_detail_keys:
-                            kid = str(k.get("key_id") or "")
-                            alias = str(k.get("key_alias") or "Unnamed key")
-                            prefix = str(k.get("key_prefix") or "—")
-                            models_list = k.get("models") if isinstance(k.get("models"), list) else []
-                            scope_txt = ", ".join(str(m) for m in models_list) if models_list else "All models (including future)"
-                            exp_txt = str(k.get("expires") or "No expiration")
-                            created_txt = str(k.get("created_at") or "—")
-                            btn_id = f"btn-revoke-{kid}"
-                            with ui.element("tr"):
-                                ui.html(
-                                    f"<td><strong>{views.esc(alias)}</strong></td>"
-                                    f'<td class="mono">{views.esc(kid)}</td>'
-                                    f'<td class="mono">{views.esc(prefix)}</td>'
-                                    f"<td>{views.esc(scope_txt)}</td>"
-                                    f"<td>{views.esc(exp_txt)}</td>"
-                                    f"<td>{views.esc(created_txt)}</td>",
-                                    sanitize=False,
-                                )
-                                with ui.element("td"):
-                                    r_btn = ui.element("button").classes("danger").props(f'id="{views.esc(btn_id)}"')
-                                    with r_btn:
-                                        ui.html("Revoke…", sanitize=False)
-                                    self._set_button_disabled(r_btn, bool(block_reason))
-                                    r_btn.on("click", lambda _, item=dict(k), bid=btn_id: self._open_revoke_key_modal(item, bid))
+            keys_table.content = views.render_user_keys_table(
+                self.user_detail_keys, verified=self.user_detail_keys_verified, blocked=bool(reason)
+            )
 
         self._active_updater = update
         update()
@@ -1770,15 +1933,13 @@ class _OksaPage:
                     sanitize=False,
                 )
             with ui.element("div").classes("actions"):
-                btn_refresh = ui.element("button")
-                with btn_refresh:
-                    ui.html("Refresh operations", sanitize=False)
+                btn_refresh = Kit.button("Refresh", icon="refresh")
                 btn_refresh.on("click", self._poll)
 
         ui.html(
             '<div class="notice">'
-            "<strong>Scope &amp; retention:</strong> Only the latest 64 daemon jobs are retained; this is not an unlimited security audit log. "
-            "Downloads appear here as operations rather than in a separate panel. Synchronous user/key writes are not daemon jobs."
+            "The latest 64 long-running operations, such as downloads and model changes, are kept. "
+            "User and key changes finish immediately and are not listed. This is not a security audit log."
             "</div>",
             sanitize=False,
         )
@@ -1851,8 +2012,8 @@ class _OksaPage:
 
             run_cnt = len(self._running_jobs())
             ops_head.content = (
-                f'<div class="section-head"><h2 id="ops-list-heading">Retained daemon jobs</h2>'
-                f'<p class="muted">{run_cnt} running · {len(ordered)} retained</p></div>'
+                f'<div class="section-head"><h2 id="ops-list-heading">Recent operations</h2>'
+                f'<p class="muted">{run_cnt} running · {len(ordered)} kept</p></div>'
             )
             count_box.content = f"{len(filtered)} of {len(ordered)} shown"
             table_box.content = views.render_operations_table(
@@ -1860,6 +2021,7 @@ class _OksaPage:
                 loaded=self.jobs_loaded,
                 error_text=self.activity_error_text,
                 filtered=bool(filter_state or filter_kind),
+                now=time.time(),
             )
 
         self._active_updater = update
@@ -1875,25 +2037,21 @@ class _OksaPage:
         with ui.element("header").classes("page-heading"):
             title_box = ui.html("", sanitize=False)
             with ui.element("div").classes("actions"):
-                btn_refresh = ui.element("button")
-                with btn_refresh:
-                    ui.html("Refresh operation", sanitize=False)
-                btn_cancel = ui.element("button").classes("danger").props('id="btn-cancel-job"')
-                with btn_cancel:
-                    ui.html("Request cancellation…", sanitize=False)
-                ui.html('<a class="button" href="/operations">← All operations</a>', sanitize=False)
+                btn_refresh = Kit.button("Refresh", icon="refresh")
+                btn_cancel = Kit.button("Cancel operation…", emphasis=Emphasis.DANGER, icon="cancel").props('id="btn-cancel-job"')
+                Kit.button("All operations", href="/operations", icon="arrow_back")
 
         missing_box = ui.html("", sanitize=False)
         detail_container = ui.element("div")
         with detail_container:
             with ui.element("section").props('aria-labelledby="op-identity-heading"'):
-                ui.html('<div class="section-head"><h2 id="op-identity-heading">Operation identity</h2></div>', sanitize=False)
+                ui.html('<div class="section-head"><h2 id="op-identity-heading">Details</h2></div>', sanitize=False)
                 facts_box = ui.html("", sanitize=False)
             with ui.element("section").classes("section").props('aria-labelledby="op-status-heading"'):
-                ui.html('<div class="section-head"><h2 id="op-status-heading">Latest reported status</h2></div>', sanitize=False)
+                ui.html('<div class="section-head"><h2 id="op-status-heading">Status</h2></div>', sanitize=False)
                 status_box = ui.html("", sanitize=False)
             with ui.element("section").classes("section").props('aria-labelledby="op-outcome-heading"'):
-                ui.html('<div class="section-head"><h2 id="op-outcome-heading">Outcome &amp; safe next step</h2></div>', sanitize=False)
+                ui.html('<div class="section-head"><h2 id="op-outcome-heading">Next steps</h2></div>', sanitize=False)
                 outcome_box = ui.html("", sanitize=False)
 
         btn_refresh.on("click", self._poll)
@@ -1906,15 +2064,15 @@ class _OksaPage:
             if job is None:
                 detail_container.set_visibility(False)
                 btn_cancel.set_visibility(False)
-                title_box.content = f"<h1>Operation {views.esc(short_id or 'unknown')}</h1><p class=\"subtitle\">Daemon job detail</p>"
+                title_box.content = f"<h1>Operation {views.esc(short_id or 'unknown')}</h1><p class=\"subtitle\">Operation details</p>"
                 if valid_jid and not self.jobs_loaded:
                     missing_box.content = '<div class="notice">Loading daemon operations…</div>'
                 else:
                     missing_box.content = (
                         f'<div class="notice error" role="alert">'
-                        f"<p><strong>Operation <code>{views.esc(short_id)}</code> is not in retained daemon history.</strong> "
-                        "Only the latest 64 jobs are retained; a pruned job does not mean its effects were undone.</p>"
-                        f'<p><a class="button" href="/operations">← Return to Operations</a></p></div>'
+                        f"<p><strong>Operation <code>{views.esc(short_id)}</code> is no longer kept.</strong> "
+                        "Only the latest 64 operations are kept; a removed entry does not mean its effects were undone.</p>"
+                        f'<p><a href="/operations">← Return to Operations</a></p></div>'
                     )
                 return
 
@@ -1925,26 +2083,18 @@ class _OksaPage:
             heading = f"{op_label} · {target}" if target else op_label
             title_box.content = (
                 f"<h1>{views.esc(heading)}</h1>"
-                f'<p class="subtitle">Accepted work remains owned by the daemon when you navigate away.</p>'
             )
             is_running = job.get("state") == "running"
             btn_cancel.set_visibility(is_running)
-            self._set_button_disabled(btn_cancel, not is_running or self.disconnected)
+            btn_cancel.set_enabled(is_running and not self.disconnected)
 
-            f_html, s_html, o_html = views.render_operation_detail(job)
+            f_html, s_html, o_html = views.render_operation_detail(job, time.time())
             facts_box.content = f_html
             status_box.content = s_html
             outcome_box.content = o_html
 
         self._active_updater = update
         update()
-
-    @staticmethod
-    def _set_button_disabled(button, disabled: bool) -> None:
-        if disabled:
-            button.props("disabled")
-        else:
-            button.props(remove="disabled")
 
     def _open_dialog(self, dialog_id: str) -> None:
         self.client.run_javascript(
@@ -1960,23 +2110,16 @@ class _OksaPage:
     def _clear_secret(self) -> None:
         self.secret = ""
         self.secret_meta = {}
-        if hasattr(self, "_secret_code_box") and not self.client.is_deleted:
+        if not self.client.is_deleted:
             self._secret_code_box.content = ""
+            self._secret_example.show({})
 
     def _build_modals(self) -> None:
         # 1. Serving / Model action modal
         with ui.element("dialog").classes("oksa-modal").props('id="modal-serving-action" aria-labelledby="modal-serving-title"'):
             self._srv_modal_body = ui.html("", sanitize=False)
             self._srv_modal_err = ui.html("", sanitize=False)
-            with ui.element("div").classes("dialog-actions"):
-                btn_srv_cancel = ui.element("button")
-                with btn_srv_cancel:
-                    ui.html("Cancel", sanitize=False)
-                self._btn_srv_confirm = ui.element("button").classes("primary")
-                with self._btn_srv_confirm:
-                    self._srv_confirm_label = ui.html("Confirm", sanitize=False)
-        btn_srv_cancel.on("click", lambda: self._close_dialog("modal-serving-action", self._modal_action.get("opener", "")))
-        self._btn_srv_confirm.on("click", self._confirm_serving_modal)
+            self._srv_actions = ui.element("div").classes("dialog-actions")
 
         # 2. Create user modal
         with ui.element("dialog").classes("oksa-modal").props('id="modal-create-user" aria-labelledby="modal-user-title"'):
@@ -1993,12 +2136,8 @@ class _OksaPage:
                 ui.html('<label for="modal-input-user-email">Email (optional)</label>', sanitize=False)
                 self._inp_user_email = ui.element("input").props('id="modal-input-user-email" type="email" placeholder="owner@example.org"')
             with ui.element("div").classes("dialog-actions"):
-                btn_u_cancel = ui.element("button")
-                with btn_u_cancel:
-                    ui.html("Cancel", sanitize=False)
-                self._btn_u_confirm = ui.element("button").classes("primary")
-                with self._btn_u_confirm:
-                    ui.html("Create user", sanitize=False)
+                btn_u_cancel = Kit.button("Cancel")
+                self._btn_u_confirm = Kit.button("Create user", emphasis=Emphasis.PRIMARY)
         self._inp_user_id.on("input", lambda e: setattr(self, "_create_user_id", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
         self._inp_user_email.on("input", lambda e: setattr(self, "_create_user_email", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
         btn_u_cancel.on("click", lambda: self._close_dialog("modal-create-user", self._modal_action.get("opener", "")))
@@ -2042,12 +2181,8 @@ class _OksaPage:
                         sel = " selected" if val == "30d" else ""
                         ui.html(f'<option value="{views.esc(val)}"{sel}>{views.esc(label)}</option>', sanitize=False)
             with ui.element("div").classes("dialog-actions"):
-                btn_k_cancel = ui.element("button")
-                with btn_k_cancel:
-                    ui.html("Cancel", sanitize=False)
-                self._btn_k_confirm = ui.element("button").classes("primary")
-                with self._btn_k_confirm:
-                    ui.html("Create API key", sanitize=False)
+                btn_k_cancel = Kit.button("Cancel")
+                self._btn_k_confirm = Kit.button("Create API key", emphasis=Emphasis.PRIMARY)
         self._inp_key_alias.on("input", lambda e: setattr(self, "_create_key_alias", str(e.args or "")), js_handler="(e) => emit(e.target.value)")
         self._rad_scope_sel.on("change", lambda _: setattr(self, "_create_key_scope_mode", "selected"))
         self._rad_scope_all.on("change", lambda _: setattr(self, "_create_key_scope_mode", "all"))
@@ -2058,7 +2193,7 @@ class _OksaPage:
         # 4. One-time secret handoff modal
         self._secret_dialog = (
             ui.element("dialog")
-            .classes("oksa-modal")
+            .classes("oksa-modal wide")
             .props('id="modal-one-time-secret" aria-labelledby="modal-secret-title"')
         )
         with self._secret_dialog:
@@ -2070,15 +2205,13 @@ class _OksaPage:
             self._secret_facts_box = ui.html("", sanitize=False)
             self._secret_code_box = ui.html("", sanitize=False)
             self._secret_copy_note = ui.html("", sanitize=False)
+            self._secret_example_head = ui.html("", sanitize=False)
+            self._secret_example = Kit.code_example(self._copy_text)
             with ui.element("div").classes("dialog-actions"):
-                btn_copy_sec = ui.element("button")
-                with btn_copy_sec:
-                    ui.html("Copy secret", sanitize=False)
-                btn_dismiss_sec = ui.element("button").classes("primary")
-                with btn_dismiss_sec:
-                    ui.html("I have recorded this key", sanitize=False)
+                btn_copy_sec = Kit.button("Copy secret", icon="content_copy")
+                btn_dismiss_sec = Kit.button("I have recorded this key", emphasis=Emphasis.PRIMARY)
         btn_copy_sec.on("click", self._copy_secret_to_clipboard)
-        btn_dismiss_sec.on("click", self._dismiss_secret_modal)
+        btn_dismiss_sec.on("click", lambda: self._close_dialog("modal-one-time-secret"))
         self._secret_dialog.on("close", self._on_secret_dialog_closed)
 
         # 5. Revoke key modal
@@ -2086,12 +2219,8 @@ class _OksaPage:
             self._revoke_modal_body = ui.html("", sanitize=False)
             self._revoke_modal_err = ui.html("", sanitize=False)
             with ui.element("div").classes("dialog-actions"):
-                btn_rev_cancel = ui.element("button")
-                with btn_rev_cancel:
-                    ui.html("Cancel", sanitize=False)
-                self._btn_rev_confirm = ui.element("button").classes("danger")
-                with self._btn_rev_confirm:
-                    ui.html("Revoke key", sanitize=False)
+                btn_rev_cancel = Kit.button("Cancel")
+                self._btn_rev_confirm = Kit.button("Revoke key", emphasis=Emphasis.DANGER)
         btn_rev_cancel.on("click", lambda: self._close_dialog("modal-revoke-key", self._modal_action.get("opener", "")))
         self._btn_rev_confirm.on("click", self._confirm_revoke_key)
 
@@ -2100,12 +2229,8 @@ class _OksaPage:
             self._del_user_body = ui.html("", sanitize=False)
             self._del_user_err = ui.html("", sanitize=False)
             with ui.element("div").classes("dialog-actions"):
-                btn_du_cancel = ui.element("button")
-                with btn_du_cancel:
-                    ui.html("Cancel", sanitize=False)
-                self._btn_du_confirm = ui.element("button").classes("danger")
-                with self._btn_du_confirm:
-                    ui.html("Delete user and revoke keys", sanitize=False)
+                btn_du_cancel = Kit.button("Cancel")
+                self._btn_du_confirm = Kit.button("Delete user and revoke keys", emphasis=Emphasis.DANGER)
         btn_du_cancel.on("click", lambda: self._close_dialog("modal-delete-user", self._modal_action.get("opener", "")))
         self._btn_du_confirm.on("click", self._confirm_delete_user)
 
@@ -2114,12 +2239,8 @@ class _OksaPage:
             self._cancel_job_body = ui.html("", sanitize=False)
             self._cancel_job_err = ui.html("", sanitize=False)
             with ui.element("div").classes("dialog-actions"):
-                btn_cj_keep = ui.element("button")
-                with btn_cj_keep:
-                    ui.html("Keep running", sanitize=False)
-                self._btn_cj_confirm = ui.element("button").classes("danger")
-                with self._btn_cj_confirm:
-                    ui.html("Request cancellation", sanitize=False)
+                btn_cj_keep = Kit.button("Keep running")
+                self._btn_cj_confirm = Kit.button("Cancel operation", emphasis=Emphasis.DANGER)
         btn_cj_keep.on("click", lambda: self._close_dialog("modal-cancel-job", self._modal_action.get("opener", "")))
         self._btn_cj_confirm.on("click", self._confirm_cancel_job)
 
@@ -2132,6 +2253,16 @@ class _OksaPage:
         target_id = model_id or (sel_id if sel_id != "-" else act_id)
         model_obj = next((m for m in self.models if m.get("id") == target_id), None)
         rev = str((model_obj or {}).get("revision") or "-")
+        measure_note = {
+            "measured": "A recorded calibration profile matches this hardware and runtime; no GPU measurement is needed.",
+            "required": (
+                "No recorded calibration profile matches this hardware and runtime: GPU measurement runs first and can take "
+                "up to the 4-hour search budget plus setup and cleanup."
+            ),
+        }.get(
+            str((model_obj or {}).get("calibration")),
+            "If no matching calibrated profile exists, GPU measurement can take up to the 4-hour search budget plus setup and cleanup.",
+        )
 
         self._pending_request_id = self._mint_request_id()
         self._modal_action = {
@@ -2143,38 +2274,33 @@ class _OksaPage:
             "opener": opener_id,
         }
         self._srv_modal_err.content = ""
-        self._set_button_disabled(self._btn_srv_confirm, False)
 
         if method == "StartModel":
-            self._btn_srv_confirm.classes(replace="primary")
-            self._srv_confirm_label.content = f"Serve {views.esc(target_id)}"
+            confirm, emphasis = f"Serve {target_id}", Emphasis.PRIMARY
             self._srv_modal_body.content = (
                 f'<h2 id="modal-serving-title">Serve {views.esc(target_id)}</h2>'
                 f"<p>Changes the shared appliance serving selection to <code>{views.esc(target_id)}</code> "
-                f"(currently desired: <code>{views.esc(sel_pub)}</code>, observed active: <code>{views.esc(act_pub)}</code>).</p>"
+                f"(selected now: <code>{views.esc(sel_pub)}</code>, running: <code>{views.esc(act_pub)}</code>).</p>"
                 "<p><strong>Impact:</strong> Any active model workload will be replaced, interrupting shared inference. "
-                "If no matching calibrated profile exists for this boot, calibration measurement can take up to the 4-hour search budget plus setup and cleanup.</p>"
+                f"{measure_note}</p>"
             )
         elif method == "RestartModel":
-            self._btn_srv_confirm.classes(replace="primary")
-            self._srv_confirm_label.content = f"Restart {views.esc(target_id)}"
+            confirm, emphasis = f"Restart {target_id}", Emphasis.PRIMARY
             self._srv_modal_body.content = (
                 f'<h2 id="modal-serving-title">Restart {views.esc(target_id)}</h2>'
                 f"<p>Restarts the shared inference runtime for <code>{views.esc(target_id)}</code> "
-                f"(observed active: <code>{views.esc(act_pub)}</code>).</p>"
+                f"(running: <code>{views.esc(act_pub)}</code>).</p>"
                 "<p><strong>Impact:</strong> In-flight inference requests will be interrupted while the workload pod restarts.</p>"
             )
         elif method == "StopServing":
-            self._btn_srv_confirm.classes(replace="danger")
-            self._srv_confirm_label.content = "Stop serving"
+            confirm, emphasis = "Stop serving", Emphasis.DANGER
             self._srv_modal_body.content = (
                 '<h2 id="modal-serving-title">Stop all model serving</h2>'
                 f"<p>Clears the desired serving selection (<code>{views.esc(sel_pub)}</code>) and scales down active inference workloads (<code>{views.esc(act_pub)}</code>).</p>"
                 "<p><strong>Impact:</strong> All shared inference on this appliance will stop until a model is explicitly served again.</p>"
             )
         elif method == "RemoveModel":
-            self._btn_srv_confirm.classes(replace="danger")
-            self._srv_confirm_label.content = f"Delete {views.esc(target_id)}"
+            confirm, emphasis = f"Delete {target_id}", Emphasis.DANGER
             active_warn = (
                 "<p><strong>Active model warning:</strong> This model is currently selected or active; deletion will stop serving before removing files.</p>"
                 if target_id in (sel_id, act_id)
@@ -2187,6 +2313,12 @@ class _OksaPage:
                 f"{active_warn}"
                 "<p>Saved calibration records in <code>/var/lib/puu/calibration</code> are not deleted by model removal.</p>"
             )
+        else:
+            raise ValueError(f"Unsupported serving action: {method}")
+        self._srv_actions.clear()
+        with self._srv_actions:
+            Kit.button("Cancel", lambda: self._close_dialog("modal-serving-action", opener_id))
+            self._btn_srv_confirm = Kit.button(confirm, self._confirm_serving_modal, emphasis=emphasis)
         self._open_dialog("modal-serving-action")
 
     async def _confirm_serving_modal(self) -> None:
@@ -2197,7 +2329,7 @@ class _OksaPage:
         exp_rev = self._modal_action.get("expected_revision", "")
         opener = self._modal_action.get("opener", "")
 
-        self._set_button_disabled(self._btn_srv_confirm, True)
+        self._btn_srv_confirm.disable()
         self._srv_modal_err.content = ""
 
         if method in ("StartModel", "RestartModel"):
@@ -2218,7 +2350,7 @@ class _OksaPage:
             return
 
         self._pending_request_id = self._mint_request_id()
-        self._set_button_disabled(self._btn_srv_confirm, False)
+        self._btn_srv_confirm.enable()
         self._srv_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
         self._render_all()
 
@@ -2229,7 +2361,7 @@ class _OksaPage:
         self._create_user_id = ""
         self._create_user_email = ""
         self._user_modal_err.content = ""
-        self._set_button_disabled(self._btn_u_confirm, False)
+        self._btn_u_confirm.enable()
         self.client.run_javascript(
             "const u = document.getElementById('modal-input-user-id'); if (u) u.value = '';"
             "const e = document.getElementById('modal-input-user-email'); if (e) e.value = '';"
@@ -2243,7 +2375,7 @@ class _OksaPage:
         if not uid:
             self._user_modal_err.content = '<div class="notice error" role="alert">User ID is required.</div>'
             return
-        self._set_button_disabled(self._btn_u_confirm, True)
+        self._btn_u_confirm.disable()
         self._user_modal_err.content = ""
         ok, _, err_msg = await self._submit_mutation(self._pending_request_id, "CreateUser", uid, uid, email, -1.0)
         if ok:
@@ -2252,7 +2384,7 @@ class _OksaPage:
             self._navigate(f"/access/user?id={views.url_part(uid)}")
             return
         self._pending_request_id = self._mint_request_id()
-        self._set_button_disabled(self._btn_u_confirm, False)
+        self._btn_u_confirm.enable()
         self._user_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
         await self._refresh_access()
         self._render_all()
@@ -2267,7 +2399,7 @@ class _OksaPage:
         self._create_key_selected_models = set()
         self._create_key_duration = "30d"
         self._key_modal_err.content = ""
-        self._set_button_disabled(self._btn_k_confirm, False)
+        self._btn_k_confirm.enable()
         self._key_modal_head.content = (
             f'<h2 id="modal-key-title">Create API key for <code>{views.esc(user_id)}</code></h2>'
             "<p>Choose an explicit key alias, model scope, and expiration. The generated secret will be displayed once upon creation.</p>"
@@ -2338,7 +2470,7 @@ class _OksaPage:
             models_arg = []
             scope_label = "All models, including future models"
 
-        self._set_button_disabled(self._btn_k_confirm, True)
+        self._btn_k_confirm.disable()
         self._key_modal_err.content = ""
         ok, res, err_msg = await self._submit_mutation(
             self._pending_request_id,
@@ -2360,13 +2492,14 @@ class _OksaPage:
                 alias=alias,
                 key_id=str(key_obj.get("key_id") or ""),
                 scope_label=scope_label,
+                models=models_arg,
                 expires=str(key_obj.get("expires") or self._create_key_duration or "No expiration"),
                 opener=opener,
             )
             return
 
         self._pending_request_id = self._mint_request_id()
-        self._set_button_disabled(self._btn_k_confirm, False)
+        self._btn_k_confirm.enable()
         self._key_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
         self._render_all()
 
@@ -2377,6 +2510,7 @@ class _OksaPage:
         alias: str,
         key_id: str,
         scope_label: str,
+        models: list[str],
         expires: str,
         opener: str,
     ) -> None:
@@ -2386,30 +2520,38 @@ class _OksaPage:
             ("Owner user ID", f"<code>{views.esc(owner)}</code>"),
             ("Key alias / ID", f"<strong>{views.esc(alias)}</strong> · <code>{views.esc(key_id)}</code>"),
             ("API base URL", f"<code>{views.esc(self._api_base_url())}</code>"),
-            ("Observed public inference model", f"<code>{views.esc(active_pub)}</code>"),
+            ("Running model", f"<code>{views.esc(active_pub)}</code>"),
             ("Granted model scope", views.esc(scope_label)),
             ("Expiration", views.esc(expires)),
         ])
         self._secret_code_box.content = f'<code class="secret-box" id="one-time-secret-code">{views.esc(self.secret)}</code>'
         self._secret_copy_note.content = ""
+        model = views.quickstart_model(str((self.status or {}).get("active_model") or ""), models, self._model_names())
+        self._secret_example_head.content = "<h3>Try it</h3>" + self._quickstart_note(model)
+        self._secret_example.show(views.quickstart_snippets(self._api_base_url(), model, self.secret) if model else {})
         self._open_dialog("modal-one-time-secret")
 
-    def _copy_secret_to_clipboard(self) -> None:
+    def _model_names(self) -> list[str]:
+        return [name for m in self.models if (name := str(m.get("name") or m.get("id") or ""))]
+
+    def _quickstart_note(self, model: str | None, lead: str = "") -> str:
+        if not model:
+            return '<p class="muted">Install a model to get a ready-to-run example.</p>'
+        keyless = ""
+        if (self.status or {}).get("auth_enforcement") == "keyless":
+            keyless = " The gateway does not check keys yet, so requests succeed without one."
+        return f"<p>{lead}A chat request to <code>{views.esc(model)}</code>.{keyless}</p>"
+
+    async def _copy_secret_to_clipboard(self) -> None:
         if not self.secret:
             return
-        self.client.run_javascript(
-            "const el = document.getElementById('one-time-secret-code');"
-            "if (el && navigator.clipboard) navigator.clipboard.writeText(el.textContent || '');"
-        )
-        self._secret_copy_note.content = '<p class="small">Copied to clipboard. Clear clipboard after storing in your secret manager.</p>'
-
-    def _dismiss_secret_modal(self) -> None:
-        opener = self.secret_meta.get("opener", "btn-open-create-key")
-        self._clear_secret()
-        self._close_dialog("modal-one-time-secret", opener)
+        if await self._copy_text(self.secret):
+            self._secret_copy_note.content = '<p class="small">Copied to clipboard. Clear clipboard after storing in your secret manager.</p>'
+        else:
+            self._secret_copy_note.content = '<p class="small">The browser refused clipboard access. Select the secret and copy it manually.</p>'
 
     def _on_secret_dialog_closed(self) -> None:
-        opener = self.secret_meta.get("opener", "btn-open-create-key")
+        opener = self.secret_meta.get("opener")
         self._clear_secret()
         if opener and not self.client.is_deleted:
             self.client.run_javascript(f"document.getElementById({json.dumps(opener)})?.focus();")
@@ -2420,7 +2562,7 @@ class _OksaPage:
         self._revoke_key_target = dict(key_item)
         self._modal_action = {"opener": opener_id}
         self._revoke_modal_err.content = ""
-        self._set_button_disabled(self._btn_rev_confirm, False)
+        self._btn_rev_confirm.enable()
 
         alias = views.esc(key_item.get("key_alias") or "Unnamed key")
         kid = views.esc(key_item.get("key_id") or "")
@@ -2437,8 +2579,7 @@ class _OksaPage:
     async def _confirm_revoke_key(self) -> None:
         owner = str(self._revoke_key_target.get("user_id") or "")
         kid = str(self._revoke_key_target.get("key_id") or "")
-        opener = self._modal_action.get("opener", "")
-        self._set_button_disabled(self._btn_rev_confirm, True)
+        self._btn_rev_confirm.disable()
         self._revoke_modal_err.content = ""
         ok, _, err_msg = await self._submit_mutation(
             self._pending_request_id, "RevokeKey", f"{owner}:{kid}", owner, kid
@@ -2448,7 +2589,7 @@ class _OksaPage:
             self._close_dialog("modal-revoke-key", "btn-open-create-key")
             return
         self._pending_request_id = self._mint_request_id()
-        self._set_button_disabled(self._btn_rev_confirm, False)
+        self._btn_rev_confirm.enable()
         self._revoke_modal_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
         self._render_all()
 
@@ -2457,20 +2598,20 @@ class _OksaPage:
         self._pending_request_id = self._mint_request_id()
         self._modal_action = {"user_id": user_id, "opener": opener_id}
         self._del_user_err.content = ""
-        self._set_button_disabled(self._btn_du_confirm, False)
+        self._btn_du_confirm.enable()
         key_cnt = len(self.user_detail_keys)
         self._del_user_body.content = (
             f'<h2 id="modal-del-user-title">Delete API user {views.esc(user_id)}</h2>'
             f"<p>Revokes all <strong>{key_cnt}</strong> API key(s) owned by <code>{views.esc(user_id)}</code>, "
             "verifies their absence in the gateway database, and then deletes the user record.</p>"
-            "<p>If key revocation or user deletion is only partially confirmed, the operation records the exact confirmed count and blocks conflicting writes until reconciled.</p>"
+            "<p>If key revocation or user deletion is only partially confirmed, the operation records how many were confirmed and blocks further changes to this user until the cleanup is finished.</p>"
         )
         self._open_dialog("modal-delete-user")
 
     async def _confirm_delete_user(self) -> None:
         user_id = self._modal_action.get("user_id", "")
         opener = self._modal_action.get("opener", "")
-        self._set_button_disabled(self._btn_du_confirm, True)
+        self._btn_du_confirm.disable()
         self._del_user_err.content = ""
         ok, res, err_msg = await self._submit_mutation(
             self._pending_request_id, "DeleteUser", user_id, user_id
@@ -2481,7 +2622,7 @@ class _OksaPage:
             self._navigate(f"/operations/{views.url_part(jid)}")
             return
         self._pending_request_id = self._mint_request_id()
-        self._set_button_disabled(self._btn_du_confirm, False)
+        self._btn_du_confirm.enable()
         self._del_user_err.content = f'<div class="notice error" role="alert">{views.esc(err_msg)}</div>'
         self._render_all()
 
@@ -2489,13 +2630,13 @@ class _OksaPage:
         self._cancel_job_path = job_path
         self._modal_action = {"opener": opener_id}
         self._cancel_job_err.content = ""
-        self._set_button_disabled(self._btn_cj_confirm, False)
+        self._btn_cj_confirm.enable()
         job = self.jobs.get(job_path) or {}
         jid = views.job_short_id(job_path)
         op_name = views.operation_label(str(job.get("operation") or ""))
         target = job.get("model_name") or job.get("user_id") or "runtime"
         self._cancel_job_body.content = (
-            f'<h2 id="modal-cancel-job-title">Request cancellation · {views.esc(jid)}</h2>'
+            f'<h2 id="modal-cancel-job-title">Cancel {views.esc(jid)}?</h2>'
             f"<p>Sends a termination request (<code>SIGTERM</code>) to running job <strong>{views.esc(op_name)}</strong> on <code>{views.esc(target)}</code>.</p>"
             "<p><strong>Important:</strong> Cancellation is a request, not a rollback. It may race completion, and partial changes to staged files, calibration records, or runtime state may remain.</p>"
         )
@@ -2504,7 +2645,7 @@ class _OksaPage:
     async def _confirm_cancel_job(self) -> None:
         path = self._cancel_job_path
         opener = self._modal_action.get("opener", "")
-        self._set_button_disabled(self._btn_cj_confirm, True)
+        self._btn_cj_confirm.disable()
         self._cancel_job_err.content = ""
         reply = await self._call(self.service.cancel_job, path)
         await self._refresh_daemon_state()
@@ -2513,6 +2654,6 @@ class _OksaPage:
             self._close_dialog("modal-cancel-job", opener)
             self._render_all()
             return
-        self._set_button_disabled(self._btn_cj_confirm, False)
+        self._btn_cj_confirm.enable()
         self._cancel_job_err.content = f'<div class="notice error" role="alert">{views.esc(self._error(reply))}</div>'
         self._render_all()
