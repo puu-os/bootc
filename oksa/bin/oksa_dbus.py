@@ -540,6 +540,7 @@ class OksaDBusService:
         self.workers: list[Invocation] = []
         self.registrations: dict[str, int] = {}
         self.closed = False
+        self.timer = None
         self.frontend_uid = pwd.getpwnam("oksa").pw_uid
         self.store = JobStore(Path(job_dir or os.environ.get("OKSA_JOB_DIR", "/var/lib/oksa/jobs")))
         self.monitoring = StatusSampler(ms.collect_serving_status)
@@ -1204,11 +1205,8 @@ class OksaDBusService:
             return
         self.closed = True
         self.loop.quit()
-        if getattr(self, "timer", None) is not None:
-            try:
-                GLib.source_remove(self.timer)
-            except Exception:
-                pass
+        if self.timer is not None:
+            GLib.source_remove(self.timer)
             self.timer = None
         self.monitoring.close()
         for worker in tuple(self.workers):
