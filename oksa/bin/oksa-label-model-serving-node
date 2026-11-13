@@ -202,9 +202,7 @@ def main() -> None:
     cluster_joined = file_has_content(k3s_env) or file_has_content(Path("/var/lib/rancher/k3s/server/token"))
 
     models_ready = models_dir.is_dir() and os.access(models_dir, os.R_OK)
-    models_mounted = models_dir.is_mount() if hasattr(models_dir, "is_mount") else False
-    if not models_mounted:
-        models_mounted = subprocess.run(["/usr/bin/mountpoint", "-q", str(models_dir)]).returncode == 0
+    models_mounted = subprocess.run(["/usr/bin/mountpoint", "-q", str(models_dir)]).returncode == 0
 
     model_names = [name for name, _, _ in ms.read_models_list(state_dir / "models.list")]
     model_labels = sorted({ms.model_node_label(name) for name in model_names})
