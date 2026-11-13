@@ -34,7 +34,7 @@ class Job:
     operation: str
     started_at: float
     state: str = "running"
-    progress: str = ""
+    progress: dict | None = None
     ended_at: float | None = None
     result: dict | None = None
     error: dict | None = None
@@ -61,7 +61,7 @@ class Job:
             "StartedAt": GLib.Variant("d", float(self.started_at)),
             "EndedAt": GLib.Variant("ad", [] if self.ended_at is None else [float(self.ended_at)]),
             "State": GLib.Variant("s", self.state),
-            "Progress": GLib.Variant("s", self.progress),
+            "Progress": GLib.Variant("a{sv}", {} if self.progress is None else Contract.PROGRESS.to_variant(self.progress)),
             "Result": GLib.Variant("a{sv}", {} if self.result is None else Contract.response_to_variant(self.operation, self.result)),
             "Error": GLib.Variant("a{sv}", {} if self.error is None else Contract.ERROR.to_variant(self.error)),
             "RepoId": GLib.Variant("as", [] if self.repo_id is None else [self.repo_id]),
@@ -132,7 +132,7 @@ class JobStore:
             job = Job(**{
                 key: data.get(key)
                 for key in (
-                    "path", "operation", "started_at", "state", "progress",
+                    "path", "operation", "started_at", "state",
                     "ended_at", "result", "error", "repo_id", "model_name",
                     "commit", "user_id", "request_id",
                 )
@@ -410,7 +410,8 @@ class JobStore:
         self.save_receipts()
 
     def save(self, job: Job) -> None:
-        self._atomic_write_json(self.directory / (job.path.rsplit("/", 1)[1] + ".json"), job.snapshot())
+        record = {key: value for key, value in job.snapshot().items() if key != "progress"}
+        self._atomic_write_json(self.directory / (job.path.rsplit("/", 1)[1] + ".json"), record)
 
     def prune(self, reserve: int = 0) -> list[str]:
         removed = []
@@ -430,18 +431,20 @@ class Worker:
     def __init__(self, channel) -> None:
         self.channel = channel
         self.last_progress = 0.0
-        self.pending = ""
+        self.sent_phase = ""
+        self.pending: dict | None = None
 
-    def send_progress(self, text: str) -> None:
+    def send_progress(self, state: dict) -> None:
         self.last_progress = time.monotonic()
-        self.pending = ""
-        self.channel.send_bytes(Contract.encode({"kind": "progress", "text": text[:4096]}).encode())
+        self.sent_phase = state["phase"]
+        self.pending = None
+        self.channel.send_bytes(Contract.encode({"kind": "progress", "progress": state}).encode())
 
-    def progress(self, text: str) -> None:
-        if time.monotonic() - self.last_progress < 0.2:
-            self.pending = text
+    def progress(self, state: dict) -> None:
+        if state["phase"] == self.sent_phase and time.monotonic() - self.last_progress < 0.2:
+            self.pending = state
             return
-        self.send_progress(text)
+        self.send_progress(state)
 
     @classmethod
     def run(cls, channel, service_class, method: str, args: tuple) -> None:
@@ -486,14 +489,14 @@ class OksaDBusService:
     JOB_XML = f'''<node><interface name="{Contract.JOB}">
       <method name="GetSnapshot"><arg name="snapshot" type="a{{sv}}" direction="out"/></method>
       <method name="Cancel"/>
-      <signal name="Progress"><arg name="progress" type="s"/></signal>
+      <signal name="Progress"><arg name="progress" type="a{{sv}}"/></signal>
       <signal name="StateChanged"><arg name="state" type="s"/></signal>
       <property name="Path" type="o" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
       <property name="Operation" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
       <property name="StartedAt" type="d" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
       <property name="EndedAt" type="ad" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
       <property name="State" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
-      <property name="Progress" type="s" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
+      <property name="Progress" type="a{{sv}}" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
       <property name="Result" type="a{{sv}}" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
       <property name="Error" type="a{{sv}}" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="true"/></property>
       <property name="RepoId" type="as" access="read"><annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/></property>
@@ -1025,15 +1028,16 @@ class OksaDBusService:
 
     def settle_job(self, job: Job, state: str, result: dict | None, error: dict | None) -> None:
         job.state, job.result, job.error = state, result, error
+        job.progress = None
         job.ended_at = time.time()
         self.store.save(job)
-        self.emit(job, "StateChanged", job.state)
-        self.notify_job_properties(job, ("State", "EndedAt", "Result", "Error"))
+        self.emit(job, "StateChanged", GLib.Variant("(s)", (job.state,)))
+        self.notify_job_properties(job, ("State", "Progress", "EndedAt", "Result", "Error"))
 
-    def emit(self, job: Job, name: str, text: str) -> None:
+    def emit(self, job: Job, name: str, parameters: GLib.Variant) -> None:
         for sender in tuple(job.subscribers):
             try:
-                self.connection.emit_signal(sender, job.path, Contract.JOB, name, GLib.Variant("(s)", (text,)))
+                self.connection.emit_signal(sender, job.path, Contract.JOB, name, parameters)
             except GLib.Error:
                 job.subscribers.discard(sender)
                 logging.warning("Unable to deliver job signal to %s", sender)
@@ -1159,11 +1163,16 @@ class OksaDBusService:
                     if kind == "ready":
                         worker.ready = True
                     elif kind == "progress" and worker.job:
-                        if worker.job.progress != packet["text"]:
-                            worker.job.progress = packet["text"]
-                            self.store.save(worker.job)
-                            self.emit(worker.job, "Progress", worker.job.progress)
-                            self.notify_job_properties(worker.job, ("Progress",))
+                        try:
+                            Contract.validate_progress(packet["progress"])
+                        except OksaError as error:
+                            self.finish(worker, None, {"code": "InvalidResult", "message": f"Invalid job progress: {error}"})
+                            terminal = True
+                            break
+                        worker.job.progress = packet["progress"]
+                        self.emit(worker.job, "Progress",
+                                  GLib.Variant("(a{sv})", (Contract.PROGRESS.to_variant(worker.job.progress),)))
+                        self.notify_job_properties(worker.job, ("Progress",))
                     elif kind in ("result", "error"):
                         self.finish(worker, packet.get("result"), packet.get("error"))
                         terminal = True

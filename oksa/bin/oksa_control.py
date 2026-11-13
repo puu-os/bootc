@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
 import subprocess
 import time
 import unicodedata
@@ -150,6 +151,9 @@ class Contract:
     USER_MUTATIONS = frozenset({"CreateUser", "DeleteUser", "CreateKey", "RevokeKey"})
     MUTATIONS = MODEL_MUTATIONS | USER_MUTATIONS
     ERROR = RecordSchema({"code": "s", "message": "s"})
+    PROGRESS = RecordSchema({"phase": "s", "message": "s", "phase_started_at": "d", "updated_at": "d",
+                             "bytes_done": "x", "bytes_total": "x", "bytes_per_second": "d", "deadline_at": "d"},
+                            frozenset({"bytes_done", "bytes_total", "bytes_per_second", "deadline_at"}))
     MEMORY = RecordSchema({"total_mib": "x", "available_mib": "x", "used_mib": "x", "used_pct": "d"},
                           frozenset({"total_mib", "available_mib", "used_mib", "used_pct"}))
     GPU = RecordSchema({"index": "x", "name": "s", "vendor": "s", "memory_used_mib": "d",
@@ -289,12 +293,12 @@ class Contract:
             raise OksaError("InvalidResult", "Invalid job operation")
         return RecordSchema(
             {
-                "ok": "b", "path": "o", "operation": "s", "state": "s", "progress": "s",
+                "ok": "b", "path": "o", "operation": "s", "state": "s", "progress": cls.PROGRESS,
                 "started_at": "d", "ended_at": "d", "result": cls.RESPONSES[operation],
                 "error": cls.ERROR, "repo_id": "s", "model_name": "s",
                 "commit": "s", "user_id": "s", "request_id": "s",
             },
-            frozenset({"ended_at", "result", "error", "repo_id", "model_name", "commit", "user_id", "request_id"}),
+            frozenset({"progress", "ended_at", "result", "error", "repo_id", "model_name", "commit", "user_id", "request_id"}),
         )
     @classmethod
     def validate_snapshot(cls, data: dict) -> None:
@@ -309,6 +313,23 @@ class Contract:
             raise OksaError("InvalidResult", "Successful job has no result")
         if data["state"] in ("failed", "canceled") and data.get("error") is None:
             raise OksaError("InvalidResult", "Failed job has no error")
+        if data.get("progress") is not None:
+            if data["state"] != "running":
+                raise OksaError("InvalidResult", "Finished job reports progress")
+            cls.validate_progress(data["progress"])
+
+    @classmethod
+    def validate_progress(cls, data: dict) -> None:
+        cls.PROGRESS.to_variant(data)
+        if not data["phase"] or len(data["phase"]) > 128 or len(data["message"]) > 512:
+            raise OksaError("InvalidResult", "Invalid progress phase or message")
+        done, total, rate = data.get("bytes_done"), data.get("bytes_total"), data.get("bytes_per_second")
+        if (done is None) != (total is None) or (total is not None and not 0 <= done <= total):
+            raise OksaError("InvalidResult", "Invalid progress byte counts")
+        if rate is not None and (total is None or rate < 0):
+            raise OksaError("InvalidResult", "Invalid progress transfer rate")
+        if data.get("deadline_at") is not None and data["deadline_at"] <= data["phase_started_at"]:
+            raise OksaError("InvalidResult", "Invalid progress deadline")
 
     @classmethod
     def snapshot_to_variant(cls, data: dict) -> dict[str, GLib.Variant]:
@@ -430,6 +451,39 @@ class Contract:
             raise OksaError("InvalidResult", "Unsupported JSON value type")
 
 
+class JobProgress:
+    """The structured progress of one job, set by its operation and refined by its helpers."""
+
+    HELPER_FIELDS = frozenset({"phase", "message", "bytes_done", "bytes_total", "bytes_per_second", "deadline_at"})
+
+    def __init__(self, publish) -> None:
+        self.publish = publish
+        self.state: dict | None = None
+
+    def phase(self, name: str) -> None:
+        now = time.time()
+        self._set({"phase": name, "message": "", "phase_started_at": now, "updated_at": now})
+
+    def update(self, fields: dict) -> None:
+        if not isinstance(fields, dict) or fields.keys() - self.HELPER_FIELDS:
+            raise OksaError("InvalidResult", "Invalid progress report")
+        now = time.time()
+        state = dict(self.state or {})
+        if fields.get("phase", state.get("phase")) != state.get("phase"):
+            state = {"phase": fields["phase"], "message": "", "phase_started_at": now}
+        state.update(fields, updated_at=now)
+        self._set(state)
+
+    def message(self, text: str) -> None:
+        if self.state is not None:
+            self.update({"message": text[:512]})
+
+    def _set(self, state: dict) -> None:
+        Contract.validate_progress(state)
+        self.state = state
+        self.publish(dict(state))
+
+
 class OksaControl:
     def __init__(self, state_dir: Path | None = None) -> None:
         self.state_dir = Path(state_dir or os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
@@ -437,7 +491,7 @@ class OksaControl:
         self.labeler_bin = ms.resolve_helper("oksa-label-model-serving-node")
         self.planner_bin = ms.resolve_helper("oksa-plan-vllm-workloads")
         self.preseed_bin = ms.resolve_helper("oksa-preseed-vllm-models")
-        self.progress = lambda text: None
+        self.progress = JobProgress(lambda state: None)
 
     def execute(self, method: str, args: tuple, progress) -> dict:
         Contract.validate(method, args)
@@ -453,7 +507,7 @@ class OksaControl:
             "CreateKey": self.create_key, "RevokeKey": self.revoke_key,
             "GetCalibration": self.get_calibration, "Calibrate": self.calibrate,
         }
-        self.progress = progress
+        self.progress = JobProgress(progress)
         call_args = args[1:] if method in Contract.MUTATIONS else args
         return operations[method](*call_args)
     def list_models(self) -> dict:
@@ -568,18 +622,64 @@ class OksaControl:
         fits, reason = ms.check_model_capacity(meta.get("estimated_memory_mib", 0))
         return {"ok": True, "metadata": meta, "fits": fits, "reason": reason}
 
-    def run_helper(self, command: list[str], env: dict | None = None) -> None:
+    def run_helper(self, phase: str, command: list[str], env: dict | None = None) -> None:
+        """Run a helper as a job phase; its output lines become progress messages and its reports refine the progress."""
+        self.progress.phase(phase)
         last_line = ""
-        with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
-            for line in iter(lambda: process.stdout.readline(4096), ""):
-                text = line.strip()
-                if text:
-                    last_line = text
-                self.progress(text)
-            code = process.wait()
+        read_fd, write_fd = os.pipe()
+        env = dict(os.environ if env is None else env, **ms.progress_env(write_fd))
+        try:
+            with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  pass_fds=(write_fd,)) as process:
+                os.close(write_fd)
+                write_fd = -1
+                try:
+                    for fd, line in self._lines(process.stdout.fileno(), read_fd):
+                        if fd == read_fd:
+                            try:
+                                report = json.loads(line)
+                            except ValueError as error:
+                                raise OksaError("InvalidResult", "Invalid helper progress report") from error
+                            self.progress.update(report)
+                            continue
+                        text = line.decode(errors="replace").replace("\x00", "").strip()
+                        if text:
+                            last_line = text
+                            self.progress.message(text)
+                except BaseException:
+                    process.kill()
+                    raise
+                code = process.wait()
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
         if code:
             detail = f": {last_line}" if last_line else ""
             raise OksaError("OperationFailed", f"{Path(command[0]).name} failed (exit {code}){detail}")
+
+    @staticmethod
+    def _lines(*fds: int):
+        """Yield (fd, line) pairs, split at 4096 bytes, until every descriptor reaches end of file."""
+        pending = dict.fromkeys(fds, b"")
+        with selectors.DefaultSelector() as selector:
+            for fd in fds:
+                selector.register(fd, selectors.EVENT_READ)
+            while selector.get_map():
+                for key, _ in selector.select():
+                    chunk = os.read(key.fd, 65536)
+                    if chunk:
+                        *lines, pending[key.fd] = (pending[key.fd] + chunk).split(b"\n")
+                    else:
+                        selector.unregister(key.fd)
+                        lines = [pending[key.fd]] if pending[key.fd] else []
+                        pending[key.fd] = b""
+                    while len(pending[key.fd]) > 4096:
+                        lines.append(pending[key.fd][:4096])
+                        pending[key.fd] = pending[key.fd][4096:]
+                    for line in lines:
+                        for start in range(0, max(len(line), 1), 4096):
+                            yield key.fd, line[start:start + 4096]
 
     def _current_serving_ids(self) -> tuple[str, str]:
         selected_file, disabled_file = ms.control_files(self.state_dir)
@@ -645,9 +745,9 @@ class OksaControl:
             if force:
                 command.append("--force")
             env = dict(os.environ, PUU_PRESEED_LOCK_HELD=f"1:{effective_name}")
-            self.run_helper(command, env)
-        self.run_helper([str(self.discover_bin)])
-        self.run_helper([str(self.labeler_bin)])
+            self.run_helper("Downloading model files", command, env)
+        self.run_helper("Discovering models", [str(self.discover_bin)])
+        self.run_helper("Labeling the serving node", [str(self.labeler_bin)])
         return {"ok": True, "message": "Model download completed successfully."}
 
     def start_model(self, name: str, expected_selected: str = "", expected_active: str = "") -> dict:
@@ -671,7 +771,7 @@ class OksaControl:
                 PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
                 PUU_PLANNER_LOCK_HELD="1",
             )
-            self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
+            self.run_helper("Starting model serving", [str(self.planner_bin), "--require-reconcile"], env)
         return {"ok": True, "message": f"Model {ms.public_model_name(model_name, self.state_dir)} activated"}
 
     def restart_model(self, name: str, expected_selected: str = "", expected_active: str = "") -> dict:
@@ -695,7 +795,7 @@ class OksaControl:
                 PUU_VLLM_REQUIRE_SELECTED_MODEL="true",
                 PUU_PLANNER_LOCK_HELD="1",
             )
-            self.run_helper([str(self.planner_bin), "--require-reconcile", "--restart"], env)
+            self.run_helper("Restarting model serving", [str(self.planner_bin), "--require-reconcile", "--restart"], env)
         return {"ok": True, "message": f"Model {ms.public_model_name(model_name, self.state_dir)} restarted"}
 
     def stop_serving(self, expected_selected: str = "", expected_active: str = "") -> dict:
@@ -707,7 +807,7 @@ class OksaControl:
             selected.unlink(missing_ok=True)
             ms.atomic_write_text(disabled, "")
             env = dict(os.environ, PUU_PLANNER_LOCK_HELD="1")
-            self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
+            self.run_helper("Stopping model serving", [str(self.planner_bin), "--require-reconcile"], env)
         return {"ok": True, "message": "Model serving stopped"}
 
     def remove_model(
@@ -730,6 +830,7 @@ class OksaControl:
                 raise OksaError("StateChanged", "State changed; review again")
             self._verify_serving_preconditions(expected_selected, expected_active)
 
+        self.progress.phase("Removing model")
         result = removal.ModelRemovalService(self.state_dir, self.discover_bin, self.planner_bin).remove(
             resolved, prevalidate=_prevalidate
         )
@@ -849,8 +950,9 @@ class OksaControl:
             command = [str(ms.resolve_helper("oksa-calibrate")), "--model", name]
             if force:
                 command.append("--force")
-            self.run_helper(command)
-            self.run_helper([str(self.planner_bin), "--require-reconcile"], dict(os.environ, PUU_PLANNER_LOCK_HELD="1"))
+            self.run_helper("Calibrating", command)
+            self.run_helper("Applying the serving profile", [str(self.planner_bin), "--require-reconcile"],
+                            dict(os.environ, PUU_PLANNER_LOCK_HELD="1"))
         return self.get_calibration(name)
 
     def reconcile_scope(self, scope: str, target: str) -> dict:
@@ -872,9 +974,9 @@ class OksaControl:
                                 "ReconciliationFailed",
                                 f"Model directory {dest} is incomplete (missing config.json); repair or remove it before clearing guard",
                             )
-                self.run_helper([str(self.discover_bin)])
+                self.run_helper("Discovering models", [str(self.discover_bin)])
                 env = dict(os.environ, PUU_PLANNER_LOCK_HELD="1")
-                self.run_helper([str(self.planner_bin), "--require-reconcile"], env)
+                self.run_helper("Reconciling model serving", [str(self.planner_bin), "--require-reconcile"], env)
             return {"ok": True, "message": f"Model scope reconciled ({target or 'runtime'})"}
         if scope == "user":
             ok_u, users = ms.litellm_user_list()

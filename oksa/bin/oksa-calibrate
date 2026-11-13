@@ -45,6 +45,13 @@ class CalibrationController:
         self.fingerprint = ""
         self.policy = CalibrationPolicy.from_environment()
         self.previous_profile = None
+        self.phase = "Preparing calibration"
+        self.phase_deadline: float | None = None
+
+    def enter_phase(self, name: str, deadline: float) -> None:
+        """Start a progress phase whose budget ends at the monotonic ``deadline``."""
+        self.phase = name
+        self.phase_deadline = time.time() + deadline - time.monotonic()
 
     def publish(self, state: str, message: str) -> None:
         value = dict(schema=1, model=self.model, boot_id=boot_id(), state=state,
@@ -52,6 +59,9 @@ class CalibrationController:
         if self.model:
             atomic_record(status_path(self.model), value)
         atomic_record(STATUS_PATH, value)
+        if state == "running":
+            budget = {} if self.phase_deadline is None else {"deadline_at": self.phase_deadline}
+            ms.report_progress(phase=self.phase, message=value["message"], **budget)
 
     @staticmethod
     def memory_info() -> dict[str, int]:
@@ -260,6 +270,7 @@ class CalibrationController:
             raise ValueError("Model context ceiling cannot accommodate the calibration policy")
         deadline = started + MAX_SECONDS
         search_deadline = deadline - FINAL_VALIDATIONS * (TRIAL_SECONDS + 180)
+        self.enter_phase("Searching serving limits", search_deadline)
         trials = result["trials"]
         candidates = []
 
@@ -330,6 +341,7 @@ class CalibrationController:
                 raise
             mark_incomplete(error.reason)
             self.publish("running", f"{error}; validating the best measured profile.")
+        self.enter_phase("Validating serving profile", deadline)
         best = self.rank_candidates(candidates)
         context, sequences, utilization = best["context"], best["sequences"], best["utilization"]
         enabled = measure(context, sequences, utilization, final=True)

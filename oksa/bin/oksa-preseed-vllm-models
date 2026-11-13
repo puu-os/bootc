@@ -15,6 +15,7 @@ import shlex
 import stat as statmod
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -84,19 +85,41 @@ def file_matches(path: Path, info: dict) -> bool:
 
 def download_files(repo_id: str, revision: str, dest_dir: Path, files: list[dict]) -> bool:
     rev = urllib.parse.quote(revision, safe="/")
+    total = sum(info["size"] for info in files)
+    done = fetched = 0
+    started = reported = time.monotonic()
+
+    def report(message: str, force: bool = False) -> None:
+        nonlocal reported
+        now = time.monotonic()
+        if force or now - reported >= 0.5:
+            reported = now
+            ms.report_progress(phase="Downloading model files", message=message[:512], bytes_done=done,
+                               bytes_total=total, bytes_per_second=fetched / max(now - started, 0.001))
+
     for info in files:
         rfilename = info["path"]
         out_path = dest_dir / rfilename
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if file_matches(out_path, info):
+            done += info["size"]
             continue
         print(f"  Fetching {rfilename}...")
+        report(f"Fetching {rfilename}", force=True)
         file_url = f"https://huggingface.co/{repo_id}/resolve/{rev}/{urllib.parse.quote(rfilename, safe='/')}"
         file_req = urllib.request.Request(file_url, headers={"User-Agent": "puu-preseed/1.0"})
         tmp_path = out_path.with_name(f".{out_path.name}.tmp")
+        written = 0
         try:
             with urllib.request.urlopen(file_req, timeout=120) as in_stream, open(tmp_path, "wb") as out_stream:
-                shutil.copyfileobj(in_stream, out_stream)
+                while chunk := in_stream.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > info["size"]:
+                        raise ValueError(f"downloaded file exceeds its expected size: {rfilename}")
+                    out_stream.write(chunk)
+                    done += len(chunk)
+                    fetched += len(chunk)
+                    report(f"Fetching {rfilename}")
             if not file_matches(tmp_path, info):
                 raise ValueError(f"downloaded file has incorrect size or checksum: {rfilename}")
             tmp_path.replace(out_path)
@@ -104,6 +127,7 @@ def download_files(repo_id: str, revision: str, dest_dir: Path, files: list[dict
             tmp_path.unlink(missing_ok=True)
             print(f"error: failed downloading {rfilename}: {exc}", file=sys.stderr)
             return False
+    report("Verified all model files", force=True)
     return True
 
 

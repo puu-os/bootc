@@ -33,6 +33,7 @@ STATE_DIR = Path(os.environ.get("PUU_VLLM_STATE_DIR", "/var/lib/puu/vllm"))
 MODELS_DIR = Path(os.environ.get("PUU_VLLM_MODELS_DIR", "/var/lib/vllm/models"))
 PRESEED_MANIFEST = ".puu-preseed.json"
 OKSA_NAMESPACE = "oksa"
+PROGRESS_FD_ENV = "OKSA_PROGRESS_FD"
 
 
 def normalize_storage_id(repo_id: str, name: str | None = None) -> str:
@@ -67,6 +68,30 @@ def resolve_model_name(
 
 def resolve_helper(name: str) -> Path:
     return Path(__file__).resolve().parent / name
+
+
+def progress_env(fd: int) -> dict[str, str]:
+    """Environment handing the progress pipe ``fd`` to a helper started with ``pass_fds=(fd,)``."""
+    return {PROGRESS_FD_ENV: f"{fd}:{os.fstat(fd).st_ino}"}
+
+
+def progress_fds() -> tuple[int, ...]:
+    """The inherited progress pipe, for ``pass_fds``; empty unless the descriptor is still that pipe."""
+    fd, _, inode = os.environ.get(PROGRESS_FD_ENV, "").partition(":")
+    try:
+        info = os.fstat(int(fd))
+    except (ValueError, OSError):
+        return ()
+    return (int(fd),) if stat.S_ISFIFO(info.st_mode) and str(info.st_ino) == inode else ()
+
+
+def report_progress(**fields: Any) -> None:
+    """Report structured progress to the OKSA job running this helper, if any."""
+    line = json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode() + b"\n"
+    if len(line) > 4096:
+        raise ValueError("Progress report exceeds the atomic pipe write size")
+    for fd in progress_fds():
+        os.write(fd, line)
 
 
 def control_files(state_dir: Path = STATE_DIR) -> tuple[Path, Path]:
