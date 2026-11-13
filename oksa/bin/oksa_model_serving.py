@@ -16,7 +16,6 @@ from pathlib import Path, PurePosixPath
 import pwd
 import re
 import shlex
-import shutil
 import socket
 import stat
 import subprocess
@@ -67,11 +66,7 @@ def resolve_model_name(
 
 
 def resolve_helper(name: str) -> Path:
-    installed = Path("/usr/libexec/puu") / name
-    if installed.is_file():
-        return installed
-    sibling = Path(__file__).resolve().parent / name
-    return sibling if sibling.is_file() else installed
+    return Path(__file__).resolve().parent / name
 
 
 def control_files(state_dir: Path = STATE_DIR) -> tuple[Path, Path]:

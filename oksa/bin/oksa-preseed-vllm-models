@@ -19,29 +19,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-libexec_dir = Path("/usr/libexec/puu")
-for directory in (Path(__file__).resolve().parent, libexec_dir):
-    if directory.is_dir() and str(directory) not in sys.path:
-        sys.path.insert(0, str(directory))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oksa_model_serving as ms
 from oksa_calibration_state import STATUS_PATH
 
 
-def resolve_helper(name: str) -> Path:
-    installed = libexec_dir / name
-    if installed.is_file():
-        return installed
-    sibling = Path(__file__).resolve().parent / name
-    if sibling.is_file():
-        return sibling
-    return installed
-
-
 def notify_discovery_and_planner() -> None:
     if os.geteuid() == 0:
-        discover_bin = resolve_helper("oksa-discover-vllm-models")
-        if discover_bin.is_file() and os.access(discover_bin, os.X_OK):
-            subprocess.run([str(discover_bin)], check=True)
+        subprocess.run([str(ms.resolve_helper("oksa-discover-vllm-models"))], check=True)
         subprocess.run(["systemctl", "start", "--no-block", "puu-vllm-planner.service"], check=True)
 
 
