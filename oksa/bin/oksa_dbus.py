@@ -763,10 +763,7 @@ class OksaDBusService:
                 pass
             self.finish(worker, None, {"code": "Canceled", "message": "Operation was canceled by user"})
         else:
-            job.state = "canceled"
-            job.ended_at = time.time()
-            job.error = {"code": "Canceled", "message": "Operation was canceled by user"}
-            self.store.save(job)
+            self.settle_job(job, "canceled", None, {"code": "Canceled", "message": "Operation was canceled by user"})
             self.store.update_receipt(
                 job.request_id,
                 state="canceled",
@@ -775,8 +772,6 @@ class OksaDBusService:
                 error_code="Canceled",
                 error_message="Operation was canceled by user",
             )
-            self.emit(job, "StateChanged", job.state)
-            self.notify_job_properties(job, ("State", "EndedAt", "Error"))
         invocation.return_value(None)
 
     def notify_status_if_changed(self) -> None:
@@ -1012,12 +1007,7 @@ class OksaDBusService:
         except Exception as error:
             parent.close()
             if job:
-                job.state = "failed"
-                job.ended_at = time.time()
-                job.error = {"code": "Unavailable", "message": str(error)[:4096]}
-                self.store.save(job)
-                self.emit(job, "StateChanged", job.state)
-                self.notify_job_properties(job, ("State", "EndedAt", "Error"))
+                self.settle_job(job, "failed", None, {"code": "Unavailable", "message": str(error)[:4096]})
             if request_id:
                 self.store.update_receipt(
                     request_id, state="failed", summary="Worker failed to start before execution",
@@ -1032,6 +1022,13 @@ class OksaDBusService:
         self.workers.append(worker)
         if mutation:
             invocation.return_value(GLib.Variant("(o)", (job.path,)))
+
+    def settle_job(self, job: Job, state: str, result: dict | None, error: dict | None) -> None:
+        job.state, job.result, job.error = state, result, error
+        job.ended_at = time.time()
+        self.store.save(job)
+        self.emit(job, "StateChanged", job.state)
+        self.notify_job_properties(job, ("State", "EndedAt", "Result", "Error"))
 
     def emit(self, job: Job, name: str, text: str) -> None:
         for sender in tuple(job.subscribers):
@@ -1093,13 +1090,8 @@ class OksaDBusService:
             msg = result.get("error") or result.get("warning") or result.get("message") or "Operation failed"
             error = {"code": code, "message": str(msg)[:4096]}
         if worker.job:
-            job = worker.job
-            job.result, job.error = result, error
-            job.state = "canceled" if (error and error.get("code") == "Canceled") else ("failed" if error else "succeeded")
-            job.ended_at = time.time()
-            self.store.save(job)
-            self.emit(job, "StateChanged", job.state)
-            self.notify_job_properties(job, ("State", "EndedAt", "Result", "Error"))
+            state = "canceled" if (error and error.get("code") == "Canceled") else ("failed" if error else "succeeded")
+            self.settle_job(worker.job, state, result, error)
         elif error:
             self.return_error(worker.invocation, OksaError(error["code"], error["message"]))
         else:
