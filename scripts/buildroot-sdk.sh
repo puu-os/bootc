@@ -19,6 +19,10 @@ sdk_lock=$7
 dl_dir=$8
 epoch=$9
 
+# Keep build scratch space in the build tree instead of the system /tmp.
+mkdir -p "${sdk_build_dir}/tmp"
+export TMPDIR="${sdk_build_dir}/tmp"
+
 mkdir -p "$(dirname "$sdk_lock")"
 exec 9>"$sdk_lock"
 flock 9

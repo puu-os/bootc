@@ -17,6 +17,10 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 : "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH is required}"
 [[ "${FORCE:-0}" == 0 || "${FORCE:-0}" == 1 ]] || { echo 'FORCE must be 0 or 1' >&2; exit 1; }
 
+# Keep build scratch space in the build tree instead of the system /tmp.
+mkdir -p "${BOARD_DIR}/tmp"
+export TMPDIR="${BOARD_DIR}/tmp"
+
 mkdir -p "$(dirname "${BUILDROOT_PATCH_LOCK}")"
 exec 9>"${BUILDROOT_PATCH_LOCK%.patch}.build"
 flock 9
