@@ -30,22 +30,6 @@ def notify_discovery_and_planner() -> None:
         subprocess.run(["systemctl", "start", "--no-block", "puu-vllm-planner.service"], check=True)
 
 
-def download_with_cli(repo_id: str, revision: str, dest_dir: Path) -> bool:
-    if shutil.which("hf"):
-        cmd = ["hf", "download", repo_id, "--local-dir", str(dest_dir)]
-        if revision and revision != "main":
-            cmd.extend(["--revision", revision])
-        try:
-            env = os.environ.copy()
-            env.setdefault("HF_HOME", "/var/lib/huggingface")
-            res = subprocess.run(cmd, check=False, env=env)
-            if res.returncode == 0:
-                return True
-        except OSError:
-            pass
-    return False
-
-
 def model_files(repo_id: str, revision: str) -> list[dict] | None:
     rev = urllib.parse.quote(revision, safe="/")
     api_url = f"https://huggingface.co/api/models/{repo_id}/revision/{rev}?blobs=true"
@@ -98,7 +82,7 @@ def file_matches(path: Path, info: dict) -> bool:
     return digest.hexdigest() == expected
 
 
-def download_with_http(repo_id: str, revision: str, dest_dir: Path, files: list[dict]) -> bool:
+def download_files(repo_id: str, revision: str, dest_dir: Path, files: list[dict]) -> bool:
     rev = urllib.parse.quote(revision, safe="/")
     for info in files:
         rfilename = info["path"]
@@ -217,16 +201,7 @@ def preseed_locked(
     print(f"Pre-seeding model {model_name} ({repo_id}) to {dest_dir}...")
     stage_dir = models_dir.parent / f".{model_name}.preseed"
     stage_dir.mkdir(parents=True, exist_ok=True)
-    verified = all(file_matches(stage_dir / info["path"], info) for info in files)
-    if not verified:
-        verified = download_with_cli(repo_id, revision, stage_dir) and all(
-            file_matches(stage_dir / info["path"], info) for info in files
-        )
-    if not verified:
-        verified = download_with_http(repo_id, revision, stage_dir, files) and all(
-            file_matches(stage_dir / info["path"], info) for info in files
-        )
-    if not verified:
+    if not download_files(repo_id, revision, stage_dir, files):
         print(f"error: model {model_name} failed download or file verification", file=sys.stderr)
         return False
 
