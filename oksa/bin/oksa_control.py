@@ -2,7 +2,6 @@
 # Copyright (C) Opinsys Oy 2026
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import fcntl
 import hashlib
 import http.client
@@ -174,7 +173,7 @@ class Contract:
         },
         frozenset({"host", "api_base_url", "auth_enforcement", "selected_model_id", "active_model_id", "gpus", "workloads", "preparation"}),
     )
-    FRESHNESS = RecordSchema({"sampled_at": "s", "age_seconds": "d", "stale": "b", "error": "s", "max_age_seconds": "d"},
+    FRESHNESS = RecordSchema({"sampled_at": "d", "age_seconds": "d", "stale": "b", "error": "s", "max_age_seconds": "d"},
                             frozenset({"sampled_at", "age_seconds", "error"}))
     MODEL = RecordSchema(
         {
@@ -247,7 +246,7 @@ class Contract:
         "DeleteUser": RecordSchema({"ok": "b", "outcome": "s", "deleted": "b", "confirmed_revoked_keys": "x",
                                    "message": "s", "error": "s", "warning": "s"}, frozenset({"deleted", "message", "error", "warning"})),
         "ListKeys": RecordSchema(
-            {"ok": "b", "keys": (KEY_RECORD,), "complete": "b", "sampled_at": "s", "protected_users": list},
+            {"ok": "b", "keys": (KEY_RECORD,), "complete": "b", "sampled_at": "d", "protected_users": list},
             frozenset({"complete", "sampled_at", "protected_users"}),
         ),
         "CreateKey": RecordSchema({"ok": "b", "key": dict}),
@@ -791,12 +790,11 @@ class OksaControl:
             for k in raw_keys
             if isinstance(k, dict) and k.get("key_alias") != "open-webui"
         ]
-        sampled_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         return {
             "ok": True,
             "keys": sanitized,
             "complete": True,
-            "sampled_at": sampled_at,
+            "sampled_at": time.time(),
             "protected_users": protected_users,
         }
 

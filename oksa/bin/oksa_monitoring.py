@@ -4,7 +4,6 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import logging
 import math
 import threading
@@ -17,7 +16,7 @@ class MonitoringSnapshot:
     """A point-in-time view with a caller-owned status payload."""
 
     status: dict | None
-    sampled_at: str | None
+    sampled_at: float | None
     age_seconds: float | None
     stale: bool
     error: str | None
@@ -62,7 +61,7 @@ class StatusSampler:
         self._mutations = 0
         self._pending = True
         self._status: dict | None = None
-        self._sampled_at: str | None = None
+        self._sampled_at: float | None = None
         self._sample_started: float | None = None
         self._error: str | None = None
 
@@ -139,7 +138,7 @@ class StatusSampler:
                 generation = self._generation
                 self._pending = False
                 started = time.monotonic()
-                sampled_at = datetime.now(timezone.utc).isoformat()
+                sampled_at = time.time()
             error = None
             try:
                 status = self._collector()
