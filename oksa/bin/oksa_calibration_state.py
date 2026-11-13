@@ -230,6 +230,15 @@ class CalibrationStore:
         return hashlib.sha256(json.dumps(identity, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
     @classmethod
+    def reusable(cls, result: dict, model: str, identity: dict) -> bool:
+        """Whether calibrating without force applies this recorded result instead of measuring again."""
+        return (valid_result(result, model)
+                and result["fingerprint"] == cls.fingerprint(identity)
+                and result["identity"] == identity
+                and (result["limits"]["max_num_seqs"] > 0 or result["search_complete"])
+                and result["reason"] != "insufficient-memory")
+
+    @classmethod
     def load(cls, spec: ModelSpec, hardware: dict | None = None) -> dict:
         result = applied_result(spec.name)
         identity = cls.identity(spec, hardware=hardware)
