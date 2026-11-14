@@ -54,6 +54,7 @@ if [[ "${command}" == configure ]] || ! "${state[@]}" check "${state_dir}/config
   echo "${BOARD}: applying configuration"
   rm -f "${state_dir}/build.json"
   make "${make_args[@]}" "${BOARD}_defconfig"
+  make "${make_args[@]}" syncconfig
   "${state[@]}" save "${state_dir}/configure.json" --key "${configure_key}" --path "${BOARD_DIR}/.config"
 fi
 [[ "${command}" == build ]] || exit 0
@@ -200,6 +201,10 @@ current_configuration_key=$("${state[@]}" key --path "${BOARD_DIR}/.config")
 if [[ "${flatpak_key}" != "${current_flatpak_key}" || "${key_identity}" != "${current_key_identity}" || \
     "${input_key}" != "${current_input_key}" || "${configuration_key}" != "${current_configuration_key}" ]]; then
   echo "${BOARD}: inputs changed during the build; not recording an up-to-date result" >&2
+  [[ "${flatpak_key}" == "${current_flatpak_key}" ]] || echo "  flatpak key changed: ${flatpak_key} -> ${current_flatpak_key}" >&2
+  [[ "${key_identity}" == "${current_key_identity}" ]] || echo "  signing key changed: ${key_identity} -> ${current_key_identity}" >&2
+  [[ "${input_key}" == "${current_input_key}" ]] || echo "  input key changed: ${input_key} -> ${current_input_key}" >&2
+  [[ "${configuration_key}" == "${current_configuration_key}" ]] || echo "  configuration key changed: ${configuration_key} -> ${current_configuration_key}" >&2
   exit 1
 fi
 build_tree=$("${state[@]}" build-tree "${BOARD_DIR}")
