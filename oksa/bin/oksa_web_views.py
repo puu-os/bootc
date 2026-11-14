@@ -597,13 +597,15 @@ def render_models_table(
     )
 
 
-def render_search_results_table(results: list[dict], *, searched: bool, error_text: str) -> str:
+def render_search_results_table(results: list[dict], *, searched: bool, error_text: str, query: str = "") -> str:
     if error_text:
         return Kit.empty(f"Search failed: {error_text}", icon=Tone.ERROR.icon)
     if not searched:
         return Kit.empty("Enter a search term above or specify a direct repository ID to review.")
     if not results:
-        return Kit.empty("No matching text-generation repositories found on Hugging Face.")
+        term = f" matching “{query}”" if query else ""
+        return Kit.empty(f"No text-generation repositories{term} found on Hugging Face. "
+                         "Check the spelling, or enter a repository ID directly above.")
     rows = []
     for item in results:
         repo = str(item.get("repo_id") or "")

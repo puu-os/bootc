@@ -1191,6 +1191,7 @@ class _OksaPage:
                 self.search_results,
                 searched=self.search_done,
                 error_text=self.search_error,
+                query=self.search_query,
             )
 
         self._active_updater = update
