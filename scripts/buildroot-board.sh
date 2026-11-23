@@ -90,7 +90,7 @@ case "${PUU_FLATPAK_PRESEED:-1}" in
   *) echo 'PUU_FLATPAK_PRESEED must be 0 or 1' >&2; exit 1 ;;
 esac
 input_args=(key --exclude __pycache__ --exclude '*.pyc' --exclude dist
-  --path Makefile --path br2-external --path oksa --path sdk --path scripts --path buildroot.patch
+  --path Makefile --path br2-external --path sdk --path scripts --path buildroot.patch
   --value "source=${BUILDROOT_SRC_DIR}" --value "sdk=${SDK_INSTALL_DIR}"
   --value "board=${BOARD_DIR}" --value "epoch=${SOURCE_DATE_EPOCH}"
   --value "keys=${key_identity}" --value "flatpaks=${flatpak_key}")
@@ -183,9 +183,7 @@ if [[ "${modules_changed}" == true ]]; then
   rm -rf -- "${BOARD_DIR}/target/usr/lib/modules"
 fi
 
-make "${make_args[@]}" BR_FORCE_CHECK_DEPENDENCIES=YES host-finalize
-./scripts/oksa-build.sh
-make "${make_args[@]}" BR2_ROOTFS_OVERLAY="${external_dir}/overlay ${BOARD_DIR}/oksa-overlay"
+make "${make_args[@]}"
 ./scripts/image-live-rootfs.sh
 ./scripts/image-sign.sh
 ./scripts/image-live-iso.sh

@@ -1,0 +1,5 @@
+config BR2_PACKAGE_PUU_GATEWAY_CRDS
+	bool "puu-gateway-crds"
+	help
+	  Install the pinned Gateway API and Agentgateway CRDs for
+	  the Puu K3s add-ons.
