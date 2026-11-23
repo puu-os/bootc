@@ -1,0 +1,22 @@
+apiVersion: kubeai.org/v1
+kind: Model
+metadata:
+  name: ternary-bonsai-2-27b
+  namespace: oksa
+spec:
+  url: hf://fraserprice/Ternary-Bonsai-2-27B-vllm
+  engine: VLLM
+  features: [TextGeneration]
+  resourceProfile: nvidia-gpu-amd64:1
+  image: docker.io/fraserpricee/bonsai-vllm@sha256:a40d14f5eb218d80984d5009a61262668f9665f2f2946b84bd3c0102f1fc85e9
+  minReplicas: 0
+  maxReplicas: 1
+  targetRequests: 1
+  scaleDownDelaySeconds: 300
+  args:
+    - --revision=1e1d7c0f5cb02b71d81b0574c54ddd1dc9088495
+    - --language-model-only
+    - --kv-cache-dtype=fp8
+    - --reasoning-parser=qwen3
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_coder

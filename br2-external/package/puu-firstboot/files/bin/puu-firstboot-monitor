@@ -14,21 +14,19 @@ import subprocess
 import sys
 import time
 
-for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[3] / "oksa" / "files" / "bin"):
+for _candidate in (Path("/usr/libexec/puu"), Path(__file__).resolve().parents[5] / "oksa" / "bin"):
     if _candidate.is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
 import puu_firstboot_state as fs
-import oksa_calibration_state as cs
-import oksa_model_serving as ms
+import oksa_cluster as cluster
 
-NAMESPACE = "oksa"
+NAMESPACE = cluster.OKSA_NAMESPACE
 STEP_LABELS = (
     ("identity", "User account"),
     ("services", "System services"),
     ("addons", "Base components"),
     ("downloads", "System downloads"),
-    ("calibration", "AI capacity calibration"),
     ("model", "AI model runtime"),
     ("gateway", "API gateway"),
     ("webui", "Desktop services"),
@@ -355,20 +353,24 @@ def chat_valid(response, served_model):
     return False
 
 
-def model_mapping(response, model, served_model):
+def listed_models(response):
     if not isinstance(response, dict) or not isinstance(response.get("data"), list):
-        return False
-    if model is None:
-        return response["data"] == []
-    if len(response["data"]) != 1 or not isinstance(response["data"][0], dict):
-        return False
-    mapping = response["data"][0]
-    params = mapping.get("litellm_params")
-    return (
-        mapping.get("model_name") == served_model and isinstance(params, dict)
-        and params.get("model") == "openai/" + served_model
-        and params.get("api_base") == f"http://puu-vllm-{ms.model_id(model)}.{NAMESPACE}.svc.cluster.local:8000/v1"
-    )
+        raise ValueError("Invalid model list")
+    return {entry["id"] for entry in response["data"] if isinstance(entry, dict) and isinstance(entry.get("id"), str)}
+
+
+def routed_models(response):
+    if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+        raise ValueError("Invalid LiteLLM model mappings")
+    names = set()
+    for mapping in response["data"]:
+        if not isinstance(mapping, dict):
+            continue
+        name, params = mapping.get("model_name"), mapping.get("litellm_params")
+        if (isinstance(name, str) and isinstance(params, dict)
+                and params.get("model") == "openai/" + name and params.get("api_base") == cluster.KUBEAI_API):
+            names.add(name)
+    return names
 
 
 def unit_checks(progress):
@@ -384,33 +386,6 @@ def unit_checks(progress):
         raise Pending("addons", "Waiting for the Kubernetes API to be ready.")
     if not fs.unit_completed(states["puu-k3s-addons.service"]):
         raise Pending("addons", "Installing cluster add-ons and service credentials.", states["puu-k3s-addons.service"].get("ActiveState") == "failed")
-    preseed = states["puu-vllm-preseed.service"]
-    if preseed.get("ActiveState") == "activating":
-        progress.details.append("Catalog model downloads are in progress; existing download files are reused.")
-    elif preseed.get("ActiveState") == "failed":
-        progress.details.append("Catalog downloads need attention; checking network connection.")
-    planner = states["puu-vllm-planner.service"]
-    if not (
-        planner.get("LoadState") == "loaded"
-        and (planner.get("ActiveState"), planner.get("SubState")) in (("inactive", "dead"), ("active", "exited"))
-        and planner.get("Result") == "success"
-        and planner.get("ExecMainCode") == "1" and planner.get("ExecMainStatus") == "0"
-        and planner.get("ExecMainStartTimestampMonotonic", "0").isdigit()
-        and int(planner["ExecMainStartTimestampMonotonic"]) > 0
-    ):
-        message = "Preparing model workloads and measured AI capacity calibration."
-        failed = planner.get("ActiveState") == "failed"
-        try:
-            status = cs.read_record(cs.STATUS_PATH)
-            if status.get("boot_id") == fs.boot_id() and (status.get("model") or status.get("state") == "error"):
-                message = clean(status.get("message", message), 512)
-                if status.get("model"):
-                    message = clean(clean(status["model"]) + ": " + message, 512)
-                failed = failed or status.get("state") == "error"
-        except FileNotFoundError:
-            pass
-        raise Pending("calibration", message, failed)
-    return states
 
 
 def referenced_configmaps(deployments):
@@ -434,68 +409,29 @@ def referenced_configmaps(deployments):
     return names
 
 
+def ready_models(models, resources):
+    active_models = {}
+    model_pods = []
+    for model in sorted(models, key=lambda model: model["metadata"]["name"]):
+        spec = model["spec"]
+        desired = max(spec.get("minReplicas", 0), spec.get("replicas", 0))
+        if desired == 0 or model["metadata"].get("deletionTimestamp"):
+            continue
+        name = model["metadata"]["name"]
+        uid, _ = identity(model)
+        ready = [pod for pod in resources if pod["kind"] == "Pod" and owns(pod, "Model", uid)
+                 and not pod["metadata"].get("deletionTimestamp") and any(
+                     c.get("type") == "Ready" and c.get("status") == "True"
+                     for c in pod.get("status", {}).get("conditions", []))]
+        if model.get("status", {}).get("replicas", {}).get("ready", 0) < desired or len(ready) < desired:
+            raise Pending("model", f"Downloading or loading {clean(name)}…")
+        model_pods.extend(ready)
+        active_models[name] = spec["features"]
+    return active_models, model_pods
+
+
 def snapshot(progress):
     unit_checks(progress)
-    if not (ms.STATE_DIR / "models.list").is_file():
-        raise Pending("downloads", "Waiting for model discovery to complete.")
-    state = ms.WorkloadState.load(capture_capability_errors=True, check_model_paths=False)
-    selected_file, disabled_file = ms.control_files()
-    active_file = Path(os.environ.get("PUU_VLLM_ACTIVE_MODEL_FILE", str(ms.STATE_DIR / "active-model")))
-    selected = os.environ.get("PUU_VLLM_SELECTED_MODEL", "") or (selected_file.read_text().strip() if selected_file.exists() else "")
-    active = active_file.read_text().strip() if active_file.exists() else ""
-    disabled = disabled_file.exists()
-    try:
-        selected = state.resolve_model_name(selected) if selected else ""
-        active = state.resolve_model_name(active) if active else ""
-    except ms.InvalidModelSelection as error:
-        raise Pending("model", "Selected or active model was not discovered: " + clean(error), True) from error
-    model = selected or active or None
-    if model is None and state.catalogue:
-        try:
-            status = cs.read_record(cs.STATUS_PATH)
-            if status.get("boot_id") == fs.boot_id() and status.get("state") == "complete" and status.get("model"):
-                candidate = state.resolve_model_name(status["model"])
-                result = cs.applied_result(candidate)
-                if result["limits"] == cs.ZERO_LIMITS and result["fingerprint"] == status.get("fingerprint"):
-                    model = candidate
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError) as error:
-            raise Pending("calibration", "No current calibrated model is available: " + clean(error), True) from error
-    served_model = None
-    calibration = None
-    zero_capacity = False
-    if model is None:
-        if not disabled and state.catalogue:
-            if state.snapshot is None:
-                raise Pending("calibration", "Model metadata or capacity is unavailable.", True)
-            if any(entry.spec.autostart for entry in state.snapshot.models):
-                raise Pending("model", "Waiting for the planner to activate a discovered model.")
-        reason = "no model enabled." if state.catalogue else "no models discovered."
-        progress.publish("calibration", "Inference not configured: " + reason, "done")
-    else:
-        if state.snapshot is None:
-            raise Pending("calibration", "Model metadata or capacity is unavailable.", True)
-        matches = [entry for entry in state.snapshot.models if entry.spec.name == model]
-        public_names = [public for internal, public in state.catalogue if internal == model]
-        if len(matches) != 1 or len(public_names) != 1:
-            raise Pending("model", "Selected or active model metadata is missing or ambiguous.", True)
-        served_model = public_names[0]
-        if matches[0].calibration.pending:
-            raise Pending("calibration", "Waiting for calibration of " + clean(model) + ": " + clean(matches[0].calibration.error), True)
-        try:
-            calibration = cs.applied_result(model)
-        except (OSError, ValueError) as error:
-            raise Pending("calibration", "Calibration is missing or failed for " + clean(model) + ".", True) from error
-        zero_capacity = calibration["limits"] == cs.ZERO_LIMITS
-        if (zero_capacity and active) or (not zero_capacity and (disabled or active != model)):
-            raise Pending("model", "Waiting for the planner to reconcile the configured model.")
-        limits = calibration["limits"]
-        message = (f"{clean(model)}: measured {limits['max_model_len']} context tokens and {limits['max_num_seqs']} simultaneous requests."
-                   if not zero_capacity else f"{clean(model)}: calibration complete; no local AI capacity.")
-        progress.publish("calibration", message, "done")
-    model_service = f"puu-vllm-{ms.model_id(model)}" if model is not None else None
-    inference = model is not None and not zero_capacity
     progress.publish("addons", "Configuring base components.")
     jobs = items(kube_json("get", "jobs,pods", "-n", "kube-system"))
     progress.details.extend(pod_details(jobs))
@@ -508,56 +444,33 @@ def snapshot(progress):
     resources = items(kube_json("get", "deployments,replicasets,pods,services,endpointslices,gateways,httproutes,configmaps", "-n", NAMESPACE))
     progress.details.extend(pod_details(resources))
     progress.publish("addons", "Base components installed.", "done")
-    nodes = items(kube_json("get", "nodes"))
-    if inference and not any(
-        node.get("metadata", {}).get("labels", {}).get(f"{ms.label_namespace()}/cuda-ready") == "true"
-        and node.get("metadata", {}).get("labels", {}).get(f"{ms.label_namespace()}/cdi-ready") == "true"
-        and any(c.get("type") == "Ready" and c.get("status") == "True" for c in node.get("status", {}).get("conditions", []))
-        and int(node.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu", "0")) > 0
-        for node in nodes
-    ):
-        raise Pending("model", "Supported NVIDIA GPU not detected. Check hardware and driver configuration.", True)
     deployments = {}
     services = {}
-    for name, stage in (([(model_service, "model")] if inference else [])
-                        + [("litellm", "gateway"), ("open-webui", "webui")]):
+    for name, stage, message in (
+        ("kubeai", "model", "Starting KubeAI…"),
+        ("litellm", "gateway", "Starting API gateway…"),
+        ("open-webui", "webui", "Starting desktop services…"),
+    ):
         deployment = resource(resources, "Deployment", name)
         service = resource(resources, "Service", name)
         deployments[name] = deployment
         services[name] = service
         if not deployment_ready(deployment) or not ready_endpoint(resources, service, current_pods(resources, deployment)):
-            if name == model_service:
-                message = "Downloading and loading AI model…"
-            elif name == "litellm":
-                message = "Starting API gateway…"
-            else:
-                message = "Starting desktop services…"
             raise Pending(stage, message)
-    if not inference:
-        for deployment in resources:
-            name = deployment.get("metadata", {}).get("name", "")
-            if deployment.get("kind") != "Deployment" or not name.startswith("puu-vllm-"):
-                continue
-            deployments[name] = deployment
-            if (deployment.get("spec", {}).get("replicas", 1) != 0
-                    or deployment.get("status", {}).get("replicas", 0) != 0
-                    or deployment.get("status", {}).get("observedGeneration") != identity(deployment)[1]):
-                raise Pending("model", "Waiting for inference workloads to stop.")
-        if any(r.get("kind") == "Pod" and r.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name", "").startswith("puu-vllm-")
-               for r in resources):
-            raise Pending("model", "Waiting for inference workloads to stop.")
+    models = items(kube_json("get", "models.kubeai.org", "-n", NAMESPACE))
+    active_models, model_pods = ready_models(models, resources)
     gateway_class = kube_json("get", "gatewayclass", "agentgateway")
     controller = gateway_class.get("spec", {}).get("controllerName")
     if not isinstance(controller, str) or not controller or "envoy" in controller.lower():
         raise Pending("gateway", "Waiting for the configured agentgateway class controller.")
     gateway = resource(resources, "Gateway", "puu-gateway")
     routes = [resource(resources, "HTTPRoute", name) for name in ("puu-gateway", "puu-api")]
-    webui_host, api_host = ms.primary_gateway_hosts()
+    webui_host, api_host = cluster.primary_gateway_hosts()
     if not route_ready(routes[0], webui_host, "open-webui", 8080, controller) or not route_ready(routes[1], api_host, "litellm", 4000, controller):
         raise Pending("gateway", "Waiting for current public routes to be accepted and their backends resolved.")
     address = gateway_address(gateway, resources)
     key, key_identity = master_key()
-    critical = [gateway_class, gateway, *routes, *deployments.values(), *services.values()]
+    critical = [gateway_class, gateway, *routes, *deployments.values(), *services.values(), *models]
     gateway_services = [r for r in resources if r.get("kind") == "Service"
                         and any(ref.get("kind") == "Gateway" and ref.get("uid") == identity(gateway)[0]
                                 for ref in r.get("metadata", {}).get("ownerReferences", []))]
@@ -575,10 +488,10 @@ def snapshot(progress):
         [(r["metadata"]["uid"], r.get("addressType"), r.get("ports"), r.get("endpoints"))
          for r in resources if r.get("kind") == "EndpointSlice"
          and r.get("metadata", {}).get("labels", {}).get("kubernetes.io/service-name") in service_names],
-        address, key_identity, fs.machine_id(), fs.read_enrollment(), calibration,
-        selected, active, disabled, state.catalogue, model, served_model,
+        address, key_identity, fs.machine_id(), fs.read_enrollment(),
+        sorted((p["metadata"]["uid"], p["status"].get("containerStatuses")) for p in model_pods),
     ], sort_keys=True).encode("utf-8")).hexdigest()
-    return address, key, services, fingerprint, calibration, model, served_model
+    return address, key, services, fingerprint, active_models
 
 
 def verify(progress):
@@ -588,36 +501,23 @@ def verify(progress):
     if enrollment is None:
         raise Pending("identity", "User account setup is not complete.", True)
     progress.publish("identity", "User account setup complete.", "done")
-    webui_host, api_host = ms.primary_gateway_hosts()
-    address, key, services, fingerprint, calibration, model, served_model = snapshot(progress)
-    zero_capacity = calibration is not None and calibration["limits"] == cs.ZERO_LIMITS
-    inference = model is not None and not zero_capacity
+    webui_host, api_host = cluster.primary_gateway_hosts()
+    address, key, services, fingerprint, active_models = snapshot(progress)
     progress.publish("downloads", "System downloads complete.", "done")
-    if model is None:
-        progress.publish("model", "Inference not configured: no models discovered.", "done")
-    elif zero_capacity:
-        progress.publish("model", "Local inference disabled: calibrated limits are zero.", "done")
-    else:
-        progress.publish("model", "Verifying AI runtime health.")
-        model_address = service_address(services[f"puu-vllm-{ms.model_id(model)}"], 8000)
-        http_request(model_address, 8000, "/health")
-        progress.publish("model", "Verifying AI model availability.")
-        models = http_request(model_address, 8000, "/v1/models")
-        if not isinstance(models, dict) or not isinstance(models.get("data"), list) or not any(
-            isinstance(entry, dict) and entry.get("id") == served_model for entry in models["data"]
-        ):
-            raise Pending("model", "AI runtime is initializing.")
-        progress.publish("model", "AI model runtime is ready.", "done")
+    progress.publish("model", "Checking KubeAI model availability.")
+    kubeai = service_address(services["kubeai"], 80)
+    if active_models.keys() - listed_models(http_request(kubeai, 80, "/openai/v1/models")):
+        raise Pending("model", "Waiting for KubeAI to publish active models.")
+    message = "AI model runtimes are ready." if active_models else "KubeAI is ready; no active models to verify."
+    progress.publish("model", message, "done")
     progress.publish("gateway", "Checking API gateway configuration.")
-    mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
-    if not model_mapping(mapping, model if inference else None, served_model):
-        raise Pending("gateway", "Waiting for API gateway configuration.", True)
+    litellm = service_address(services["litellm"], 4000)
+    if active_models:
+        mapping = http_request(litellm, 4000, "/model/info", key=key)
+        if active_models.keys() - routed_models(mapping):
+            raise Pending("gateway", "Register active KubeAI models in the LiteLLM Admin UI.", True)
     progress.publish("gateway", "Checking API route.")
-    models = http_request(address, 80, "/v1/models", api_host, key)
-    if not isinstance(models, dict) or not isinstance(models.get("data"), list) or (
-        not any(isinstance(entry, dict) and entry.get("id") == served_model for entry in models["data"])
-        if inference else bool(models["data"])
-    ):
+    if active_models.keys() - listed_models(http_request(address, 80, "/v1/models", api_host, key)):
         raise Pending("gateway", "Waiting for API routes to become active.")
     ui_page = http_request(address, 80, "/ui/", api_host, json_response=False)
     if not isinstance(ui_page, str) or "<html" not in ui_page.lower():
@@ -629,19 +529,19 @@ def verify(progress):
         raise Pending("webui", "Desktop services are starting.")
     progress.publish("webui", "Desktop services are ready.", "done")
     progress.publish("verification", "Verifying system response.")
-    if inference:
+    for name, features in active_models.items():
+        if "TextGeneration" not in features:
+            continue
         response = http_request(address, 80, "/v1/chat/completions", api_host, key, {
-            "model": served_model,
+            "model": name,
             "messages": [{"role": "user", "content": "Say hello."}],
             "max_tokens": 1,
             "stream": False,
         })
-        if not chat_valid(response, served_model):
-            raise Pending("verification", "Waiting for verification response.")
-    progress.publish("verification", "Verifying configuration.")
-    mapping = http_request(service_address(services["litellm"], 4000), 4000, "/model/info", key=key)
-    if not model_mapping(mapping, model if inference else None, served_model):
-        raise Pending("verification", "Verifying configuration changes.")
+        if not chat_valid(response, name):
+            raise Pending("verification", f"Waiting for a response from {clean(name)}.")
+    if active_models and active_models.keys() - routed_models(http_request(litellm, 4000, "/model/info", key=key)):
+        raise Pending("verification", "API gateway configuration changed during verification.")
     progress.publish("verification", "Rechecking configuration.")
     if snapshot(progress)[3] != fingerprint:
         raise Pending("verification", "System state changed during verification. Rechecking.")
@@ -649,19 +549,15 @@ def verify(progress):
     fs.atomic_record(fs.COMPLETION_PATH, {
         "schema": 1,
         "machine_id": fs.machine_id(),
-        "model": model,
-        "served_model": served_model,
-        "verification": ("inference-not-configured" if model is None else
-                         "zero-capacity-calibration" if zero_capacity else "public-chat-completion"),
-        "calibration_fingerprint": calibration["fingerprint"] if calibration is not None else None,
+        "models": sorted(active_models),
+        "verification": "kubeai",
         "completed_at": time.time(),
         "enrolled_at": enrollment["enrolled_at"],
     })
     if not fs.completion_valid():
         raise OSError("Completion could not be validated")
     progress.details = []
-    message = "Initial setup complete. Local AI capacity is zero." if zero_capacity else "Initial setup complete."
-    progress.publish("complete", message, complete=True)
+    progress.publish("complete", "Initial setup complete.", complete=True)
 
 
 def main():

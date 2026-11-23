@@ -15,12 +15,16 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import oksa_model_serving as ms
+import oksa_cluster as cluster
 
 
-NVIDIA_MANIFESTS = ("30-nvidia-cdi-runtime.yaml", "32-nvidia-device-plugin.yaml")
+NVIDIA_MANIFESTS = (
+    "30-nvidia-cdi-runtime.yaml",
+    "32-nvidia-device-plugin.yaml",
+    "34-kubeai-nvidia-policy.yaml",
+)
 
-OKSA_NAMESPACE = "oksa"
+OKSA_NAMESPACE = cluster.OKSA_NAMESPACE
 LITELLM_SERVICE = "litellm"
 LITELLM_PORT = 4000
 LITELLM_TIMEOUT_SEC = 900
@@ -50,13 +54,16 @@ OPENWEBUI_KEY_MANIFEST = "44-litellm-openwebui-key.yaml"
 def apply_crds(crd_src: Path) -> None:
     if not crd_src.is_dir():
         return
-    ms.run_kubectl("apply", "--server-side", "--force-conflicts", "-f", str(crd_src))
-    ms.run_kubectl("wait", "--for=condition=Established", "--timeout=120s", "customresourcedefinition", "--all")
+    cluster.run_kubectl("apply", "--server-side", "--force-conflicts", "-f", str(crd_src))
+    cluster.run_kubectl("wait", "--for=condition=Established", "--timeout=120s", "customresourcedefinition", "--all")
 
 
 def copy_manifests(manifest_src: Path, manifest_dst: Path) -> None:
     manifest_dst.mkdir(parents=True, exist_ok=True, mode=0o700)
-    has_nvidia = ms.has_nvidia_hardware()
+    hardware = subprocess.run([Path(__file__).with_name("puu-has-nvidia-hardware")], check=False)
+    if hardware.returncode not in (0, 1):
+        hardware.check_returncode()
+    has_nvidia = hardware.returncode == 0
     if not has_nvidia:
         for name in NVIDIA_MANIFESTS:
             (manifest_dst / name).unlink(missing_ok=True)
@@ -67,7 +74,7 @@ def copy_manifests(manifest_src: Path, manifest_dst: Path) -> None:
     for manifest in sorted(manifest_src.glob("*.yaml")):
         if manifest.name in NVIDIA_MANIFESTS and not has_nvidia:
             continue
-        ms.atomic_write_text(manifest_dst / manifest.name, ms.render_manifest(manifest.read_text()), 0o644)
+        cluster.atomic_write_text(manifest_dst / manifest.name, manifest.read_text(encoding="utf-8"), 0o644)
 
 
 def write_secret(manifest_dst: Path, filename: str, name: str, data: dict[str, str]) -> None:
@@ -84,7 +91,7 @@ def write_secret(manifest_dst: Path, filename: str, name: str, data: dict[str, s
         "stringData:",
     ]
     lines += [f"  {key}: '{value}'" for key, value in data.items()]
-    ms.atomic_write_text(manifest_dst / filename, "\n".join(lines) + "\n", 0o600)
+    cluster.atomic_write_text(manifest_dst / filename, "\n".join(lines) + "\n", 0o600)
 
 
 def secret_value(path: Path, key: str) -> str | None:
@@ -102,7 +109,7 @@ def ensure_webui_secret(manifest_dst: Path) -> None:
     if secret_path.exists():
         return
     secret_key = secrets.token_hex(32)
-    ms.atomic_write_text(
+    cluster.atomic_write_text(
         secret_path,
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: oksa\n"
         "---\napiVersion: v1\nkind: Secret\nmetadata:\n"
@@ -118,10 +125,10 @@ def service_dns(name: str) -> str:
 
 
 def node_internal_ip() -> str:
-    node = ms.resolve_k3s_node_name()
-    if not ms.wait_for_node(node):
+    node = cluster.resolve_k3s_node_name()
+    if not cluster.wait_for_node(node):
         sys.exit(f"node {node} did not register")
-    output = ms.run_kubectl(
+    output = cluster.run_kubectl(
         "get", "node", node, "-o", 'jsonpath={.status.addresses[?(@.type=="InternalIP")].address}'
     ).stdout
     addresses = [ipaddress.ip_address(value) for value in output.split()]
@@ -142,7 +149,7 @@ def read_litellm_db_password() -> str:
 
 def ensure_postgresql_endpointslice(manifest_dst: Path) -> None:
     address = node_internal_ip()
-    ms.atomic_write_text(
+    cluster.atomic_write_text(
         manifest_dst / POSTGRESQL_MANIFEST,
         f"""apiVersion: v1
 kind: Service
@@ -188,12 +195,12 @@ def ensure_api_route(manifest_dst: Path) -> None:
         ]
     if not any(line.split()[:1] == ["127.0.0.1"] for line in existing if not line.lstrip().startswith("#")):
         existing.insert(0, "127.0.0.1 localhost localhost.localdomain")
-    ms.atomic_write_text(HOSTS_FILE, "\n".join(existing) + "\n", 0o644)
+    cluster.atomic_write_text(HOSTS_FILE, "\n".join(existing) + "\n", 0o644)
 
-    host_fqdns = ms.discover_host_fqdns()
+    host_fqdns = cluster.discover_host_fqdns()
     api_hostnames = [f"api.{fqdn}" for fqdn in host_fqdns]
     host_lines = "\n".join(f"    - {host}" for host in api_hostnames)
-    ms.atomic_write_text(
+    cluster.atomic_write_text(
         manifest_dst / API_ROUTE_MANIFEST,
         f"""apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -218,9 +225,9 @@ spec:
     )
 
     existing.append(f"{address} {' '.join(host_fqdns + api_hostnames)} # puu-api")
-    ms.atomic_write_text(HOSTS_FILE, "\n".join(existing) + "\n", 0o644)
+    cluster.atomic_write_text(HOSTS_FILE, "\n".join(existing) + "\n", 0o644)
 
-    avahi_api = f"api.{ms.avahi_host_fqdn()}"
+    avahi_api = f"api.{cluster.avahi_host_fqdn()}"
     subprocess.run(["/usr/bin/systemctl", "stop", AVAHI_API_UNIT], capture_output=True, check=False)
     subprocess.run(
         [
@@ -239,7 +246,6 @@ spec:
         capture_output=True,
         check=False,
     )
-
 
 def ensure_litellm_db(manifest_dst: Path) -> None:
     write_secret(
@@ -278,7 +284,7 @@ def ensure_litellm_auth(manifest_dst: Path) -> str:
     salt_key = secret_value(manifest_dst / MASTER_KEY_MANIFEST, "saltkey") or secrets.token_urlsafe(32)
     checksum = hashlib.sha256(json.dumps([management_key, salt_key]).encode()).hexdigest()
     write_secret(manifest_dst, MASTER_KEY_MANIFEST, MASTER_KEY_SECRET_NAME, {"masterkey": management_key, "saltkey": salt_key})
-    ms.atomic_write_text(
+    cluster.atomic_write_text(
         auth_manifest,
         f"""apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
@@ -305,13 +311,13 @@ spec:
 """,
         0o600,
     )
-    ms.run_kubectl("apply", "-f", str(manifest_dst / MASTER_KEY_MANIFEST))
-    ms.run_kubectl("apply", "-f", str(auth_manifest))
+    cluster.run_kubectl("apply", "-f", str(manifest_dst / MASTER_KEY_MANIFEST))
+    cluster.run_kubectl("apply", "-f", str(auth_manifest))
     return management_key
 
 
 def litellm_address() -> str | None:
-    proc = ms.run_kubectl(
+    proc = cluster.run_kubectl(
         "get", "service", LITELLM_SERVICE, "--namespace", OKSA_NAMESPACE, "-o", "jsonpath={.spec.clusterIP}", check=False
     )
     if proc.returncode != 0:
@@ -391,11 +397,11 @@ def ensure_openwebui_key(manifest_dst: Path, master_key: str) -> None:
         OPENWEBUI_KEY_SECRET_NAME,
         {"api_key": mint_openwebui_key(master_key)},
     )
-    ms.run_kubectl("apply", "-f", str(key_manifest))
+    cluster.run_kubectl("apply", "-f", str(key_manifest))
     if stored_key is None:
         return
-    ms.run_kubectl("rollout", "restart", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE)
-    ms.run_kubectl("rollout", "status", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE, "--timeout=300s")
+    cluster.run_kubectl("rollout", "restart", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE)
+    cluster.run_kubectl("rollout", "status", f"deployment/{OPENWEBUI_DEPLOYMENT}", "--namespace", OKSA_NAMESPACE, "--timeout=300s")
 
 
 def main() -> None:
@@ -403,13 +409,13 @@ def main() -> None:
     manifest_dst = Path("/var/lib/rancher/k3s/server/manifests")
     crd_src = Path("/usr/share/puu/k3s/crds")
 
-    if not ms.wait_for_kubectl("get", "--raw=/readyz"):
+    if not cluster.wait_for_kubectl("get", "--raw=/readyz"):
         sys.exit("kubernetes API did not become ready")
     try:
         apply_crds(crd_src)
     except subprocess.CalledProcessError as exc:
         sys.exit(f"{' '.join(exc.cmd[2:])}: {exc.stderr.strip()}")
-    ms.run_kubectl("create", "namespace", OKSA_NAMESPACE, check=False)
+    cluster.run_kubectl("create", "namespace", OKSA_NAMESPACE, check=False)
     manifest_dst.mkdir(parents=True, exist_ok=True, mode=0o700)
     master_key = ensure_litellm_auth(manifest_dst)
     copy_manifests(manifest_src, manifest_dst)

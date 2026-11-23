@@ -47,7 +47,7 @@ mkdir -p \
   "${stage}/usr/libexec/puu" \
   "${stage}/usr/share/puu/k3s/crds" \
   "${stage}/usr/share/puu/k3s/manifests" \
-  "${stage}/usr/share/puu/vllm/catalog.d" \
+  "${stage}/usr/share/puu/vllm/models" \
   "${stage}/usr/share/puu/vllm/runtime"
 
 while IFS=$'\t' read -r dest_name src_name sha256 url; do
@@ -75,19 +75,14 @@ install -D -m 0644 "${oksa_src}/oksa.conf" \
 for manifest in "${oksa_src}"/manifests/*.yaml; do
   install -D -m 0644 "${manifest}" "${stage}/usr/share/puu/k3s/manifests/${manifest##*/}"
 done
-for catalog in "${oksa_src}"/vllm/catalog.d/*.env; do
-  install -D -m 0644 "${catalog}" "${stage}/usr/share/puu/vllm/catalog.d/${catalog##*/}"
+for model in "${oksa_src}"/vllm/models/*/*.yaml; do
+  install -D -m 0644 "${model}" "${stage}/usr/share/puu/vllm/models/${model#"${oksa_src}/vllm/models/"}"
 done
 for runtime in "${oksa_src}"/vllm/runtime/*; do
   install -D -m 0644 "${runtime}" "${stage}/usr/share/puu/vllm/runtime/${runtime##*/}"
 done
 for unit in \
   puu-k3s-addons.service \
-  puu-model-serving-labeler.service \
-  puu-model-serving-labeler.timer \
-  puu-vllm-planner.service \
-  puu-vllm-planner.timer \
-  puu-vllm-preseed.service \
   puu-postgresql.service; do
   install -D -m 0644 "${oksa_src}/systemd/${unit}" \
     "${stage}/usr/lib/systemd/system/${unit}"

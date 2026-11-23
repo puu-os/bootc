@@ -1,0 +1,99 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: puu-kubeai-nvidia
+spec:
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods]
+  matchConditions:
+    - name: kubeai-nvidia-model
+      expression: >-
+        request.namespace == 'oksa' &&
+        has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'nvidia-cdi' &&
+        has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(ref,
+          ref.apiVersion == 'kubeai.org/v1' && ref.kind == 'Model' && ref.?controller.orValue(false))
+  variables:
+    - name: bonsaiArm
+      expression: >-
+        object.spec.containers[0].name == 'server' &&
+        object.spec.containers[0].image == 'docker.io/vllm/vllm-openai@sha256:2cc49b81319f7a66a33dd8bd63a7bfddae079122b33ce51989b6828a1f038c37' &&
+        object.metadata.ownerReferences.exists(ref, ref.kind == 'Model' && ref.name == 'ternary-bonsai-2-27b')
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: |
+          Object{spec: Object.spec{
+            volumes: [
+              Object.spec.volumes{name: 'puu-cdi', hostPath: Object.spec.volumes.hostPath{
+                path: '/var/run/cdi', type: 'DirectoryOrCreate'}},
+              Object.spec.volumes{name: 'puu-hf-cache', hostPath: Object.spec.volumes.hostPath{
+                path: '/var/lib/huggingface/hub', type: 'DirectoryOrCreate'}},
+              Object.spec.volumes{name: 'puu-vllm-cache', hostPath: Object.spec.volumes.hostPath{
+                path: '/var/lib/vllm/cache', type: 'DirectoryOrCreate'}}
+            ],
+            containers: [Object.spec.containers{
+              name: 'server',
+              env: [
+                Object.spec.containers.env{name: 'HF_HUB_CACHE', value: '/var/lib/huggingface/hub'},
+                Object.spec.containers.env{name: 'VLLM_CACHE_ROOT', value: '/var/lib/vllm/cache'},
+                Object.spec.containers.env{name: 'NVIDIA_DRIVER_CAPABILITIES', value: 'compute,utility'}
+              ],
+              volumeMounts: [
+                Object.spec.containers.volumeMounts{name: 'puu-hf-cache', mountPath: '/var/lib/huggingface/hub'},
+                Object.spec.containers.volumeMounts{name: 'puu-vllm-cache', mountPath: '/var/lib/vllm/cache'}
+              ]
+            }]
+          }}
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: |
+          variables.bonsaiArm ? Object{spec: Object.spec{
+            volumes: [
+              Object.spec.volumes{name: 'puu-vllm-runtime', hostPath: Object.spec.volumes.hostPath{
+                path: '/usr/share/puu/vllm/runtime', type: 'Directory'}},
+              Object.spec.volumes{name: 'puu-prism-cache', hostPath: Object.spec.volumes.hostPath{
+                path: '/var/lib/vllm/prism-ternary', type: 'DirectoryOrCreate'}}
+            ],
+            containers: [Object.spec.containers{
+              name: 'server',
+              volumeMounts: [
+                Object.spec.containers.volumeMounts{
+                  name: 'puu-vllm-runtime', mountPath: '/usr/share/puu/vllm/runtime', readOnly: true},
+                Object.spec.containers.volumeMounts{
+                  name: 'puu-prism-cache', mountPath: '/var/lib/vllm/prism-ternary'}
+              ]
+            }]
+          }} : Object{}
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: |
+          (has(object.spec.initContainers) ? [] : [
+            JSONPatch{op: 'add', path: '/spec/initContainers', value: []}
+          ]) + [JSONPatch{op: 'add', path: '/spec/initContainers/0', value: Object.spec.initContainers{
+            name: 'wait-for-nvidia-cdi',
+            image: 'docker.io/library/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0',
+            command: ['/bin/sh', '-ec', 'until [ -s /var/run/cdi/nvidia.yaml ]; do sleep 10; done'],
+            env: [Object.spec.initContainers.env{name: 'NVIDIA_VISIBLE_DEVICES', value: 'void'}],
+            securityContext: Object.spec.initContainers.securityContext{
+              allowPrivilegeEscalation: false,
+              capabilities: Object.spec.initContainers.securityContext.capabilities{drop: ['ALL']}},
+            volumeMounts: [Object.spec.initContainers.volumeMounts{
+              name: 'puu-cdi', mountPath: '/var/run/cdi', readOnly: true}]
+          }}] + (variables.bonsaiArm ? [
+            JSONPatch{op: 'replace', path: '/spec/containers/0/command',
+              value: ['/bin/sh', '/usr/share/puu/vllm/runtime/prism-ternary-e5ed2454.sh']},
+            JSONPatch{op: 'remove', path: '/spec/containers/0/securityContext/capabilities/drop'}
+          ] : [])
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: puu-kubeai-nvidia
+spec:
+  policyName: puu-kubeai-nvidia

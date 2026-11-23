@@ -1,0 +1,43 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: kubeai
+  namespace: kube-system
+spec:
+  chart: oci://ghcr.io/kubeai-project/charts/kubeai@sha256:cb150b1259beeb33a2016bb37258e610beea664da7e1e36f0726c3c6238120ca
+  version: 0.25.1
+  targetNamespace: oksa
+  createNamespace: true
+  valuesContent: |-
+    open-webui:
+      enabled: false
+    image:
+      tag: v0.25.1@sha256:30d4a699844fec78690f25490020925e76d345c33fccef8d8d7bd2bffb098e95
+    modelLoading:
+      image: ghcr.io/kubeai-project/kubeai-model-loader@sha256:b81d03482892010c45597477e35b47e4c27cd08efcffad76add664eacd0ea81d
+    modelServiceAccount:
+      automount: false
+    modelRollouts:
+      surge: 0
+    modelServers:
+      VLLM:
+        images:
+          nvidia-gpu: docker.io/vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+    resourceProfiles:
+      nvidia-gpu: &nvidia
+        imageName: nvidia-gpu
+        runtimeClassName: nvidia-cdi
+        requests:
+          cpu: "1"
+          memory: 4Gi
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+      nvidia-gpu-amd64:
+        <<: *nvidia
+        nodeSelector:
+          kubernetes.io/arch: amd64
+      nvidia-gpu-arm64:
+        <<: *nvidia
+        nodeSelector:
+          kubernetes.io/arch: arm64
