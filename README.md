@@ -36,7 +36,7 @@ Puu OS builds on top of the following open source projects:
 
 | Service    | URL                     |
 | ---------- | ------------------------|
-| Oksa       | http://oksa.puu.local   |
+| LiteLLM UI | http://api.puu.local/ui |
 | OpenAI API | http://api.puu.local/v1 |
 | Open WebUI | http://puu.local/       |
 | Kubernetes | https://puu.local:6443  |
@@ -45,7 +45,7 @@ Services URLs are still very much due to constant change.
 
 ## LiteLLM
 
-Store a master key in order to require credentials for every inference request:
+Store a master key in order to require credentials for every inference request and sign in to the LiteLLM UI (`admin`):
 
 ```sh
 sudo systemd-creds encrypt --with-key=host - /etc/credstore.encrypted/litellm-master-key

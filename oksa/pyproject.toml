@@ -6,22 +6,21 @@ build-backend = "hatchling.build"
 name = "oksa"
 version = "1.0"
 requires-python = ">=3.10"
-description = "Puu model-serving administration and service bootstrap"
+description = "Puu model-serving bootstrap"
 license = { file = "LICENSE" }
-dependencies = ["nicegui==3.18.0", "PyGObject"]
+dependencies = []
 
 [tool.hatch.build]
 dev-mode-dirs = ["bin"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/bin", "/dbus", "/manifests", "/systemd", "/vllm", "/oksa.conf", "/LICENSE", "/pyproject.toml"]
+include = ["/bin", "/manifests", "/systemd", "/vllm", "/oksa.conf", "/LICENSE", "/pyproject.toml"]
 exclude = ["__pycache__"]
 
 [tool.hatch.build.targets.wheel]
 bypass-selection = true
 
 [tool.hatch.build.targets.wheel.shared-data]
-"bin/oksa-daemon" = "usr/libexec/puu/oksa-daemon"
 "bin/oksa-install-k3s-addons" = "usr/libexec/puu/oksa-install-k3s-addons"
 "bin/oksa-discover-vllm-models" = "usr/libexec/puu/oksa-discover-vllm-models"
 "bin/oksa-label-model-serving-node" = "usr/libexec/puu/oksa-label-model-serving-node"
@@ -30,28 +29,11 @@ bypass-selection = true
 "bin/oksa-init-litellm-db" = "usr/libexec/puu/oksa-init-litellm-db"
 "bin/oksa-calibrate" = "usr/libexec/puu/oksa-calibrate"
 "bin/oksa-calibration-probe" = "usr/libexec/puu/oksa-calibration-probe"
-"bin/oksa-web" = "usr/libexec/puu/oksa-web"
 "bin/oksa_model_serving.py" = "usr/libexec/puu/oksa_model_serving.py"
 "bin/oksa_workload_evaluation.py" = "usr/libexec/puu/oksa_workload_evaluation.py"
 "bin/oksa_workload_manifest.py" = "usr/libexec/puu/oksa_workload_manifest.py"
 "bin/oksa_model_removal.py" = "usr/libexec/puu/oksa_model_removal.py"
-"bin/oksa_monitoring.py" = "usr/libexec/puu/oksa_monitoring.py"
-"bin/oksa_user_deletion.py" = "usr/libexec/puu/oksa_user_deletion.py"
 "bin/oksa_calibration_state.py" = "usr/libexec/puu/oksa_calibration_state.py"
 "bin/oksa_calibration_policy.py" = "usr/libexec/puu/oksa_calibration_policy.py"
 "bin/oksa_calibration_benchmark.py" = "usr/libexec/puu/oksa_calibration_benchmark.py"
-"bin/oksa_control.py" = "usr/libexec/puu/oksa_control.py"
-"bin/oksa_dbus.py" = "usr/libexec/puu/oksa_dbus.py"
-"bin/oksa_client.py" = "usr/libexec/puu/oksa_client.py"
-"bin/oksa_web_ui.py" = "usr/libexec/puu/oksa_web_ui.py"
-"bin/oksa_web_kit.py" = "usr/libexec/puu/oksa_web_kit.py"
-"bin/oksa_web.css" = "usr/libexec/puu/oksa_web.css"
-"bin/oksa_web_views.py" = "usr/libexec/puu/oksa_web_views.py"
 "bin/oksa_accelerator.py" = "usr/libexec/puu/oksa_accelerator.py"
-
-[tool.hatch.envs.default]
-installer = "uv"
-
-[tool.hatch.envs.default.scripts]
-web = "python bin/oksa-web {args}"
-daemon = "python bin/oksa-daemon {args}"

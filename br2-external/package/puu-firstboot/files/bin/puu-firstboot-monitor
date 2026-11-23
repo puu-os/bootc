@@ -227,13 +227,12 @@ def route_ready(route, hostname, backend, port, controller):
     parents = spec.get("parentRefs", [])
     if not any(parent_matches(parent) for parent in parents):
         return False
-    path = "/v1" if hostname.startswith("api.") else "/"
     rules = spec.get("rules", [])
     if len(rules) != 1 or rules[0].get("filters"):
         return False
     rule = rules[0]
     matches = rule.get("matches", [])
-    if len(matches) != 1 or matches[0].get("path") != {"type": "PathPrefix", "value": path}:
+    if len(matches) != 1 or matches[0].get("path") != {"type": "PathPrefix", "value": "/"}:
         return False
     if set(matches[0]) != {"path"}:
         return False
@@ -289,9 +288,13 @@ def request_deadline(signum, frame):
     raise TimeoutError("HTTP request timed out")
 
 
-def http_request(address, port, path, host=None, key=None, payload=None):
+def http_request(address, port, path, host=None, key=None, payload=None, json_response=True):
     address = ip_literal(address)
-    headers = {"Host": host or ip_authority(address), "Accept": "application/json", "Connection": "close"}
+    headers = {
+        "Host": host or ip_authority(address),
+        "Accept": "application/json" if json_response else "text/html",
+        "Connection": "close",
+    }
     body = None
     if key is not None:
         headers["Authorization"] = "Bearer " + key
@@ -311,6 +314,8 @@ def http_request(address, port, path, host=None, key=None, payload=None):
         data = response.read(fs.MAX_BYTES + 1)
         if len(data) > fs.MAX_BYTES:
             raise ValueError("HTTP response too large")
+        if not json_response:
+            return data.decode("utf-8", errors="replace")
         return fs.decode_json(data) if data.strip() else None
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -515,7 +520,7 @@ def snapshot(progress):
     deployments = {}
     services = {}
     for name, stage in (([(model_service, "model")] if inference else [])
-                        + [("litellm", "gateway"), ("open-webui", "webui"), ("oksa", "webui")]):
+                        + [("litellm", "gateway"), ("open-webui", "webui")]):
         deployment = resource(resources, "Deployment", name)
         service = resource(resources, "Service", name)
         deployments[name] = deployment
@@ -525,8 +530,6 @@ def snapshot(progress):
                 message = "Downloading and loading AI model…"
             elif name == "litellm":
                 message = "Starting API gateway…"
-            elif name == "oksa":
-                message = "Starting OKSA dashboard…"
             else:
                 message = "Starting desktop services…"
             raise Pending(stage, message)
@@ -548,12 +551,10 @@ def snapshot(progress):
     if not isinstance(controller, str) or not controller or "envoy" in controller.lower():
         raise Pending("gateway", "Waiting for the configured agentgateway class controller.")
     gateway = resource(resources, "Gateway", "puu-gateway")
-    routes = [resource(resources, "HTTPRoute", name) for name in ("puu-gateway", "puu-api", "oksa")]
+    routes = [resource(resources, "HTTPRoute", name) for name in ("puu-gateway", "puu-api")]
     webui_host, api_host = ms.primary_gateway_hosts()
     if not route_ready(routes[0], webui_host, "open-webui", 8080, controller) or not route_ready(routes[1], api_host, "litellm", 4000, controller):
         raise Pending("gateway", "Waiting for current public routes to be accepted and their backends resolved.")
-    if not route_ready(routes[2], f"oksa.{webui_host}", "oksa", 8088, controller):
-        raise Pending("webui", "Waiting for the current OKSA dashboard route to be accepted and its backend resolved.")
     address = gateway_address(gateway, resources)
     key, key_identity = master_key()
     critical = [gateway_class, gateway, *routes, *deployments.values(), *services.values()]
@@ -618,15 +619,14 @@ def verify(progress):
         if inference else bool(models["data"])
     ):
         raise Pending("gateway", "Waiting for API routes to become active.")
+    ui_page = http_request(address, 80, "/ui/", api_host, json_response=False)
+    if not isinstance(ui_page, str) or "<html" not in ui_page.lower():
+        raise Pending("gateway", "Waiting for API admin UI route to become active.")
     progress.publish("gateway", "API gateway and routes are ready.", "done")
     progress.publish("webui", "Checking desktop services.")
     health = http_request(address, 80, "/health", webui_host)
     if not isinstance(health, dict) or health.get("status") is not True:
         raise Pending("webui", "Desktop services are starting.")
-    progress.publish("webui", "Checking OKSA dashboard.")
-    health = http_request(address, 80, "/health", f"oksa.{webui_host}")
-    if not isinstance(health, dict) or health.get("status") != "ok":
-        raise Pending("webui", "OKSA dashboard is starting.")
     progress.publish("webui", "Desktop services are ready.", "done")
     progress.publish("verification", "Verifying system response.")
     if inference:
